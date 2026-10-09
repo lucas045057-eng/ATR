@@ -67,7 +67,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="Adaptive Troubleshooting Runtime",
-    version="2.1.0",
+    version="2.2.0",
     docs_url=None,
     redoc_url=None,
     lifespan=lifespan,

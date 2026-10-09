@@ -1,0 +1,26 @@
+{
+  "category": "isolated_actual_final_cleanup",
+  "stopped_only_owned_collector_and_ssh_fixture": true,
+  "removed_volumes": false,
+  "configuration_and_uploads_preserved": true,
+  "health": {
+    "api": 200,
+    "ui": 200
+  },
+  "container_running": {
+    "atr-v22-validate_api_1": true,
+    "atr-v22-validate_web_1": true,
+    "atr-v22-validate_collector_1": false,
+    "atr-v22-ssh-fixture": false,
+    "atr-v22-system-a_mysql_1": true,
+    "atr-v22-system-a_python_api_1": true,
+    "atr-v22-system-a_edge_proxy_1": true,
+    "atr-v22-system-b_postgres_store_1": true,
+    "atr-v22-system-b_catalog_api_1": true,
+    "atr-v22-system-b_ingress_proxy_1": true
+  },
+  "ci": "configuration_checked_locally; not run remotely",
+  "git_baseline_is_ancestor": true,
+  "tracked_original_files_deleted": false,
+  "tracked_private_credentials_or_runtime_data": false
+}

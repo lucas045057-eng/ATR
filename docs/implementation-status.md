@@ -1,3 +1,5 @@
+> 历史 V2.1 文档：以下数量与结论保留原记录。当前 V2.2 的实际结果请见 [验收报告](v2.2-acceptance-report.md)，启动见 [部署](deployment.md)。
+
 # V2.1 实现状态
 
 本版为上游 ATR 的增量实现；原四页、Demo、LangGraph、LiteLLM、SQLite、图谱/Pattern 保留。2026-10-09 本机最终测试 **67 passed，0 failed，0 skipped**；前端构建、Ruff、依赖锁和 Compose 配置检查通过。详情见 [验收报告](acceptance-report.md)。

@@ -178,7 +178,7 @@ function App() {
       <div className="content">
         {error && <div className="alert error"><span>!</span>{error}<button onClick={() => setError('')}>×</button></div>}
         {notice && <div className="alert success"><span>✓</span>{notice}<button onClick={() => setNotice('')}>×</button></div>}
-        {(page==='onboarding'||page==='business'||page==='scope')&&<BusinessPages page={page}/>}
+        {(page==='onboarding'||page==='business'||page==='scope')&&<BusinessPages page={page} onSystemSelected={setSelectedSystem}/>}
 
         {page === 'systems' && <>
           <div className="page-heading"><div><div className="eyebrow">UNDERSTAND BEFORE ACTION</div><h1>系统图谱</h1><p>从代码、部署和运行观察建立带来源的系统认知。</p></div><div className="heading-meta"><span className="sync"><i /> 本地数据已同步</span><button className="btn ghost" onClick={() => refresh().catch(e => setError(e.message))}>↻　刷新视图</button></div></div>

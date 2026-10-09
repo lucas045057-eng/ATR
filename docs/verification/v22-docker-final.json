@@ -1,0 +1,12 @@
+{
+  "category": "isolated_actual_docker_final_v22",
+  "version": "2.2.0",
+  "profiles_before": 1,
+  "profiles_after": 1,
+  "profiles_source_and_index_preserved": true,
+  "api_health": 200,
+  "ui_proxy_health": 200,
+  "images_rebuilt_from_final_source": true,
+  "model": "disabled",
+  "volumes_removed": false
+}

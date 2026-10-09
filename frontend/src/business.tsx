@@ -22,8 +22,10 @@ const mark = (s: string) => <span className={`badge ${s}`}>{label(s)}</span>;
 
 export function BusinessPages({
   page,
+  onSystemSelected,
 }: {
   page: "onboarding" | "business" | "scope";
+  onSystemSelected: (systemId: string) => void;
 }) {
   const [businesses, setBusinesses] = useState<Row[]>([]);
   const [selected, setSelected] = useState(
@@ -47,6 +49,10 @@ export function BusinessPages({
   const [chosenTarget, setChosenTarget] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
   const base = `/businesses/${selected}`;
+
+  useEffect(() => {
+    if (profile?.system_id) onSystemSelected(profile.system_id);
+  }, [profile?.system_id, onSystemSelected]);
 
   const reload = useCallback(async () => {
     const [bs, cap] = await Promise.all([

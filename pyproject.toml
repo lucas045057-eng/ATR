@@ -1,6 +1,6 @@
 [project]
 name = "adaptive-troubleshooting-runtime"
-version = "2.1.0"
+version = "2.2.0"
 description = "A local system-understanding-first SRE diagnostic runtime."
 requires-python = ">=3.11"
 dependencies = [

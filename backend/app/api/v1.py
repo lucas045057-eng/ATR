@@ -96,7 +96,7 @@ def _model_configuration(settings: Any) -> dict[str, Any]:
         "provider": settings.model_provider,
         "model": settings.model_name if configured else "offline",
         "endpoint_digest": hashlib.sha256(endpoint.encode()).hexdigest() if endpoint else None,
-        "prompt_version": "planner-review-v2",
+        "prompt_version": "planner-review-v2.2",
         "timeout_seconds": settings.model_timeout_seconds if configured else None,
     }
 

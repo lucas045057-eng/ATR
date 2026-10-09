@@ -83,12 +83,15 @@ def live_server(tmp_path):
 
 def test_browser_complete_onboarding(live_server):
     base, directory = live_server
+    token = os.environ.get("ATR_E2E_OPERATOR_TOKEN") if os.environ.get("ATR_E2E_BASE_URL") else "browser-test-operator-" + "x" * 40
+    existing = httpx.post(base + "/api/v1/systems/onboard", headers={"Authorization": "Bearer " + token},
+                          json={"source_key": "system-a", "display_name": "Existing isolated system"})
+    assert existing.status_code == 200, existing.text
     source = directory / "catalog.zip"
     source.write_bytes(archive(SAMPLE))
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, channel=os.environ.get("ATR_BROWSER_CHANNEL") or None)
         context = browser.new_context(viewport={"width": 1440, "height": 1000})
-        token = os.environ.get("ATR_E2E_OPERATOR_TOKEN") if os.environ.get("ATR_E2E_BASE_URL") else "browser-test-operator-" + "x" * 40
         context.add_init_script("sessionStorage.setItem('atr_operator_token'," + json.dumps(token) + ")")
         page = context.new_page()
         errors = []
@@ -125,6 +128,7 @@ def test_browser_complete_onboarding(live_server):
         expect(page.get_by_text("已确认", exact=True)).to_be_visible()
         page.get_by_role("button", name="故障调查", exact=False).click()
         expect(page.get_by_label("目标系统")).to_contain_text("浏览器 Catalog")
+        expect(page.get_by_label("目标系统").locator("option:checked")).to_have_text("浏览器 Catalog")
         page.get_by_label("故障现象", exact=True).fill("catalog-api startup failure")
         page.get_by_role("button", name="创建故障事件", exact=False).click()
         expect(page.get_by_role("button", name="开始只读调查", exact=False)).to_be_visible()
