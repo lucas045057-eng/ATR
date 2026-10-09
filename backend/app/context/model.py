@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 from app.context.budget import ContextBudgetManager
-from app.tools.redaction import redact_text
+from app.tools.registry import sanitize_payload
 
 
 class ModelUnavailable(ValueError):
@@ -35,7 +35,8 @@ def call_json(database, settings, budget_id, system_prompt, context):
         raise ModelUnavailable("模型未声明 JSON 结构化输出支持")
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": redact_text(json.dumps(context, ensure_ascii=False))},
+        {"role": "user", "content": json.dumps(sanitize_payload(context), ensure_ascii=False,
+                                               separators=(",", ":"))},
     ]
     manager = ContextBudgetManager(database, settings)
     reservation = manager.reserve(budget_id, messages, settings.model_max_output_tokens)
@@ -58,9 +59,10 @@ def call_json(database, settings, budget_id, system_prompt, context):
         content = response.choices[0].message.content or "{}"
         if len(content.encode()) > settings.model_max_output_tokens * 16:
             raise ValueError("Model output exceeded size limit")
-        result = json.loads(redact_text(content))
+        result = json.loads(content)
         if not isinstance(result, dict):
             raise ValueError("Model must return an object")
+        result = sanitize_payload(result)
     except Exception:
         manager.settle(budget_id, reservation, response, "failed")
         raise

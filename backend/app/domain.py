@@ -20,7 +20,7 @@ class IncidentCreate(StrictModel):
     system_id: str = Field(min_length=1, max_length=80)
     symptom: str = Field(min_length=3, max_length=500)
     window_start: str | None = None
-    mode: Literal["normal", "graph_only", "graph_pattern", "alert_only"] = "normal"
+    mode: Literal["normal", "graph_only", "graph_pattern", "graph_adaptive", "alert_only"] = "normal"
 
     @field_validator("window_start")
     @classmethod

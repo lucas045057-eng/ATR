@@ -61,7 +61,19 @@ class BusinessToolRegistry:
                     ToolRequest(tool_id=tool, arguments=action["arguments"]),
                 )
                 if "payload" not in observation:
-                    raise PermissionError(observation.get("error", "runtime_read_failed"))
+                    status = observation.get("status", "failed")
+                    if status not in {"denied", "timed_out", "failed"}:
+                        status = "failed"
+                    error = observation.get("error", "runtime_read_failed")
+                    with self.db.transaction() as tx:
+                        tx.execute(
+                            "UPDATE tool_calls SET status=?,ended_at=?,error_code=? WHERE id=?",
+                            (status, now(), error, call_id),
+                        )
+                    return {
+                        "call_id": call_id, "tool_id": tool, "status": status,
+                        "error": error, "observation_id": observation["observation_id"],
+                    }
                 payload = {
                     **observation["payload"],
                     "observation_id": observation["observation_id"],
@@ -110,4 +122,6 @@ class BusinessToolRegistry:
                         call_id,
                     ),
                 )
-            return {"call_id": call_id, "tool_id": tool, "error": type(exc).__name__}
+            return {"call_id": call_id, "tool_id": tool, "error": type(exc).__name__,
+                    "status": "timed_out" if isinstance(exc, TimeoutError) else "denied"
+                    if isinstance(exc, PermissionError) else "failed"}

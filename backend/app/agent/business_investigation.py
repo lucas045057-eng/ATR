@@ -3,6 +3,12 @@ from __future__ import annotations
 import json
 import re
 
+from app.agent.adaptive import (
+    AdaptiveInvestigationPlanner,
+    action_id,
+    current_graph,
+    public_action,
+)
 from app.agent.workflow import build_workflow
 from app.business.service import BusinessService
 from app.common import dumps, now, uid
@@ -48,6 +54,9 @@ def investigate_business(database, settings, incident_id, business_id, actor, jo
                 (business_id,),
             )
         ]
+        targets = {r["id"]: json.loads(r["config_json"]) for r in conn.execute(
+            "SELECT id,config_json FROM runtime_targets WHERE business_id=?", (business_id,)
+        )}
     finally:
         conn.close()
     bindings = [b for b in bindings if binding_is_current(b)]
@@ -93,12 +102,14 @@ def investigate_business(database, settings, incident_id, business_id, actor, jo
     manager = ContextBudgetManager(database, settings)
     budget_id = manager.create("investigation", business_id, run_id)
     registry = BusinessToolRegistry(database, settings, business_id, run_id, sid, budget_id)
-    graph = {"snapshot_id": sid, "nodes": nodes, "edges": edges, "open_conflicts": conflicts}
+    graph = current_graph({"snapshot_id": sid, "nodes": nodes, "edges": edges, "open_conflicts": conflicts}, bindings)
+    nodes, edges = graph["nodes"], graph["edges"]
+    adaptive = symptom.get("mode", "normal") in {"normal", "graph_adaptive"}
     service_nodes = {
         n["name"]: n for n in nodes if n["kind"] == "service" and n["role"] != "runtime"
     }
     evidence, code_context, history, iterations, matches = [], [], [], [], []
-    reason = None
+    reason, stop_reason = None, None
     if profile["review_status"] != "approved":
         reason = "业务画像尚未人工审核，未执行深入调查"
     elif not bindings:
@@ -119,6 +130,12 @@ def investigate_business(database, settings, incident_id, business_id, actor, jo
     root = usable[0] if usable else None
     if not root and not reason:
         reason = "当前映射只有普通进程，没有已授权的服务状态/日志入口"
+    root_id = service_nodes[root["service"]]["id"] if root else None
+    planner = AdaptiveInvestigationPlanner(graph, bindings, targets, symptom["text"], root_id, settings)
+    if reason:
+        stop_reason = "permission_blocked"
+    elif conflicts:
+        reason, stop_reason = "当前静态配置与观测存在待审核冲突", "evidence_conflict"
     selected_names = {root["service"]} if root else set()
     if root:
         root_id = service_nodes[root["service"]]["id"]
@@ -158,7 +175,7 @@ def investigate_business(database, settings, incident_id, business_id, actor, jo
                 role_ids,
             )
     suggested = next((m for m in matches if m["decision"] == "suggested"), None)
-    if suggested:
+    if suggested and not adaptive:
         suggested_roles = set(suggested["pattern"]["roles"])
         narrowed = [b for b in planned if service_nodes[b["service"]]["role"] in suggested_roles]
         planned = narrowed or planned
@@ -174,9 +191,31 @@ def investigate_business(database, settings, incident_id, business_id, actor, jo
             else {"container_id": binding["runtime_id"]},
             "service": binding["service"],
             "role": service_nodes[binding["service"]]["role"],
+            "binding_id": binding["id"],
         }
 
     def execute(action):
+        nonlocal reason, stop_reason
+        budget = manager.get(budget_id)
+        if budget["tool_calls"] >= budget["limits"]["max_tools"]:
+            reason, stop_reason = "工具调用预算已耗尽", "tool_budget_exhausted"
+            return {"call_id": None, "error": "BudgetExceeded"}
+        action["action_id"] = action_id(action)
+        if action.get("binding_id"):
+            with database.transaction() as tx:
+                binding = tx.execute("SELECT * FROM service_bindings WHERE id=?", (action["binding_id"],)).fetchone()
+            if not binding or not binding_is_current(binding):
+                manager.consume_tool(budget_id)
+                call_id = uid()
+                with database.transaction() as tx:
+                    tx.execute(
+                        "INSERT INTO tool_calls(id,run_id,snapshot_id,purpose,tool_id,adapter_version,args_redacted_json,risk,policy_version,status,request_id,started_at,ended_at,error_code) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (call_id, run_id, sid, "diagnosis", action["tool_id"], "adaptive-v2.2", dumps(action["arguments"]), "LOW", "current-binding-v2.2", "denied", uid(), now(), now(), "binding_not_current"),
+                    )
+                    emit(tx, incident["system_id"], run_id, "tool", call_id, "read_tool_denied", {"reason": "binding_not_current"}, actor)
+                reason, stop_reason = "服务绑定已经过期或撤销，需要重新确认范围", "permission_blocked"
+                history.append({**public_action(action), "target_id": action.get("target_id"), "call_id": call_id, "status": "denied", "new_information": False})
+                return {"call_id": call_id, "error": "PermissionError"}
         with database.transaction() as tx:
             emit(
                 tx,
@@ -193,14 +232,24 @@ def investigate_business(database, settings, incident_id, business_id, actor, jo
                 actor,
             )
         result = registry.execute(action)
+        result.update(target_id=action.get("target_id"), action_id=action["action_id"], arguments=action["arguments"])
         history.append(
             {
+                **public_action(action),
+                "target_id": action.get("target_id"),
                 "tool_id": action["tool_id"],
                 "target_node_id": action["target_node_id"],
                 "call_id": result["call_id"],
-                "status": "succeeded" if result.get("evidence_id") else "failed",
+                "status": result.get("status", "succeeded" if result.get("evidence_id") else "failed"),
+                "new_information": bool(result.get("evidence_id")),
             }
         )
+        if result.get("status") == "denied" or result.get("error") == "PermissionError":
+            reason, stop_reason = "服务器权限拒绝了关键只读检查，需要审核业务范围", "permission_blocked"
+        elif result.get("error") == "BudgetExceeded":
+            budget_reason = manager.get(budget_id)["stop_reason"]
+            stop_reason = "context_budget_exhausted" if budget_reason == "retrieval_limit" else "tool_budget_exhausted"
+            reason = "读取资料预算已耗尽" if budget_reason == "retrieval_limit" else "工具调用预算已耗尽"
         if result.get("evidence_id"):
             if action["tool_id"].startswith("code."):
                 code_context.append(result["payload"])
@@ -209,21 +258,23 @@ def investigate_business(database, settings, incident_id, business_id, actor, jo
         return result
 
     if not reason:
-        for binding in planned[: max(1, settings.investigation_tool_calls // 2)]:
+        seed = [root] if adaptive else planned[: max(1, settings.investigation_tool_calls // 2)]
+        for binding in seed:
             execute(action_for(binding, "status"))
-            execute(action_for(binding, "logs"))
+            if not reason:
+                execute(action_for(binding, "logs"))
     workflow = build_workflow(settings, database, budget_id)
     report = {"summary": reason or "正在收集可核验的证据", "next_action": "", "hypotheses": []}
     gate = {"status": "unresolved", "hypotheses": [], "rationale": reason or "证据不足"}
     for iteration in range(settings.investigation_model_rounds if not reason else 0):
         used = {(h["tool_id"], h["target_node_id"]) for h in history}
-        actions = [
+        actions = planner.candidates(evidence, code_context, history) if adaptive else [
             action_for(b, suffix)
             for b in planned
             for suffix in ("status", "logs")
             if (f"{b['kind']}.{suffix}", service_nodes[b["service"]]["id"]) not in used
         ]
-        if root:
+        if root and not adaptive:
             keyword = next(
                 iter(re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", symptom["text"])), root["service"]
             )
@@ -254,8 +305,10 @@ def investigate_business(database, settings, incident_id, business_id, actor, jo
                             }
                         )
                         break
-        if manager.get(budget_id)["tool_calls"] >= settings.investigation_tool_calls:
-            actions = []
+        budget = manager.get(budget_id)
+        if budget["tool_calls"] >= budget["limits"]["max_tools"]:
+            reason, stop_reason = "工具调用预算已耗尽", "tool_budget_exhausted"
+            break
         with database.transaction() as tx:
             tx.execute(
                 "UPDATE diagnosis_runs SET summary_json=? WHERE id=?",
@@ -266,6 +319,9 @@ def investigate_business(database, settings, incident_id, business_id, actor, jo
                             "round": iteration + 1,
                             "business_id": business_id,
                             "budget_id": budget_id,
+                            "hypotheses": planner.hypotheses,
+                            "hypothesis_history": planner.hypothesis_history,
+                            "iterations": iterations,
                         }
                     ),
                     run_id,
@@ -277,7 +333,7 @@ def investigate_business(database, settings, incident_id, business_id, actor, jo
                 "graph": graph,
                 "evidence": evidence,
                 "available_actions": [
-                    {k: a[k] for k in ("tool_id", "target_node_id", "service", "role")}
+                    public_action(a) if adaptive else {k: a[k] for k in ("tool_id", "target_node_id", "service", "role")}
                     for a in actions
                 ],
                 "action_history": history,
@@ -299,17 +355,26 @@ def investigate_business(database, settings, incident_id, business_id, actor, jo
                     for m in matches
                     if m["decision"] == "suggested"
                 ],
+                "adaptive": adaptive,
+                "previous_hypotheses": planner.hypotheses,
+                "hypothesis_history": planner.hypothesis_history,
+                "scope_requests": planner.scope_requests,
             }
         )
         report, gate = state["report"], state["gate"]
+        lifecycle = planner.update(report, gate, iteration + 1) if adaptive else gate.get("hypotheses", [])
+        if adaptive and gate["status"] == "supported" and not any(h["status"] == "supported" for h in lifecycle):
+            gate = {**gate, "status": "unresolved", "supported_index": None,
+                    "rationale": "已有反证仍未解释，不能因模型遗漏反证而确认假设", "hypotheses": lifecycle}
         proposal = report.get("action")
         action = next(
             (
                 a
                 for a in actions
                 if isinstance(proposal, dict)
-                and a["tool_id"] == proposal.get("tool_id")
-                and a["target_node_id"] == proposal.get("target_node_id")
+                and ((adaptive and a.get("action_id") == proposal.get("action_id"))
+                     or (not adaptive and a["tool_id"] == proposal.get("tool_id")
+                         and a["target_node_id"] == proposal.get("target_node_id")))
             ),
             None,
         )
@@ -319,12 +384,23 @@ def investigate_business(database, settings, incident_id, business_id, actor, jo
             "proposed_action": proposal,
             "executed_action": None,
             "policy_outcome": None,
+            "hypotheses": lifecycle,
+            "candidate_actions": [public_action(a) for a in actions],
         }
         iterations.append(outcome)
         if gate["status"] == "supported":
+            stop_reason = "evidence_supported"
+            break
+        if state.get("provider_error"):
+            reason = "模型调用预算已耗尽" if state["provider_error"] == "BudgetExceeded" else "模型结构化输出或调用失败：" + state["provider_error"]
+            stop_reason = "model_budget_exhausted" if state["provider_error"] == "BudgetExceeded" else "provider_error"
+            break
+        if adaptive and planner.requested_scope(report):
+            reason, stop_reason = "关键服务尚未授权，已记录范围扩展申请", "permission_blocked"
+            outcome["policy_outcome"] = "scope_request"
             break
         if iteration == settings.investigation_model_rounds - 1:
-            reason = "调查轮数上限已达到"
+            reason, stop_reason = "调查轮数上限已达到", "round_limit"
             break
         if not action:
             reason = state.get("provider_error") or (
@@ -333,23 +409,28 @@ def investigate_business(database, settings, incident_id, business_id, actor, jo
                 else "没有可继续区分假设的授权检查或模型尚未配置"
             )
             outcome["policy_outcome"] = "rejected" if proposal else "no_action"
+            stop_reason = "action_rejected" if proposal else "permission_blocked" if adaptive and planner.scope_requests else "no_new_actions"
+            if adaptive and not proposal and planner.hypothesis_history and not any(h["status"] != "refuted" for h in lifecycle):
+                reason, stop_reason = "现有主要假设与反证冲突，且没有新的区分方向", "evidence_conflict"
             break
         result = execute(action)
         outcome.update(
-            executed_action={
-                k: action[k] for k in ("tool_id", "target_node_id", "service", "role")
-            },
-            policy_outcome="allowed",
+            executed_action=public_action(action),
+            policy_outcome="allowed" if result.get("evidence_id") else "denied" if result.get("error") == "PermissionError" else "failed",
             tool_call_id=result["call_id"],
             evidence_id=result.get("evidence_id"),
         )
+        if result.get("error") in {"BudgetExceeded", "PermissionError"} or result.get("status") == "denied":
+            stop_reason = stop_reason or ("tool_budget_exhausted" if result.get("error") == "BudgetExceeded" else "permission_blocked")
+            reason = reason or "只读工具未能取得有效观测：" + result["error"]
+            break
     supported_id = None
     with database.transaction() as tx:
         for i, item in enumerate(iterations, 1):
             step_id = uid()
             primary_id = None
             primary_score = 0.0
-            for hypothesis in item["gate"].get("hypotheses", []):
+            for hypothesis in item.get("hypotheses", item["gate"].get("hypotheses", [])):
                 hid = uid()
                 valid_target = (
                     hypothesis["target_node_id"]
@@ -398,7 +479,7 @@ def investigate_business(database, settings, incident_id, business_id, actor, jo
                     now(),
                 ),
             )
-            for hypothesis in item["gate"].get("hypotheses", [])[:1]:
+            for hypothesis in item.get("hypotheses", item["gate"].get("hypotheses", []))[:1]:
                 for link in hypothesis.get("evidence_links", []):
                     tx.execute(
                         "INSERT OR IGNORE INTO step_evidence VALUES(?,?,?,?)",
@@ -418,6 +499,10 @@ def investigate_business(database, settings, incident_id, business_id, actor, jo
             "next_action": report.get("next_action"),
             "gate": gate,
             "unresolved_reason": reason if not supported_id else None,
+            "stop_reason": stop_reason or "no_new_actions",
+            "hypotheses": planner.hypotheses,
+            "hypothesis_history": planner.hypothesis_history,
+            "scope_requests": planner.scope_requests,
             "budget_id": budget_id,
             "iterations": iterations,
             "code_sources": [
@@ -460,4 +545,5 @@ def investigate_business(database, settings, incident_id, business_id, actor, jo
         "run_id": run_id,
         "status": status,
         "unresolved_reason": reason if not supported_id else None,
+        "stop_reason": stop_reason or "no_new_actions",
     }
