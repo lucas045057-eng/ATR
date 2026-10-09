@@ -1,0 +1,55 @@
+name: atr-runtime
+services:
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    env_file: .env
+    environment:
+      DATABASE_PATH: /data/runtime.sqlite3
+      REPOSITORY_ROOTS: /demo,/repos
+      COLLECTOR_URL: http://collector:8090
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - runtime-data:/data
+      - ./demo:/demo:ro
+      - ${TARGETS_PATH:-./targets}:/repos:ro
+    depends_on:
+      collector:
+        condition: service_healthy
+    networks: [runtime]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=2)"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+  collector:
+    build:
+      context: .
+      dockerfile: collector/Dockerfile
+    environment:
+      COLLECTOR_TOKEN: ${COLLECTOR_TOKEN:?Set COLLECTOR_TOKEN in .env}
+      DOCKER_HOST: unix:///var/run/docker.sock
+    volumes:
+      - ${DOCKER_SOCKET_PATH:-/var/run/docker.sock}:/var/run/docker.sock:ro
+    networks: [runtime]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/internal/v1/health', timeout=2)"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+  web:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    ports:
+      - "127.0.0.1:8080:80"
+    depends_on: [api]
+    networks: [runtime]
+volumes:
+  runtime-data:
+networks:
+  runtime:
+    name: atr_runtime
+    driver: bridge

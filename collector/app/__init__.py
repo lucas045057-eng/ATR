@@ -1,0 +1,1 @@
+"""Restricted Docker read adapter."""

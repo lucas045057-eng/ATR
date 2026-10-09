@@ -1,0 +1,16 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+node_modules/
+dist/
+*.tsbuildinfo
+data/
+targets/*
+!targets/.gitkeep
+.superpowers/
+.DS_Store
+Thumbs.db

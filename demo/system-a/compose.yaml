@@ -1,0 +1,46 @@
+name: atr-system-a
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: catalog
+      MYSQL_USER: catalog
+      MYSQL_PASSWORD: demo-catalog-secret
+      MYSQL_ROOT_PASSWORD: demo-root-secret
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./init.sql:/docker-entrypoint-initdb.d/010-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -ucatalog -pdemo-catalog-secret --silent"]
+      interval: 4s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    networks: [system-a-internal]
+  python_api:
+    build: .
+    environment:
+      DB_HOST: mysql
+      DB_NAME: catalog
+      DB_USER: catalog
+      DB_PASSWORD: demo-catalog-secret
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks: [system-a-internal]
+  edge_proxy:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on: [python_api]
+    ports:
+      - "127.0.0.1:18080:80"
+    networks: [system-a-internal, atr-runtime]
+networks:
+  system-a-internal:
+    internal: true
+  atr-runtime:
+    external: true
+    name: atr_runtime
+volumes:
+  mysql-data:
