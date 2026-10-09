@@ -133,5 +133,11 @@ def test_browser_complete_onboarding(live_server):
         expect(page.get_by_text("未解决原因：", exact=False)).to_be_visible()
         page.evaluate("window.scrollTo(0,0)")
         page.screenshot(path=str(directory / "investigation.png"), full_page=False)
+        page.get_by_role("button", name="知识审核", exact=False).click()
+        expect(page.get_by_role("heading", name="待复核提醒与失败反例")).to_be_visible()
+        expect(page.get_by_text("项未验证反例", exact=False).first).to_be_visible()
+        page.get_by_role("button", name="效率分析", exact=False).click()
+        expect(page.get_by_role("heading", name="三模式完整对比")).to_be_visible()
+        expect(page.get_by_role("cell", name="Adaptive", exact=True)).to_be_visible()
         assert errors == []
         browser.close()

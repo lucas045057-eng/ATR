@@ -186,6 +186,9 @@ def fuse_business_graph(database, profile):
                 dumps(
                     {
                         **profile["coverage"],
+                        "source_digest": digest([(r["path"], r["content_digest"]) for r in tx.execute(
+                            "SELECT path,content_digest FROM artifact_files WHERE business_id=? AND active=1 ORDER BY path,content_digest", (business_id,)
+                        )]),
                         "business_id": business_id,
                         "profile_version": profile["profile_version"],
                         "semantic_digest": semantic,

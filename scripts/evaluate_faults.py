@@ -155,7 +155,7 @@ def evaluate(work_dir, output, *, wsl=None, docker=False, repetitions=1):
                     data = payloads[args["name"].removesuffix(".service")]
                     return {"connector": "mock", "fixture_observation_category": category,
                             "state": data["state"]} if tool == "service.status" else {
-                                "connector": "mock", "fixture_observation_category": category, "text": now() + " " + data["text"] if data.get("live_timestamp") else data["text"], "captured_at": data.get("captured_at")}
+                                "connector": "mock", "fixture_observation_category": "mock_training_fixture" if data.get("live_timestamp") else category, "text": now() + " " + data["text"] if data.get("live_timestamp") else data["text"], "captured_at": data.get("captured_at")}
                 if tool == "config.list":
                     return {"connector": "mock", "files": ["/srv/catalog/app.conf"]}
                 if tool == "config.read":
@@ -188,17 +188,16 @@ def evaluate(work_dir, output, *, wsl=None, docker=False, repetitions=1):
                     response = client.post(f"/api/v1/businesses/{profile['business_id']}/review", json={"expected_version": latest["profile_version"], "decision": "approve", "reason": "Evaluation fixture operator confirms static scope"})
                     assert response.status_code == 200, response.text
                     profile = response.json()
-                    if index == 1:
-                        # A separate synthetic training case, verified through the existing repair/review API.
-                        payloads = {name: {"state": "active", "text": "ready", "live_timestamp": True} for name in SERVICES}
-                        payloads["catalog-api"] = {"state": "failed", "text": "startup failed: required initialization failed", "live_timestamp": True}
-                        training = investigate(client, profile, mode="graph_only")
-                        assert training["status"] == "supported", training
-                        response = client.post(f"/api/v1/incidents/{training['incident_id']}/repair", json={"summary": "Synthetic fixture operator restored test application", "operator_verified": True, "verification_summary": "Actual local verification HTTP returns 200; diagnosis/repair are Mock", "verification_url": settings.allowed_health_urls})
-                        assert response.status_code == 200, response.text
-                        pattern_id = response.json()["pattern_version_id"]
-                        reviewed = client.post(f"/api/v1/patterns/{pattern_id}/review", json={"decision": "approve", "reason": "Fixture operator approves verified synthetic example only"})
-                        assert reviewed.status_code == 200, reviewed.text
+                    # A separate synthetic training case, verified through the existing repair/review API.
+                    payloads = {name: {"state": "active", "text": "ready", "live_timestamp": True} for name in SERVICES}
+                    payloads["catalog-api"] = {"state": "failed", "text": "startup failed: required initialization failed", "live_timestamp": True}
+                    training = investigate(client, profile, mode="graph_only")
+                    assert training["status"] == "supported", training
+                    response = client.post(f"/api/v1/incidents/{training['incident_id']}/repair", json={"summary": "Synthetic fixture operator restored test application", "operator_verified": True, "verification_summary": "Actual local verification HTTP returns 200; diagnosis/repair are Mock", "verification_url": settings.allowed_health_urls})
+                    assert response.status_code == 200, response.text
+                    pattern_id = response.json()["pattern_version_id"]
+                    reviewed = client.post(f"/api/v1/patterns/{pattern_id}/review", json={"decision": "approve", "reason": "Fixture operator approves verified synthetic example only"})
+                    assert reviewed.status_code == 200, reviewed.text
                     registered = client.post("/api/v1/evaluation-cases", json={"case_key": "v22-" + case["key"], "system_id": profile["system_id"], "fault_class": case["key"], "ground_truth": {**case, "category": category, "allowed_services": [name for name in SERVICES if case["key"] != "permission_blocked" or name != "store"]}, "protocol_version": "three-arm-v22"})
                     assert registered.status_code == 200, registered.text
                     registered = registered.json()

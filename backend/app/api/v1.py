@@ -23,6 +23,13 @@ from app.domain import (
     ReviewRequest,
 )
 from app.evaluation import assess_truth, compare_trials, run_metrics
+from app.knowledge import (
+    compatibility,
+    counterexamples,
+    feedback_health,
+    graph_contract,
+    successful_checks,
+)
 from app.settings import get_settings
 from app.storage.database import Database
 from app.system.inventory import SystemOnboarding
@@ -224,15 +231,20 @@ def pattern_matches(connection: Any, run_id: str, snapshot_id: str, symptom: str
         signal_score = len(available_pattern_signals) / max(len(pattern_signals), 1)
         signals_available = bool(pattern_signals) and pattern_signals.issubset(current_signals)
         score = .45 * symptom_score + .35 * topology_score + .20 * signal_score
-        scored.append({"pattern": pattern, "score": round(score, 4), "binding": {"roles": sorted(p_roles), "snapshot_id": snapshot_id},
+        compatible = compatibility(connection, pattern, snapshot_id)
+        if not compatible["compatible"]:
+            emit(connection, connection.execute("SELECT system_id FROM graph_snapshots WHERE id=?", (snapshot_id,)).fetchone()[0], run_id,
+                 "pattern", pattern["id"], "pattern_reuse_blocked", compatible, "deterministic_knowledge_policy")
+        scored.append({"pattern": pattern, "score": round(score, 4), "binding": {"roles": sorted(p_roles), "snapshot_id": snapshot_id, "compatibility": compatible}, "compatibility": compatible,
                        "checks": checks, "signals_available": signals_available, "topology_available": p_topology.issubset(topology)})
-    scored.sort(key=lambda x: x["score"], reverse=True)
-    margin = scored[0]["score"] - scored[1]["score"] if len(scored) > 1 else (scored[0]["score"] if scored else 0)
+    scored.sort(key=lambda x: (not x["compatibility"]["compatible"], -x["score"]))
+    compatible_items = [x for x in scored if x["compatibility"]["compatible"]]
+    margin = compatible_items[0]["score"] - compatible_items[1]["score"] if len(compatible_items) > 1 else (compatible_items[0]["score"] if compatible_items else 0)
     for index, item in enumerate(scored):
         pattern = item["pattern"]
         checks = item["checks"]
         p_roles = set(item["binding"]["roles"])
-        gate = (item["score"] >= .70 and margin >= .15 and not has_conflicts
+        gate = (item["compatibility"]["compatible"] and item["score"] >= .70 and margin >= .15 and not has_conflicts
                 and bool(checks) and item["signals_available"] and item["topology_available"])
         decision = "suggested" if gate and index == 0 else "not_selected"
         match_id = str(uuid.uuid4())
@@ -522,11 +534,14 @@ def execute_legacy_run(incident_id: str, actor: str, job_id: str | None = None) 
                   "evidence_count": len(primary[1].get("evidence_ids", [])) if primary else 0}, actor)
             previous_score = after_score
         status = "supported" if supported_id else "unresolved"
+        summary["counterexamples"] = counterexamples(summary, status)
         ended = utcnow()
         tx.execute("UPDATE diagnosis_runs SET status=?,supported_at=?,ended_at=?,final_hypothesis_id=?,summary_json=? WHERE id=?",
                    (status, ended if supported_id else None, ended, supported_id, json.dumps(summary, ensure_ascii=False), run_id))
         emit(tx, system["id"], run_id, "run", run_id, "evidence_collected", {"count": len(evidence)}, actor)
         emit(tx, system["id"], run_id, "run", run_id, f"run_{status}", {"summary": summary["summary"][:500]}, actor)
+        if summary["counterexamples"]:
+            emit(tx, system["id"], run_id, "run", run_id, "investigation_counterexamples_retained", {"counterexamples": summary["counterexamples"]}, actor)
     return {"id": run_id, "incident_id": incident_id, "status": "supported" if supported_id else "unresolved",
             "summary": summary["summary"], "next_action": summary["next_action"], "evidence_count": len(evidence),
             "pattern_matches": summary.get("pattern_matches", []), "provider_error": summary.get("provider_error")}
@@ -634,7 +649,27 @@ def list_patterns() -> list[dict[str, Any]]:
             item = dict(row)
             for field in ("roles", "topology", "symptoms", "checks", "exclusions", "validity"):
                 item[field] = decode(item.pop(field+"_json"))
+            latest = connection.execute("SELECT id FROM graph_snapshots WHERE system_id=(SELECT system_id FROM graph_snapshots WHERE id=?) ORDER BY version DESC LIMIT 1", (item["validity"].get("snapshot_id"),)).fetchone()
+            item["health"] = feedback_health(connection, row["id"])
+            item["compatibility"] = compatibility(connection, row, latest[0]) if latest else {"compatible": False, "reasons": ["source_snapshot_unavailable"]}
+            item["health"]["needs_review"] = item["health"]["needs_review"] or not item["compatibility"]["compatible"]
             result.append(item)
+        return result
+    finally:
+        connection.close()
+
+
+@router.get("/knowledge-counterexamples")
+def list_counterexamples() -> list[dict[str, Any]]:
+    connection = db().connect()
+    try:
+        rows = connection.execute("SELECT id,graph_snapshot_id,status,summary_json FROM diagnosis_runs WHERE status IN ('supported','unresolved') ORDER BY started_at DESC LIMIT 100").fetchall()
+        result = []
+        for row in rows:
+            summary = decode(row["summary_json"])
+            examples = summary.get("counterexamples", counterexamples(summary, row["status"]))
+            if examples:
+                result.append({"run_id": row["id"], "graph_snapshot_id": row["graph_snapshot_id"], "status": row["status"], "counterexamples": examples})
         return result
     finally:
         connection.close()
@@ -664,23 +699,12 @@ def record_repair(incident_id: str, request: RepairRecord, actor: str = Depends(
                            for e in connection.execute("SELECT * FROM graph_edges WHERE snapshot_id=?", (snapshot["id"],))})
         symptom = decode(connection.execute("SELECT symptom_json FROM incidents WHERE id=?", (incident_id,)).fetchone()["symptom_json"])["text"]
         symptom_terms = sorted({w for w in re.findall(r"[a-zA-Z0-9_\u4e00-\u9fff]+", symptom.casefold()) if len(w) > 1})
-        checks = [dict(c) for c in connection.execute("""SELECT t.tool_id,t.purpose,n.role AS target_role,
-          MIN(t.started_at) AS first_seen FROM diagnostic_steps ds
-          JOIN step_evidence se ON se.step_id=ds.id AND se.stance='support'
-          JOIN evidence e ON e.id=se.evidence_id
-          JOIN tool_calls t ON t.id=e.tool_call_id
-          JOIN graph_nodes n ON n.id=e.target_node_id
-          WHERE ds.hypothesis_id=? AND t.purpose='diagnosis' AND t.status='succeeded'
-            AND n.snapshot_id=? AND n.kind='service'
-          GROUP BY t.tool_id,t.purpose,n.role ORDER BY first_seen""",
-          (run["final_hypothesis_id"], snapshot["id"]))]
-        for check in checks:
-            check.pop("first_seen", None)
+        checks = successful_checks(connection, run["final_hypothesis_id"], snapshot["id"])
         roles = sorted(set(roles) | {check["target_role"] for check in checks if check.get("target_role")})
         verifications = [verification["call_id"]]
         experience_id, pattern_id, timestamp = str(uuid.uuid4()), str(uuid.uuid4()), utcnow()
         pattern_body = {"roles": roles, "topology": topology, "symptoms": symptom_terms, "checks": checks,
-                        "exclusions": ["Do not apply when graph contains unresolved conflicts"], "validity": {"snapshot_id": snapshot["id"], "deployment_digest": snapshot["deployment_digest"]}}
+                        "exclusions": ["Do not apply when graph contains unresolved conflicts", "Reverify when source, deployment or validation feedback changes"], "validity": graph_contract(connection, snapshot["id"])}
         digest = hashlib.sha256(json.dumps(pattern_body, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
         with db().transaction() as tx:
             tx.execute("INSERT INTO experiences(id,incident_id,run_id,graph_snapshot_id,status,root_cause_json,repair_record_json,verification_call_ids_json,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -690,7 +714,7 @@ def record_repair(incident_id: str, request: RepairRecord, actor: str = Depends(
             tx.execute("INSERT INTO pattern_versions(id,pattern_key,version,source_experience_id,status,roles_json,topology_json,symptoms_json,checks_json,exclusions_json,validity_json,schema_version,content_digest) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                        (pattern_id, f"pattern-{experience_id[:8]}", 1, experience_id, "candidate",
                         json.dumps(roles), json.dumps(topology), json.dumps(symptom_terms), json.dumps(checks),
-                        json.dumps(pattern_body["exclusions"]), json.dumps(pattern_body["validity"]), 1, digest))
+                        json.dumps(pattern_body["exclusions"]), json.dumps(pattern_body["validity"]), 2, digest))
             emit(tx, run["system_id"], run["id"], "experience", experience_id, "experience_candidate_created", {"pattern_id": pattern_id, "digest": digest}, actor)
         return {"experience_id": experience_id, "pattern_version_id": pattern_id, "status": "candidate", "content_digest": digest}
     finally:
@@ -707,6 +731,9 @@ def review_pattern(pattern_id: str, request: ReviewRequest, actor: str = Depends
         if pattern["status"] != "candidate":
             raise HTTPException(status_code=409, detail="Only Candidate patterns can be reviewed for promotion")
         if request.decision == "approve":
+            latest = connection.execute("SELECT id FROM graph_snapshots WHERE system_id=? ORDER BY version DESC LIMIT 1", (pattern["system_id"],)).fetchone()
+            if not latest or not compatibility(connection, pattern, latest[0])["compatible"]:
+                raise HTTPException(409, "Pattern source or current graph changed; a new verified Candidate is required")
             experience = connection.execute("SELECT * FROM experiences WHERE id=?", (pattern["source_experience_id"],)).fetchone()
             verification_ids = decode(experience["verification_call_ids_json"], []) if experience else []
             verified = False
@@ -785,12 +812,17 @@ def record_pattern_outcome(match_id: str, request: PatternMatchOutcome,
         if request.usefulness and row["usefulness_outcome"] != "pending":
             raise HTTPException(status_code=409, detail="Usefulness outcome is already recorded")
         with db().transaction() as tx:
+            current = tx.execute("SELECT validation_outcome,usefulness_outcome FROM pattern_matches WHERE id=?", (match_id,)).fetchone()
+            if (request.validation and current["validation_outcome"] != "pending") or (request.usefulness and current["usefulness_outcome"] != "pending"):
+                raise HTTPException(409, "Feedback was already recorded")
             if request.validation:
                 tx.execute("UPDATE pattern_matches SET validation_outcome=? WHERE id=?", (request.validation, match_id))
             if request.usefulness:
                 tx.execute("UPDATE pattern_matches SET usefulness_outcome=? WHERE id=?", (request.usefulness, match_id))
             emit(tx, row["system_id"], row["run_id"], "pattern_match", match_id, "pattern_match_outcome",
                  {"validation": request.validation, "usefulness": request.usefulness}, actor)
+            if feedback_health(tx, row["pattern_version_id"])["needs_review"]:
+                emit(tx, row["system_id"], row["run_id"], "pattern", row["pattern_version_id"], "pattern_review_needed", {"reason": "negative_validation_feedback", "match_id": match_id}, actor)
         return {"match_id": match_id, "validation_outcome": request.validation or row["validation_outcome"],
                 "usefulness_outcome": request.usefulness or row["usefulness_outcome"]}
     finally:

@@ -13,6 +13,7 @@ from app.agent.workflow import build_workflow
 from app.business.service import BusinessService
 from app.common import dumps, now, uid
 from app.context.budget import ContextBudgetManager
+from app.knowledge import counterexamples
 from app.system.scope import binding_is_current
 from app.tools.business import BusinessToolRegistry
 
@@ -479,7 +480,9 @@ def investigate_business(database, settings, incident_id, business_id, actor, jo
                     now(),
                 ),
             )
-            for hypothesis in item.get("hypotheses", item["gate"].get("hypotheses", []))[:1]:
+            step_hypotheses = item.get("hypotheses", item["gate"].get("hypotheses", []))
+            primary_hypothesis = next((h for h in step_hypotheses if h["status"] == "supported"), step_hypotheses[0] if step_hypotheses else None)
+            for hypothesis in [primary_hypothesis] if primary_hypothesis else []:
                 for link in hypothesis.get("evidence_links", []):
                     tx.execute(
                         "INSERT OR IGNORE INTO step_evidence VALUES(?,?,?,?)",
@@ -526,6 +529,7 @@ def investigate_business(database, settings, incident_id, business_id, actor, jo
             "connector_types": sorted({e["payload"].get("connector", "unknown") for e in evidence}),
         }
         ended = now()
+        summary["counterexamples"] = counterexamples(summary, status)
         tx.execute(
             "UPDATE diagnosis_runs SET status=?,supported_at=?,ended_at=?,final_hypothesis_id=?,summary_json=? WHERE id=?",
             (status, ended if supported_id else None, ended, supported_id, dumps(summary), run_id),
@@ -540,6 +544,8 @@ def investigate_business(database, settings, incident_id, business_id, actor, jo
             {"reason": reason, "evidence_count": len(evidence)},
             actor,
         )
+        if summary["counterexamples"]:
+            emit(tx, incident["system_id"], run_id, "run", run_id, "investigation_counterexamples_retained", {"counterexamples": summary["counterexamples"]}, actor)
     return {
         "id": run_id,
         "run_id": run_id,
