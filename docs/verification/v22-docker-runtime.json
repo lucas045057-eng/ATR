@@ -1,0 +1,12 @@
+{
+  "category": "isolated_real_containers",
+  "api_health": 200,
+  "ui_proxy_health": 200,
+  "browser_complete_onboarding": true,
+  "businesses_before": 1,
+  "businesses_after": 1,
+  "profiles_and_source_preserved_after_restart": true,
+  "worker_upload_and_index_completed": true,
+  "model": "disabled",
+  "runtime": "Mock"
+}

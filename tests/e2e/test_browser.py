@@ -1,11 +1,13 @@
 """Actual browser + actual local API + explicit Mock runtime. No mocked HTTP responses."""
 
+import json
 import os
 import socket
 import subprocess
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
@@ -17,6 +19,13 @@ ROOT = Path(__file__).resolve().parents[2]
 
 @pytest.fixture
 def live_server(tmp_path):
+    external = os.environ.get("ATR_E2E_BASE_URL")
+    if external:
+        parsed = urlsplit(external)
+        assert parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost"}, "仅允许隔离回环验收"
+        assert os.environ.get("ATR_E2E_OPERATOR_TOKEN"), "隔离验收需要专用本地 token"
+        yield external.rstrip("/"), tmp_path
+        return
     if not (ROOT / "frontend/dist/index.html").exists():
         pytest.skip("先运行前端 npm run build，再执行浏览器验收")
     sock = socket.socket()
@@ -79,9 +88,8 @@ def test_browser_complete_onboarding(live_server):
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, channel=os.environ.get("ATR_BROWSER_CHANNEL") or None)
         context = browser.new_context(viewport={"width": 1440, "height": 1000})
-        context.add_init_script(
-            "sessionStorage.setItem('atr_operator_token','browser-test-operator-" + "x" * 40 + "')"
-        )
+        token = os.environ.get("ATR_E2E_OPERATOR_TOKEN") if os.environ.get("ATR_E2E_BASE_URL") else "browser-test-operator-" + "x" * 40
+        context.add_init_script("sessionStorage.setItem('atr_operator_token'," + json.dumps(token) + ")")
         page = context.new_page()
         errors = []
         page.on("pageerror", lambda e: errors.append(str(e)))

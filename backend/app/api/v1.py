@@ -372,7 +372,7 @@ def execute_legacy_run(incident_id: str, actor: str, job_id: str | None = None) 
         key=lambda node: (node["role"] != "application", node["role"], node["name"]))
 
     def available_diagnostic_actions() -> list[dict[str, str]]:
-        used = {(item.get("tool_id"), item.get("target_node_id")) for item in evidence}
+        used = {(item.get("tool_id"), item.get("target_node_id")) for item in evidence + action_history}
         actions = []
         for tool_id in ("container.logs", "container.processes"):
             for node in ordered_service_nodes:
