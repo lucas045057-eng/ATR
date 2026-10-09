@@ -9,22 +9,23 @@ services:
       DATABASE_PATH: /data/runtime.sqlite3
       REPOSITORY_ROOTS: /demo,/repos
       COLLECTOR_URL: http://collector:8090
+      ARTIFACT_ROOT: /data/artifacts
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
       - runtime-data:/data
       - ./demo:/demo:ro
       - ${TARGETS_PATH:-./targets}:/repos:ro
-    depends_on:
-      collector:
-        condition: service_healthy
     networks: [runtime]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=2)"]
       interval: 15s
       timeout: 3s
       retries: 3
   collector:
+    profiles: [docker-demo]
     build:
       context: .
       dockerfile: collector/Dockerfile
@@ -34,6 +35,10 @@ services:
     volumes:
       - ${DOCKER_SOCKET_PATH:-/var/run/docker.sock}:/var/run/docker.sock:ro
     networks: [runtime]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/internal/v1/health', timeout=2)"]
       interval: 15s

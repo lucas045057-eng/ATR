@@ -4,8 +4,12 @@ import json
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from fastapi import FastAPI
+from pathlib import Path
 
+from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+
+from app.api.business import router as business_router
 from app.api.health import router as health_router
 from app.api.v1 import router as v1_router
 from app.settings import get_settings
@@ -35,15 +39,27 @@ async def lifespan(_: FastAPI):
                        (str(uuid.uuid4()), run["system_id"], run["id"], sequence, "run", run["id"],
                         "run_interrupted", "runtime", json.dumps({"reason": "backend_restart"}), timestamp))
         tx.execute("UPDATE tool_calls SET status='interrupted',ended_at=?,error_code='backend_restart' WHERE status='pending'", (timestamp,))
+        tx.execute("UPDATE jobs SET status='interrupted',error='backend_restart',ended_at=? WHERE status IN ('queued','running')", (timestamp,))
+        tx.execute("UPDATE uploaded_artifacts SET status='failed',error='backend_restart' WHERE status='queued'")
+        tx.execute("UPDATE discovery_runs SET status='interrupted' WHERE status='running'")
+        tx.execute("UPDATE runtime_observations SET status='interrupted',error='backend_restart' WHERE status='pending'")
+        for usage in tx.execute("SELECT * FROM model_usage_records WHERE status='pending'").fetchall():
+            reserved = usage["input_tokens"] + usage["output_tokens"]
+            tx.execute("UPDATE context_budgets SET reserved_tokens=MAX(0,reserved_tokens-?),input_tokens=input_tokens+?,output_tokens=output_tokens+?,stop_reason='interrupted_request_usage_estimated' WHERE id=?", (reserved, usage["input_tokens"], usage["output_tokens"], usage["budget_id"]))
+            tx.execute("UPDATE model_usage_records SET status='interrupted',usage_kind='estimate' WHERE id=?", (usage["id"],))
     yield
 
 
 app = FastAPI(
     title="Adaptive Troubleshooting Runtime",
-    version="0.1.0",
+    version="2.1.0",
     docs_url=None,
     redoc_url=None,
     lifespan=lifespan,
 )
 app.include_router(health_router, prefix="/api/v1")
 app.include_router(v1_router)
+app.include_router(business_router)
+frontend_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+if frontend_dist.is_dir():
+    app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="workbench")

@@ -1,7 +1,7 @@
 {
   "name": "adaptive-troubleshooting-runtime-ui",
   "private": true,
-  "version": "0.1.0",
+  "version": "2.1.0",
   "type": "module",
   "scripts": { "build": "tsc -b && esbuild src/main.tsx --bundle --minify --format=esm --target=es2020 --outdir=dist/assets --entry-names=app && node build.mjs" },
   "dependencies": { "react": "19.1.1", "react-dom": "19.1.1" },

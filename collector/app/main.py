@@ -8,10 +8,11 @@ from functools import lru_cache
 from typing import Any
 
 import docker
-from fastapi import FastAPI, Header, HTTPException, Query
 from docker.errors import APIError, DockerException
+from fastapi import FastAPI, Header, HTTPException, Query
 from requests.exceptions import RequestException
-from app.redaction import redact_text, safe_text
+
+from .redaction import redact_text, safe_text
 
 app = FastAPI(title="ATR Read-only Collector", docs_url=None, redoc_url=None)
 TOKEN = os.environ.get("COLLECTOR_TOKEN", "")
@@ -121,8 +122,10 @@ def processes(project: str, container_id: str,
     except (APIError, DockerException) as exc:
         raise HTTPException(status_code=503, detail="Process summary unavailable") from exc
     processes_out = []
+    titles = data.get("Titles", [])[:16]
     for process in data.get("Processes", [])[:80]:
-        row = {key: redact_text(str(value)[:256]) for key, value in process.items()
+        values = process if isinstance(process, dict) else dict(zip(titles, process))
+        row = {key: redact_text(str(value)[:256]) for key, value in values.items()
                if key in {"PID", "USER", "%CPU", "%MEM", "STAT", "COMMAND"}}
         processes_out.append(row)
     return {"container_id": container.id[:64], "project": redact_text(project),

@@ -26,7 +26,8 @@ def sanitize_payload(value: Any) -> Any:
     if isinstance(value, list):
         return [sanitize_payload(item) for item in value]
     if isinstance(value, dict):
-        return {key: sanitize_payload(item) for key, item in value.items()}
+        return {key: "[REDACTED]" if re.search(r"(?i)password|passwd|secret|token|api.?key|private.?key|authorization|cookie", str(key))
+                else sanitize_payload(item) for key, item in value.items()}
     return value
 
 
@@ -66,6 +67,20 @@ class ToolRegistry:
         if denied:
             raise HTTPException(status_code=403, detail="Tool denied by the fixed read-only catalog")
         try:
+            if tool_id != "health.get" and not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}", project):
+                raise ValueError("Invalid authorized Compose project")
+            if purpose == "diagnosis":
+                from app.context.budget import ContextBudgetManager
+                conn = self.db.connect()
+                try:
+                    budget = conn.execute("SELECT id FROM context_budgets WHERE run_id=? ORDER BY created_at DESC LIMIT 1", (run_id,)).fetchone()
+                finally:
+                    conn.close()
+                if budget:
+                    ContextBudgetManager(self.db, self.settings).consume_tool(budget["id"])
+            arg_keys = {"compose.status": set(), "health.get": {"url"}, "container.logs": {"container_id", "tail"}, "container.processes": {"container_id"}}
+            if set(arguments) - arg_keys[tool_id]:
+                raise ValueError("Unsupported tool parameters")
             if tool_id == "compose.status":
                 data = self.collector.get(f"/internal/v1/projects/{project}/containers")[:64]
                 payload = {"containers": data}
@@ -73,11 +88,18 @@ class ToolRegistry:
                 url = str(arguments.get("url", ""))
                 if url not in self.settings.health_url_allowlist():
                     raise ValueError("Health URL is not in the configured exact-URL allowlist")
-                response = httpx.get(url, timeout=3, follow_redirects=False,
-                                     headers={"Accept": "application/json,text/plain;q=0.8"})
-                body = sanitize(response.text[:8_000])
-                payload = {"url": url, "status_code": response.status_code, "body": body,
-                           "redirected": response.is_redirect}
+                with httpx.stream("GET", url, timeout=3, follow_redirects=False,
+                                  headers={"Accept": "application/json,text/plain;q=0.8"}) as response:
+                    raw = bytearray()
+                    truncated = False
+                    for chunk in response.iter_bytes(chunk_size=4096):
+                        raw.extend(chunk[:8001-len(raw)])
+                        if len(raw) > 8000:
+                            truncated = True
+                            break
+                    payload = {"url": url, "status_code": response.status_code,
+                               "body": sanitize(bytes(raw[:8000]).decode("utf-8", errors="replace")),
+                               "redirected": response.is_redirect, "truncated": truncated}
             else:
                 container_id = str(arguments.get("container_id", ""))
                 if not re.fullmatch(r"[a-f0-9]{12,64}", container_id):
@@ -92,6 +114,8 @@ class ToolRegistry:
                     payload = self.collector.get(f"/internal/v1/projects/{project}/containers/{container_id}/processes")
             payload = sanitize_payload(payload)
             serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+            if purpose == "diagnosis" and budget:
+                ContextBudgetManager(self.db, self.settings).retrieval(budget["id"], len(serialized.encode()))
             content_hash = hashlib.sha256(serialized.encode()).hexdigest()
             ended = utcnow()
             evidence_id = str(uuid.uuid4())

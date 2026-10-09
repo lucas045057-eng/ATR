@@ -1,31 +1,34 @@
-# Implementation status
+# V2.1 实现状态
 
-This is a local prototype for system-graph-first troubleshooting with operator-reviewed reusable Patterns. The backend, collector, four-page workbench, SQLite history, paired-evaluation entry flow, and two example Compose stacks are present.
+本版为上游 ATR 的增量实现；原四页、Demo、LangGraph、LiteLLM、SQLite、图谱/Pattern 保留。2026-10-09 本机最终测试 **67 passed，0 failed，0 skipped**；前端构建、Ruff、依赖锁和 Compose 配置检查通过。详情见 [验收报告](acceptance-report.md)。
 
-## Delivered
+## 已实现并通过离线/隔离测试
 
-- Static onboarding reads the registered Compose and source files, records provenance and graph versions, and keeps unresolved conflicts visible.
-- The collector exposes fixed, bounded Docker reads. Backend tool calls are allowlisted, redacted, persisted before execution, and linked to evidence records.
-- `/api/v1/` reads and writes require the operator bearer token except for the minimal health endpoint. Collector and backend redact common authorization headers, bearer/basic tokens, secret-valued fields, credentialed URLs, JWT-shaped tokens, and common AWS access keys before persistence/model use.
-- Diagnosis reports go through a deterministic evidence gate. A report remains unresolved unless it cites at least two distinct current tool calls bound to the exact target service or a declared dependency, includes a time-windowed failure signal on that scope, names a current graph node, and has no open graph conflict. The gate checks identity, scope, freshness, and signal presence; the support/refute label is model-attributed, so this prototype cannot prove that the cited observation semantically supports the hypothesis.
-- Pattern capture requires an operator-confirmed diagnosis and repair plus a successful allowlisted health GET. Reviews bind to the exact Pattern digest; changed system snapshots stale the prior binding.
-- Ground truth is stored in the evaluation-case table and omitted from normal case, run, and metrics responses. Paired runs must target the case system, use separate runs and matching modes, and use the case fixture digest as their reset digest.
-- A compatible Trusted Pattern can narrow log collection to checks bound to current graph service roles before synthesis; those logs remain current evidence. The UI records Pattern validation/usefulness outcomes and displays run-derived metrics and paired evaluations without seeded performance figures.
-- System A (FastAPI + MySQL + Nginx) and System B (Express + PostgreSQL + Nginx) have separate operator-controlled failure and repair procedures.
+- 流式上传、ZIP/TAR 安全解包、限资源 worker、静态清单/AST/配置/hash、异步任务与中文接入。
+- 五类来源业务画像、持久审核/角色/冲突、版本对比、哈希复用与 stale 知识保留。
+- SQLite FTS5 元数据搜索、校验摘要/业务/版本的局部代码、初始不发送源码全文。
+- 独立 Context Budget Manager、原子预留、硬停止/增额恢复、actual/estimate usage 和费用标识。
+- 固定工具、SSH pinned host key 与 JSON 固定入口、失败审计、显式 Mock、轻量范围候选及人工确认。
+- 原图谱融合与五类真实 provenance、运行冲突双方保留、等价结构保留 Trusted 资格。
+- 已审核业务与范围驱动 LangGraph 调查，模型候选选择/Policy 执行、当前证据 Gate、假设支持/反证/预算可见。
+- 修复记录 + 真正回环 HTTP GET 验证 + 人审之后 Trusted 的控制测试；不会自动修复或提升。
+- 真实本地 API/Chromium 完整接入 E2E、回环 Paramiko SSH 协议测试，未使用浏览器后端响应替身。
 
-## Limits
+## 部分能力与已知限制
 
-- The run takes a Compose status snapshot and bounded logs for up to eight containers, then performs up to three model-directed, allowlisted follow-up reads. Each iteration records its proposed and executed action, resulting evidence, and reviewer outcome. A Pattern can narrow the initial log targets. The loop is bounded to container logs/process summaries; it does not yet include network diagnostics or adaptive tool discovery.
-- Model capability probing and a general network/TCP tool are not implemented. The current integrations use JSON-mode LiteLLM, fixed collector reads, and exact-URL allowlisted health GETs.
-- A fixture digest fingerprints checked-in source and Compose inputs; it cannot prove the live container or volume was reset. The operator must verify the baseline manually.
-- Source inspection produces bounded code claims, but source-derived dependency edges and comprehensive reconciliation across code, deployment, and runtime claims remain partial.
-- Docker Desktop is installed, but its local `desktop-linux` engine is stopped and reports a WSL vsock dead-network error. The Compose stacks and HTTP workflow were not started or runtime-verified.
+- 图片/PDF 独立接口及人工录入已实现，自动视觉/PDF 理解适配尚未实现。
+- Python AST 和有限 JS/TS 正则提供骨架，动态语义、完整别名/调用链解析不完整；FTS 仅索引路径/符号/导入/路由。
+- 文件解析增量复用，画像骨架本地重建；不是完整依赖影响增量计算器，也不保证每次只评估绝对最小子图。
+- 普通过程仅读名称摘要；调查主要选择已批准状态/日志及按需源码，不提供自由进程深读/通用无限 Agent。
+- Evidence Gate 检查范围/时间/信号/重复/冲突/解释，不能证明任意自然语言因果结论正确。
+- 模型能力为操作者声明；费用是配置费率估算或 unknown，没有供应商自动价格/账单核对。
+- 删除为逻辑停用，历史/失败资料仍保留，无自动物理清理。API 只支持单进程本地任务池和单操作员令牌，无多租户/RBAC。
+- SSH 安全依赖管理员正确强制命令/账号/文件权限，声明不能替代实际服务器权限审计。原 Collector 仍有 daemon 权限，只用于显式本地 Demo。
 
-## Static verification performed
+## 未真实验证
 
-- Python files compiled with `compileall`.
-- The frontend TypeScript check and production bundle completed with `npm run build`.
-- The Python dependency lock passed `uv lock --check`.
-- The root and both demo Compose YAML files parsed with PyYAML.
+Docker Engine 未运行，未构建/启动容器或完成 A/B 真故障修复；无真实模型 API/计费调用；无真实授权 Linux 业务服务器，未执行 Linux 网关 openat/systemd/journald 或完整 SSH 账号隔离；WSL2 实际启动未运行验收。
 
-No test suite was run. Static checks do not establish that container startup, network connectivity, or UI-to-API flows work in a live Docker environment.
+测试 stub 只验证响应/usage 接口与 Gate 分支，Mock 只验证受控范围/证据链。未测真实业务准确率、成功率、跨系统性能改善，不展示虚构数字。
+
+下一阶段首先做明确授权的 Linux 只读账号与网关验收，再接真实模型和容器 Demo；随后完善媒体解析、语言语义索引、资料保留/清理及更多业务用例评估。

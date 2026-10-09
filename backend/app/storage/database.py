@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
+from app.storage.migrations import migrate
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -153,7 +154,18 @@ class Database:
         connection = self.connect()
         try:
             connection.execute("PRAGMA journal_mode=WAL")
+            legacy = connection.execute("SELECT 1 FROM sqlite_master WHERE name='systems'").fetchone()
+            migrated = connection.execute("SELECT 1 FROM sqlite_master WHERE name='schema_migrations'").fetchone()
+            if legacy and not migrated:
+                backup_path = self.path.with_name(self.path.name + ".pre-v21.bak")
+                if not backup_path.exists():
+                    backup = sqlite3.connect(backup_path)
+                    try:
+                        connection.backup(backup)
+                    finally:
+                        backup.close()
             connection.executescript(SCHEMA)
+            migrate(connection)
             connection.commit()
         finally:
             connection.close()

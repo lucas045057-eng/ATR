@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import secrets
 from functools import lru_cache
 from pathlib import Path
@@ -27,6 +26,30 @@ class Settings(BaseSettings):
     allowed_health_urls: str = ""
     max_source_files: int = Field(default=1000, ge=1, le=1000)
     max_source_bytes: int = Field(default=50 * 1024 * 1024, ge=1024, le=50 * 1024 * 1024)
+    artifact_root: Path = Path("./data/artifacts")
+    upload_max_bytes: int = Field(default=50 * 1024 * 1024, ge=1024, le=200 * 1024 * 1024)
+    extraction_max_bytes: int = Field(default=200 * 1024 * 1024, ge=1024, le=200 * 1024 * 1024)
+    artifact_max_files: int = Field(default=2000, ge=1, le=2000)
+    artifact_max_file_bytes: int = Field(default=20 * 1024 * 1024, ge=1024, le=200 * 1024 * 1024)
+    artifact_read_bytes: int = Field(default=256 * 1024, ge=1024, le=1024 * 1024)
+    artifact_max_depth: int = Field(default=16, ge=1, le=32)
+    extraction_timeout_seconds: int = Field(default=45, ge=1, le=120)
+    external_model_enabled: bool = False
+    model_json_supported: bool = True
+    model_vision_supported: bool = False
+    model_context_window: int = Field(default=32768, ge=1024)
+    model_max_output_tokens: int = Field(default=1500, ge=64, le=8000)
+    initial_input_tokens: int = Field(default=8000, ge=1)
+    investigation_input_tokens: int = Field(default=12000, ge=1)
+    initial_model_calls: int = Field(default=6, ge=1, le=20)
+    investigation_model_rounds: int = Field(default=8, ge=1, le=20)
+    investigation_tool_calls: int = Field(default=20, ge=1, le=100)
+    budget_total_tokens: int = Field(default=100000, ge=1)
+    code_search_limit: int = Field(default=20, ge=1, le=100)
+    model_input_cost_per_million: float | None = Field(default=None, ge=0)
+    model_output_cost_per_million: float | None = Field(default=None, ge=0)
+    ssh_credentials: str = "{}"  # Operator-owned reference -> key file path, never a private key.
+    ssh_enabled: bool = False
 
     @field_validator("operator_id")
     @classmethod

@@ -1,20 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import './styles.css'
+import { api } from './api'
+import { BusinessPages } from './business'
 
 type Row = Record<string, any>
-type Page = 'systems' | 'investigation' | 'knowledge' | 'efficiency'
-
-const api = async (path: string, options: RequestInit = {}) => {
-  const token = sessionStorage.getItem('atr_operator_token') || ''
-  const headers = new Headers(options.headers)
-  headers.set('Content-Type', 'application/json')
-  if (token) headers.set('Authorization', `Bearer ${token}`)
-  const response = await fetch(`/api/v1${path}`, { ...options, headers })
-  const body = await response.json().catch(() => ({}))
-  if (!response.ok) throw new Error(body.detail || `Request failed (${response.status})`)
-  return body
-}
+type Page = 'systems' | 'investigation' | 'knowledge' | 'efficiency' | 'onboarding' | 'business' | 'scope'
 
 const fmtDate = (value?: string) => value ? new Date(value).toLocaleString() : '—'
 const badge = (value: string) => <span className={`badge ${value.toLowerCase().replaceAll('_', '-')}`}>{value}</span>
@@ -35,6 +26,7 @@ function App() {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [busy, setBusy] = useState(false)
+  const [runJob, setRunJob] = useState('')
   const [token, setToken] = useState(sessionStorage.getItem('atr_operator_token') || '')
 
   const refresh = useCallback(async () => {
@@ -44,6 +36,7 @@ function App() {
   }, [selectedSystem])
 
   useEffect(() => { refresh().catch(e => setError(e.message)) }, [refresh])
+  useEffect(() => { if(['systems','investigation','knowledge','efficiency'].includes(page)) void refresh().catch(e=>setError(e.message)) }, [page,refresh])
   useEffect(() => {
     if (!selectedSystem) { setGraph(null); return }
     api(`/systems/${selectedSystem}/graph`).then(setGraph).catch(() => setGraph(null))
@@ -55,6 +48,23 @@ function App() {
     if (incident.latest_run_id) api(`/runs/${incident.latest_run_id}`).then(setRun).catch(() => setRun(null))
     else setRun(null)
   }, [selectedIncident, incidents])
+
+  useEffect(() => {
+    if (!runJob) return
+    let stopped = false; let timer: ReturnType<typeof setTimeout>
+    const poll = async () => {
+      try {
+        const state = await api(`/jobs/${runJob}`)
+        if (stopped) return
+        const id = state.result?.run_id || state.result?.id
+        if (id) setRun(await api(`/runs/${id}`))
+        if (['queued','running'].includes(state.status)) timer = setTimeout(poll,700)
+        else {setRunJob(''); await refresh(); if(state.status!=='completed')setError(state.error || '调查被中断')}
+      } catch(e) {if(!stopped){setError((e as Error).message);setRunJob('')}}
+    }
+    void poll()
+    return () => {stopped=true;clearTimeout(timer)}
+  }, [runJob,refresh])
 
   const act = async (fn: () => Promise<void>) => {
     setError(''); setNotice(''); setBusy(true)
@@ -83,7 +93,7 @@ function App() {
 
   const runIncident = (incidentId: string) => void act(async () => {
     const result = await api(`/incidents/${incidentId}/runs`, { method: 'POST', body: '{}' })
-    setSelectedIncident(incidentId); setRun(await api(`/runs/${result.id}`)); setPage('investigation')
+    setSelectedIncident(incidentId); setRunJob(result.job_id); setPage('investigation'); setNotice('只读调查已排入后台，可查看实际执行过程。')
     if (selectedSystem) setGraph(await api(`/systems/${selectedSystem}/graph`))
   })
 
@@ -150,7 +160,7 @@ function App() {
       <div className="brand"><div className="brand-mark"><span /></div><div><strong>ATR</strong><small>Adaptive Runtime</small></div></div>
       <div className="workspace-label">LOCAL WORKSPACE</div>
       <nav>
-        {([['systems', '◈', '系统图谱'], ['investigation', '⌁', '故障调查'], ['knowledge', '✳', '知识审核'], ['efficiency', '◷', '效率分析']] as [Page, string, string][]).map(([key, icon, label]) =>
+        {([['onboarding', '+', '新业务接入'], ['business', '▤', '业务档案'], ['scope', '◎', '服务器范围'], ['systems', '◈', '系统图谱'], ['investigation', '⌁', '故障调查'], ['knowledge', '✳', '知识审核'], ['efficiency', '◷', '效率分析']] as [Page, string, string][]).map(([key, icon, label]) =>
           <button key={key} className={`nav-item ${page === key ? 'active' : ''}`} onClick={() => setPage(key)}><span className="nav-icon">{icon}</span>{label}{key === 'investigation' && incidents.length > 0 && <i>{incidents.length}</i>}</button>)}
       </nav>
       <div className="sidebar-bottom">
@@ -161,11 +171,12 @@ function App() {
     </aside>
 
     <main className="main">
-      <header className="topbar"><div className="breadcrumb"><span>工作台</span><b>/</b><strong>{{systems:'系统图谱', investigation:'故障调查', knowledge:'知识审核', efficiency:'效率分析'}[page]}</strong></div>
+      <header className="topbar"><div className="breadcrumb"><span>工作台</span><b>/</b><strong>{{onboarding:'新业务接入',business:'业务档案',scope:'服务器范围确认',systems:'系统图谱', investigation:'故障调查', knowledge:'知识审核', efficiency:'效率分析'}[page]}</strong></div>
         <div className="top-actions"><span className="environment"><span /> Local · Read only</span><button className="icon-button" title="刷新" onClick={() => refresh().catch(e => setError(e.message))}>↻</button><div className="avatar">OP</div></div></header>
       <div className="content">
         {error && <div className="alert error"><span>!</span>{error}<button onClick={() => setError('')}>×</button></div>}
         {notice && <div className="alert success"><span>✓</span>{notice}<button onClick={() => setNotice('')}>×</button></div>}
+        {(page==='onboarding'||page==='business'||page==='scope')&&<BusinessPages page={page}/>}
 
         {page === 'systems' && <>
           <div className="page-heading"><div><div className="eyebrow">UNDERSTAND BEFORE ACTION</div><h1>系统图谱</h1><p>从代码、部署和运行观察建立带来源的系统认知。</p></div><div className="heading-meta"><span className="sync"><i /> 本地数据已同步</span><button className="btn ghost" onClick={() => refresh().catch(e => setError(e.message))}>↻　刷新视图</button></div></div>
@@ -182,14 +193,14 @@ function App() {
         </>}
 
         {page === 'investigation' && <>
-          <div className="page-heading"><div><div className="eyebrow">EVIDENCE-LED DIAGNOSIS</div><h1>故障调查</h1><p>先收集当前只读证据，再判断哪些结论有足够支持。</p></div><div className="heading-meta"><span className="run-limit">◉ 每次最多 15 次只读调用</span></div></div>
+          <div className="page-heading"><div><div className="eyebrow">EVIDENCE-LED DIAGNOSIS</div><h1>故障调查</h1><p>先收集当前只读证据，再判断哪些结论有足够支持。</p></div><div className="heading-meta"><span className="run-limit">◉ 只读调用由配置预算限制</span></div></div>
           <div className="investigation-grid">
             <section className="panel incident-panel"><div className="panel-title"><div><h2>创建事件</h2><p>从已有系统图谱开始一次诊断。</p></div><span className="step-icon">02</span></div>
               <form className="form" onSubmit={createIncident}><label>目标系统<select name="system_id" required value={selectedSystem} onChange={e => setSelectedSystem(e.target.value)}><option value="">选择已登记系统</option>{systems.map(x => <option value={x.id} key={x.id}>{x.name}</option>)}</select></label><label>故障现象<textarea name="symptom" required minLength={3} rows={3} placeholder="例如：外部请求返回 502，发生在 14:20 左右"/></label><label>故障开始时间（可选）<input name="window_start" type="datetime-local"/><small>留空时以创建事件的时间作为起点；日志证据只接受该时间之后的错误记录。</small></label><label>调查模式<select name="mode"><option value="normal">Graph · 基础取证</option><option value="graph_only">Graph-only · 配对基线</option><option value="graph_pattern">Graph + Pattern · 检索历史检查清单</option></select></label><button className="btn primary full" disabled={busy || !systems.length}>创建故障事件 <span>→</span></button></form>
               <div className="divider"/><div className="panel-title compact"><div><h2>事件列表</h2><p>共 {incidents.length} 个事件</p></div></div>
               <div className="incident-list">{incidents.length === 0 ? <Empty title="还没有故障事件" text="创建事件后即可开始调查。"/> : incidents.map(x => <button key={x.id} className={`incident-row ${selectedIncident === x.id ? 'selected' : ''}`} onClick={() => {setSelectedIncident(x.id); setSelectedSystem(x.system_id)}}><span className="incident-mark">⌁</span><span><strong>{x.symptom?.text || '未命名事件'}</strong><small>{x.system_name} · {fmtDate(x.created_at)}</small></span><span className="incident-right">{badge(x.status)}<b>›</b></span></button>)}</div>
             </section>
-            <section className="panel run-panel"><div className="panel-title"><div><h2>诊断运行</h2><p>{activeIncident ? activeIncident.symptom?.text : '选择一个事件或创建新事件'}</p></div>{activeIncident && <button className="btn primary" disabled={busy} onClick={() => runIncident(activeIncident.id)}>▶　开始只读调查</button>}</div>
+            <section className="panel run-panel"><div className="panel-title"><div><h2>诊断运行</h2><p>{activeIncident ? activeIncident.symptom?.text : '选择一个事件或创建新事件'}</p></div>{activeIncident && <button className="btn primary" disabled={busy||!!runJob} onClick={() => runIncident(activeIncident.id)}>▶　{runJob?'调查进行中':'开始只读调查'}</button>}</div>
               {!run ? <div className="run-empty"><div className="empty-orbit"><span>⌁</span><i/><i/><i/></div><h3>等待调查运行</h3><p>运行会先读取服务状态和近期日志，所有调用都会进入审计时间线。</p><div className="run-steps"><span><b>01</b> 定位当前图版本</span><span><b>02</b> 采集状态与日志</span><span><b>03</b> 检查证据门</span></div></div> : <RunView run={run} onRepair={recordRepair} onMatchOutcome={recordMatchOutcome} verificationDefault={currentSystem?.compose_project === 'atr-system-b' ? 'http://ingress_proxy/health' : 'http://edge_proxy/health'}/>}
             </section>
           </div>
@@ -223,15 +234,17 @@ function Metric({ label, value, detail, icon, tone = '' }: {label: string; value
 function Empty({ title, text }: {title: string; text: string}) { return <div className="empty"><div>◌</div><strong>{title}</strong><p>{text}</p></div> }
 function GraphPanel({ graph, onReview }: {graph: Row; onReview: (id: string) => void}) {
   const nodeNames = Object.fromEntries(graph.nodes.map((node: Row) => [node.id, node.name]))
-  return <div className="graph-section"><div className="graph-heading"><div><h3>当前系统图</h3><span>快照 v{graph.snapshot.version} · {graph.snapshot.repo_revision.slice(0,12)}</span></div><span className="count-pill">{graph.nodes.length} NODES</span></div><div className="graph-nodes">{graph.nodes.map((node: Row) => <div className="graph-node" key={node.id}><i className={`node-dot ${node.role}`}/><div><strong>{node.name}</strong><small>{node.kind} · {node.role}</small></div></div>)}</div>{graph.edges.length > 0 && <div className="edge-list">{graph.edges.map((edge: Row) => <span key={edge.id}>{nodeNames[edge.from_node_id] || '?'} <b>→</b> {edge.relation} <b>→</b> {nodeNames[edge.to_node_id] || '?'}</span>)}</div>}{graph.conflicts.filter((x: Row) => x.status === 'open').map((c: Row) => <div className="conflict-row" key={c.id}><span>⚑</span><div><strong>{c.property}</strong><small>{c.subject_key} · {c.severity}</small></div>{badge('open')}<button className="btn small" onClick={() => onReview(c.id)}>标记已解释</button></div>)}<details className="claims-details"><summary>来源事实 · {graph.claims.length} 项</summary><div className="claim-list">{graph.claims.slice(0, 20).map((c: Row) => <div key={c.id}><span>{c.truth_type}</span><strong>{c.property}</strong><small>{c.source_locator}</small></div>)}</div></details></div>
+  return <div className="graph-section"><div className="graph-heading"><div><h3>当前系统图</h3><span>快照 v{graph.snapshot.version} · {graph.snapshot.repo_revision.slice(0,12)}</span></div><span className="count-pill">{graph.nodes.length} NODES</span></div><div className="graph-nodes">{graph.nodes.map((node: Row) => <div className="graph-node" key={node.id}><i className={`node-dot ${node.role}`}/><div><strong>{node.name}</strong><small>{node.kind} · {node.role}</small></div></div>)}</div>{graph.edges.length > 0 && <div className="edge-list">{graph.edges.map((edge: Row) => <span key={edge.id}>{nodeNames[edge.from_node_id] || '?'} <b>→</b> {edge.relation} <b>→</b> {nodeNames[edge.to_node_id] || '?'}</span>)}</div>}{graph.conflicts.filter((x: Row) => x.status === 'open').map((c: Row) => <div className="conflict-row" key={c.id}><span>⚑</span><div><strong>{c.property}</strong><small>{c.subject_key} · {c.severity}</small></div>{badge('open')}<button className="btn small" onClick={() => onReview(c.id)}>标记已解释</button></div>)}<details className="claims-details"><summary>来源事实 · {graph.claims.length} 项</summary><div className="claim-list">{graph.claims.slice(0, 20).map((c: Row) => <div key={c.id}><span>{c.source_type || c.truth_type}</span><strong>{c.property}</strong><small>{c.source_locator}</small></div>)}</div></details></div>
 }
 function RunView({ run, onRepair, onMatchOutcome, verificationDefault }: {run: Row; onRepair: (e: React.FormEvent<HTMLFormElement>) => void; onMatchOutcome: (id: string, payload: Row) => void; verificationDefault: string}) {
   const summary = run.summary || {}
   const gate = summary.gate || {}
+  const budget = run.context_budget
   return <div className="run-view"><div className="run-status-line"><div><span className={`status-pulse ${run.status}`}/><strong>{run.status === 'supported' ? '证据门通过' : run.status === 'unresolved' ? '尚未建立根因' : run.status}</strong><small>运行 {run.id.slice(0,8)} · 图版本 {run.graph_snapshot_id?.slice(0,8)}</small></div>{badge(run.status)}</div>
     <div className="diagnosis-summary"><div className="summary-label"><span>诊断摘要</span><span>{run.evidence?.length || 0} 条当前证据</span></div><p>{summary.summary || '本次运行没有可展示的摘要。'}</p>{summary.next_action && <div className="next-action"><span>建议的下一步</span><p>{summary.next_action}</p></div>}<div className="gate-note"><b>证据门：</b>{gate.rationale || '无支持结论。'}　当前冲突：{gate.open_conflict_count ?? 0}</div></div>
+    <div className="business-block"><p className="muted">Agent 阶段：{summary.stage||run.status} {summary.round&&`· 第 ${summary.round} 轮`} · 数据来源：{summary.connector_types?.join('、')||'查看下方工具审计'}</p>{summary.unresolved_reason&&<p className="alert error">未解决原因：{summary.unresolved_reason}</p>}{budget&&<p>输入 {budget.input_tokens} · 输出 {budget.output_tokens} Tokens · 模型 {budget.calls}/{budget.limits.max_calls} 次 · 工具 {budget.tool_calls}/{budget.limits.max_tools} 次 · 读取 {budget.retrieved_bytes} bytes {budget.stop_reason&&`· 停止：${budget.stop_reason}`}</p>}{budget?.usage_records.map((u:Row)=><p className="muted" key={u.id}>{u.model} · {u.usage_kind==='actual'?'供应商实际 usage':'估算'} · {u.input_tokens}+{u.output_tokens} Tokens · 费用 {u.cost==null?'未知':`估算 $${u.cost.toFixed(6)}`}</p>)}<details><summary>每次实际执行的工具与策略结果</summary>{run.tool_calls?.map((c:Row)=><div className="business-row" key={c.id}><strong>{c.tool_id}</strong>{badge(c.status)}<small>{fmtDate(c.started_at)} · {c.policy_version} · {c.error_code||c.id}</small></div>)}</details></div>
     <div className="run-section-title"><h3>假设与证据</h3><span>{run.hypotheses?.length || 0} HYPOTHESES</span></div>
-    <div className="hypothesis-list">{(run.hypotheses || []).map((h: Row) => <article className="hypothesis" key={h.id}><div className="hypothesis-head"><div><span className="hypothesis-num">H</span><strong>{h.failure_mode}</strong></div>{badge(h.status)}</div><p>{h.falsifiable_prediction}</p><div className="causal-chain">{(JSON.parse(h.causal_chain_json || '[]') as string[]).map((x, i) => <React.Fragment key={i}><span>{x}</span>{i < JSON.parse(h.causal_chain_json || '[]').length-1 && <b>→</b>}</React.Fragment>)}</div></article>)}</div>
+    <div className="hypothesis-list">{(run.hypotheses || []).map((h: Row) => <article className="hypothesis" key={h.id}><div className="hypothesis-head"><div><span className="hypothesis-num">H</span><strong>{h.failure_mode}</strong></div>{badge(h.status)}</div><p>{h.falsifiable_prediction}</p><div className="causal-chain">{(JSON.parse(h.causal_chain_json || '[]') as string[]).map((x, i) => <React.Fragment key={i}><span>{x}</span>{i < JSON.parse(h.causal_chain_json || '[]').length-1 && <b>→</b>}</React.Fragment>)}</div><div className="hypothesis-links">{h.evidence_links?.map((e:Row)=><p key={e.evidence_id+e.stance}><b>{e.stance==='support'?'支持':'反证'}</b> · {e.evidence_id.slice(0,12)} · {e.explanation}</p>)}</div></article>)}</div>
     <div className="run-section-title"><h3>逐轮诊断</h3><span>{run.diagnostic_steps?.length || 0} STEPS</span></div>
     <div className="iteration-list">{(run.diagnostic_steps || []).map((step: Row) => { const action = step.action || {}; const executed = action.executed_action; const proposed = action.proposed_action; const actionLabel = executed ? `${executed.tool_id} · ${executed.service} (${executed.role})` : proposed && step.review_outcome === 'supported' ? '证据门已通过，未执行后续动作' : proposed && action.policy_outcome === 'rejected' ? '建议检查被策略拒绝' : proposed ? '建议的检查未执行' : '本轮未提出额外检查'; return <article className="iteration-card" key={step.id}><div><strong>第 {step.sequence_no} 轮 · {badge(step.review_outcome)}</strong><small>置信分 {Number(step.score_before).toFixed(2)} → {Number(step.score_after).toFixed(2)}</small></div><p>{actionLabel}</p>{proposed?.rationale && <small>{proposed.rationale}</small>}<small>{action.evidence_ids?.length || 0} 条用于复核的证据{action.tool_status ? ` · 工具 ${action.tool_status}` : ''}</small></article> })}</div>
     {summary.pattern_matches && <><div className="run-section-title"><h3>可迁移检查建议</h3><span>历史 Pattern 不是当前证据</span></div><div className="pattern-match-list">{summary.pattern_matches.length === 0 ? <p className="muted">没有满足角色约束的 Trusted Pattern。</p> : summary.pattern_matches.map((m: Row) => <article className="pattern-match" key={m.match_id}><div><strong>{m.pattern.pattern_key} · v{m.pattern.version}</strong><span>{badge(m.decision)}　匹配分 {Number(m.score).toFixed(2)}</span><p>角色绑定：{(m.binding?.roles || []).join(' · ')}{m.executed_check_count == null ? '' : ` · 本次按 Pattern 采集 ${m.executed_check_count} 项`}</p><div className="match-checks">{(m.pattern.checks || []).map((c: Row, i: number) => <span key={i}>{i+1}. {c.tool_id}{c.target_role ? ` · ${c.target_role}` : ''}</span>)}</div></div>{m.decision === 'suggested' && <div className="match-actions"><div><small>检查已在当前目标验证？</small><button className="btn small" disabled={m.validation_outcome !== 'pending'} onClick={() => onMatchOutcome(m.match_id, {validation:'validated'})}>是</button><button className="btn small" disabled={m.validation_outcome !== 'pending'} onClick={() => onMatchOutcome(m.match_id, {validation:'failed'})}>否</button></div><div><small>对本次调查有帮助？</small><button className="btn small" disabled={m.usefulness_outcome !== 'pending'} onClick={() => onMatchOutcome(m.match_id, {usefulness:'useful'})}>有帮助</button><button className="btn small" disabled={m.usefulness_outcome !== 'pending'} onClick={() => onMatchOutcome(m.match_id, {usefulness:'not_useful'})}>没有</button></div><span>复核：{m.validation_outcome} · 有用性：{m.usefulness_outcome}</span></div>}</article>)}</div></>}

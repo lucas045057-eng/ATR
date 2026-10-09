@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 
-
 _AUTH = re.compile(
     r"(?i)(?P<prefix>\b(?:authorization|proxy-authorization)\s*[:=]\s*['\"]?)"
     r"(?:(?:bearer|basic)\s+)?(?P<value>[^'\"\s,;]+)(?P<quote>['\"]?)"
@@ -13,7 +12,7 @@ _SECRET_PAIR = re.compile(
     r"client[_-]?secret|access[_-]?token|refresh[_-]?token|private[_-]?key|"
     r"cookie|set-cookie|x-api-key|auth|(?:aws[_-]?)?secret[_-]?access[_-]?key|"
     r"aws[_-]?session[_-]?token)[\"']?\s*[:=]\s*)"
-    r"(?P<quote>[\"']?)(?P<value>[^\"'\s,;}{]+)(?P=quote)"
+    r"(?P<value>\"[^\"]*\"|'[^']*'|[^\r\n,;}{]+)"
 )
 _URI_PASSWORD = re.compile(r"(?i)([a-z][a-z0-9+.-]*://[^:/@\s]+:)[^@/\s]+(@)")
 _JWT = re.compile(r"\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\b")
@@ -28,7 +27,7 @@ def redact_text(value: str) -> str:
     value = _AUTH.sub(lambda match: match.group("prefix") + "[REDACTED]" + match.group("quote"), value)
     value = _BEARER.sub(r"\1 [REDACTED]", value)
     value = _SECRET_PAIR.sub(
-        lambda match: match.group("key") + match.group("quote") + "[REDACTED]" + match.group("quote"),
+        lambda match: match.group("key") + (match.group("value")[0] + "[REDACTED]" + match.group("value")[0] if match.group("value").startswith(('"', "'")) else "[REDACTED]"),
         value,
     )
     value = _URI_PASSWORD.sub(r"\1[REDACTED]\2", value)

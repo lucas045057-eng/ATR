@@ -7,7 +7,7 @@ This runbook uses two isolated example stacks. System A is Python + MySQL + Ngin
 From the project directory, copy `.env.example` to `.env` and replace both sample tokens with distinct private random values of at least 32 characters. Do not commit `.env`. Start the workbench first so it creates the private Docker network:
 
 ```sh
-docker compose up --build -d
+docker compose --profile docker-demo up --build -d
 ```
 
 Start both example systems:
@@ -107,3 +107,7 @@ The `-v` flags on the example stacks delete only their disposable database volum
 - Fault injection and repair remain operator-only and are absent from the agent tool catalog.
 - Docker Desktop is installed, but the local `desktop-linux` engine is stopped, so neither Compose stack nor the HTTP workflow was started or runtime-verified here.
 - No simulated “9 checks to 4” result is seeded; efficiency numbers come from persisted runs and tool calls.
+
+## V2.1 update
+
+The legacy collector is now an explicit `docker-demo` profile. Default onboarding uses uploaded artifacts and Mock/SSH reads without a Docker socket. Run creation returns HTTP 202 with `job_id`; the workbench polls the persisted job and run. See `business-onboarding.md` and `security-boundaries.md` for the new flow.

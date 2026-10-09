@@ -12,8 +12,16 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.agent.workflow import build_workflow
 from app.api.dependencies import require_operator
-from app.domain import (EvaluationCaseCreate, EvaluationPairCreate, EvaluationTrialCreate, IncidentCreate, OnboardingRequest,
-                        PatternMatchOutcome, RepairRecord, ReviewRequest)
+from app.domain import (
+    EvaluationCaseCreate,
+    EvaluationPairCreate,
+    EvaluationTrialCreate,
+    IncidentCreate,
+    OnboardingRequest,
+    PatternMatchOutcome,
+    RepairRecord,
+    ReviewRequest,
+)
 from app.settings import get_settings
 from app.storage.database import Database
 from app.system.inventory import SystemOnboarding
@@ -138,6 +146,7 @@ def graph_view(system_id: str) -> dict[str, Any]:
             row["claim_ids"] = decode(row.pop("claim_ids_json"), [])
         for row in claims:
             row["value"] = decode(row.pop("value_json"))
+            row["source_type"] = row["value"].get("provenance", {}).get("source_type", row["truth_type"]) if isinstance(row["value"], dict) else row["truth_type"]
         return {"system": dict(system), "snapshot": {**dict(snapshot), "coverage": decode(snapshot["coverage_json"]), "coverage_json": None},
                 "nodes": nodes, "edges": edges, "claims": claims, "conflicts": conflicts}
     finally:
@@ -191,7 +200,7 @@ def pattern_matches(connection: Any, run_id: str, snapshot_id: str, symptom: str
         # This component ranks a checklist only. Historical Pattern data is never added as current evidence.
         checks = [check for check in decode(pattern["checks_json"], [])
                   if isinstance(check, dict) and check.get("purpose") == "diagnosis"
-                  and check.get("tool_id") == "container.logs"
+                  and check.get("tool_id") in {"container.logs", "service.logs"}
                   and (not check.get("target_role") or check.get("target_role") in p_roles)]
         pattern_signals = {
             (check["tool_id"], role)
@@ -203,14 +212,15 @@ def pattern_matches(connection: Any, run_id: str, snapshot_id: str, symptom: str
         signals_available = bool(pattern_signals) and pattern_signals.issubset(current_signals)
         score = .45 * symptom_score + .35 * topology_score + .20 * signal_score
         scored.append({"pattern": pattern, "score": round(score, 4), "binding": {"roles": sorted(p_roles), "snapshot_id": snapshot_id},
-                       "checks": checks})
+                       "checks": checks, "signals_available": signals_available, "topology_available": p_topology.issubset(topology)})
     scored.sort(key=lambda x: x["score"], reverse=True)
     margin = scored[0]["score"] - scored[1]["score"] if len(scored) > 1 else (scored[0]["score"] if scored else 0)
     for index, item in enumerate(scored):
         pattern = item["pattern"]
         checks = item["checks"]
+        p_roles = set(item["binding"]["roles"])
         gate = (item["score"] >= .70 and margin >= .15 and not has_conflicts
-                and bool(checks) and signals_available)
+                and bool(checks) and item["signals_available"] and item["topology_available"])
         decision = "suggested" if gate and index == 0 else "not_selected"
         match_id = str(uuid.uuid4())
         connection.execute("INSERT INTO pattern_matches(id,run_id,pattern_version_id,score,rank,binding_json,gate_result,decision,validation_outcome,usefulness_outcome) VALUES(?,?,?,?,?,?,?,?,?,?)",
@@ -221,6 +231,7 @@ def pattern_matches(connection: Any, run_id: str, snapshot_id: str, symptom: str
                            "roles": sorted(p_roles), "checks": checks,
                            "source_experience_id": pattern["source_experience_id"]}
         item["binding"]["role_node_ids"] = {role: role_node_ids.get(role, []) for role in sorted(p_roles)}
+        connection.execute("UPDATE pattern_matches SET binding_json=? WHERE id=?", (json.dumps(item["binding"]), match_id))
         item["gate_result"] = "passed" if gate else "failed"
         item["decision"] = decision
         item["validation_outcome"] = "pending"
@@ -228,8 +239,7 @@ def pattern_matches(connection: Any, run_id: str, snapshot_id: str, symptom: str
     return scored
 
 
-@router.post("/incidents/{incident_id}/runs")
-def start_run(incident_id: str, actor: str = Depends(require_operator)) -> dict[str, Any]:
+def execute_legacy_run(incident_id: str, actor: str, job_id: str | None = None) -> dict[str, Any]:
     database, settings = db(), get_settings()
     connection = database.connect()
     try:
@@ -267,6 +277,11 @@ def start_run(incident_id: str, actor: str = Depends(require_operator)) -> dict[
         connection.close()
 
     evidence: list[dict[str, Any]] = []
+    from app.context.budget import ContextBudgetManager
+    budget_id = ContextBudgetManager(database, settings).create("investigation", run_id=run_id)
+    if job_id:
+        with database.transaction() as tx:
+            tx.execute("UPDATE jobs SET result_json=? WHERE id=?", (json.dumps({"run_id": run_id}), job_id))
     tool_registry = ToolRegistry(database, settings)
     status_result = tool_registry.execute(run_id, sid, system["compose_project"], "compose.status", {})
     if status_result.get("evidence_id"):
@@ -338,7 +353,7 @@ def start_run(incident_id: str, actor: str = Depends(require_operator)) -> dict[
         with database.transaction() as tx:
             emit(tx, system["id"], run_id, "pattern_match", suggested_match["match_id"], "pattern_checks_executed",
                  {"executed_check_count": executed_pattern_checks}, actor)
-    graph_for_agent = {"nodes": graph_rows, "edges": graph_edges, "open_conflicts": open_conflicts}
+    graph_for_agent = {"snapshot_id": sid, "nodes": graph_rows, "edges": graph_edges, "open_conflicts": open_conflicts}
     runtime_containers: dict[str, dict[str, Any]] = {}
     for container in containers:
         node = by_service.get(container.get("service"))
@@ -359,10 +374,10 @@ def start_run(incident_id: str, actor: str = Depends(require_operator)) -> dict[
                                 "role": node["role"], "service": node["name"]})
         return actions[:32]
 
-    workflow = build_workflow(settings)
+    workflow = build_workflow(settings, database, budget_id)
     action_history: list[dict[str, Any]] = []
     iterations: list[dict[str, Any]] = []
-    max_followup_actions = 3
+    max_followup_actions = settings.investigation_model_rounds - 1
     for iteration_no in range(max_followup_actions + 1):
         available_actions = available_diagnostic_actions()
         result_state = workflow.invoke({
@@ -440,6 +455,7 @@ def start_run(incident_id: str, actor: str = Depends(require_operator)) -> dict[
     summary = {"summary": report.get("summary", ""), "next_action": report.get("next_action", ""),
                "gate": gate, "provider_error": result_state.get("provider_error"),
                "evidence_ids": [e["evidence_id"] for e in evidence], "iterations": iteration_summaries}
+    summary["budget_id"] = budget_id
     if mode == "graph_pattern":
         summary["pattern_matches"] = run_matches
     supported_id = None
@@ -460,6 +476,8 @@ def start_run(incident_id: str, actor: str = Depends(require_operator)) -> dict[
                             json.dumps(hyp.get("causal_chain", [])[:12]), str(hyp.get("prediction", ""))[:500],
                             hyp.get("status", "candidate"), score))
                 persisted_hypotheses.append((hid, hyp, score))
+                for link in hyp.get("evidence_links", []):
+                    tx.execute("INSERT OR IGNORE INTO hypothesis_evidence VALUES(?,?,?,?)", (hid, link["evidence_id"], "support" if link["relation"] == "supports" else "refute", link["explanation"]))
                 if hyp.get("status") == "supported" and supported_id is None:
                     supported_id = hid
 
@@ -501,6 +519,33 @@ def start_run(incident_id: str, actor: str = Depends(require_operator)) -> dict[
             "pattern_matches": summary.get("pattern_matches", []), "provider_error": summary.get("provider_error")}
 
 
+@router.post("/incidents/{incident_id}/runs", status_code=202)
+def start_run(incident_id: str, actor: str = Depends(require_operator)) -> dict[str, Any]:
+    from app.agent.business_investigation import investigate_business
+    from app.jobs import reserve, submit
+    database, settings = db(), get_settings()
+    conn = database.connect()
+    try:
+        incident = conn.execute("SELECT * FROM incidents WHERE id=?", (incident_id,)).fetchone()
+        if not incident:
+            raise HTTPException(404, "Incident not found")
+        business = conn.execute("SELECT id FROM business_profiles WHERE system_id=?", (incident["system_id"],)).fetchone()
+        if conn.execute("SELECT 1 FROM diagnosis_runs WHERE incident_id=? AND status='running'", (incident_id,)).fetchone():
+            raise HTTPException(409, "Investigation already running")
+        job_id = reserve(database, "investigate:" + incident_id, business["id"] if business else None)
+    finally:
+        conn.close()
+    def execute():
+        try:
+            return investigate_business(database, settings, incident_id, business["id"], actor, job_id) if business else execute_legacy_run(incident_id, actor, job_id)
+        except Exception:
+            with database.transaction() as tx:
+                tx.execute("UPDATE diagnosis_runs SET status='failed',ended_at=? WHERE incident_id=? AND status='running'", (utcnow(), incident_id))
+            raise
+    submit(database, job_id, execute)
+    return {"job_id": job_id, "status": "queued"}
+
+
 @router.get("/incidents/{incident_id}/runs")
 def list_incident_runs(incident_id: str) -> list[dict[str, Any]]:
     connection = db().connect()
@@ -537,13 +582,16 @@ def get_run(run_id: str) -> dict[str, Any]:
             raise HTTPException(status_code=404, detail="Run not found")
         result = dict(row)
         result["summary"] = decode(result.pop("summary_json"))
+        from app.context.budget import ContextBudgetManager
+        budget_row = connection.execute("SELECT id FROM context_budgets WHERE run_id=? ORDER BY created_at DESC LIMIT 1", (run_id,)).fetchone()
+        result["context_budget"] = ContextBudgetManager(db(), get_settings()).get(budget_row["id"]) if budget_row else None
         if result["summary"].get("pattern_matches"):
             persisted = {match["id"]: dict(match) for match in connection.execute(
                 "SELECT id,validation_outcome,usefulness_outcome FROM pattern_matches WHERE run_id=?", (run_id,))}
             for match in result["summary"]["pattern_matches"]:
                 match.update(persisted.get(match.get("match_id"), {}))
         result["symptom"] = decode(result.pop("symptom_json"))
-        result["hypotheses"] = [dict(h) for h in connection.execute("SELECT * FROM hypotheses WHERE run_id=? ORDER BY score DESC", (run_id,))]
+        result["hypotheses"] = [{**dict(h), "evidence_links": [dict(e) for e in connection.execute("SELECT evidence_id,stance,explanation FROM hypothesis_evidence WHERE hypothesis_id=?", (h["id"],))]} for h in connection.execute("SELECT * FROM hypotheses WHERE run_id=? ORDER BY score DESC", (run_id,))]
         result["diagnostic_steps"] = []
         for step in connection.execute("SELECT * FROM diagnostic_steps WHERE run_id=? ORDER BY sequence_no", (run_id,)):
             item = dict(step)
@@ -646,6 +694,16 @@ def review_pattern(pattern_id: str, request: ReviewRequest, actor: str = Depends
             raise HTTPException(status_code=404, detail="Pattern version not found")
         if pattern["status"] != "candidate":
             raise HTTPException(status_code=409, detail="Only Candidate patterns can be reviewed for promotion")
+        if request.decision == "approve":
+            experience = connection.execute("SELECT * FROM experiences WHERE id=?", (pattern["source_experience_id"],)).fetchone()
+            verification_ids = decode(experience["verification_call_ids_json"], []) if experience else []
+            verified = False
+            for call_id in verification_ids:
+                observation = connection.execute("SELECT t.status,t.purpose,e.payload_redacted_json FROM tool_calls t JOIN evidence e ON e.tool_call_id=t.id WHERE t.id=? AND t.run_id=?", (call_id, pattern["run_id"])).fetchone()
+                if observation and observation["status"] == "succeeded" and observation["purpose"] == "verification" and decode(observation["payload_redacted_json"]).get("status_code") == 200:
+                    verified = True
+            if not experience or experience["status"] != "verified" or not verified or not decode(experience["repair_record_json"]).get("summary"):
+                raise HTTPException(409, "Trusted promotion requires recorded repair and a real successful verification read")
         review_id, timestamp = str(uuid.uuid4()), utcnow()
         next_status = "trusted" if request.decision == "approve" else "rejected"
         with db().transaction() as tx:

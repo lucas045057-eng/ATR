@@ -14,14 +14,14 @@ def json_text(value: Any) -> str:
 
 
 def role_for(name: str, service: dict[str, Any]) -> str:
-    text = " ".join((name, str(service.get("image", "")))).casefold()
-    if any(x in text for x in ("nginx", "proxy", "gateway")):
+    image = str(service.get("image", "")).split("/")[-1].split(":")[0].casefold()
+    if image in {"nginx", "haproxy", "traefik", "caddy"}:
         return "proxy"
-    if any(x in text for x in ("mysql", "postgres", "mariadb", "database", "db")):
+    if image in {"mysql", "postgres", "mariadb", "mongo", "mongodb"}:
         return "datastore"
-    if "redis" in text:
+    if image in {"redis", "memcached"}:
         return "cache"
-    if any(x in text for x in ("api", "app", "web", "server")):
+    if service.get("build") or image in {"python", "node", "gunicorn", "uvicorn"}:
         return "application"
     return "unknown"
 
@@ -37,8 +37,8 @@ def build_graph(snapshot_id: str, services: dict[str, dict[str, Any]], networks:
     edges: list[dict] = []
     service_nodes: dict[str, dict] = {}
     for name, config in services.items():
-        role = role_for(name, config)
         config = config if isinstance(config, dict) else {}
+        role = role_for(name, config)
         item = node("service", name, role, {
             "image": config.get("image"), "build": bool(config.get("build")),
             "command_declared": "command" in config, "healthcheck_declared": "healthcheck" in config,

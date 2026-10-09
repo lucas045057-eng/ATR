@@ -50,14 +50,20 @@ class SystemOnboarding:
             compose_project = str(spec.get("name") or f"atr-{system_id[:8]}")[:63]
             nodes, edges = build_graph(snapshot_id, services, spec.get("networks") or {})
             source_digest = hashlib.sha256("".join(f"{r['path']}:{r['content_sha256']}" for r in source_rows).encode()).hexdigest()
+            canonical_by_id = {n["id"]: n["canonical_key"] for n in nodes}
+            semantic_digest = hashlib.sha256(json_text({"nodes": sorted((n["canonical_key"], n["role"], json_text(n["attributes"])) for n in nodes),
+                "edges": sorted((canonical_by_id[e["from_node_id"]], canonical_by_id[e["to_node_id"]], e["relation"], e["certainty"]) for e in edges)}).encode()).hexdigest()
             coverage.update({"compose_services": len(services), "source_files_supported": len(source_rows),
-                             "source_digest": source_digest, "runtime_observation": "not_collected"})
+                             "source_digest": source_digest, "semantic_digest": semantic_digest, "runtime_observation": "not_collected"})
             timestamp = now()
             with self.db.transaction() as tx:
-                previous = tx.execute("SELECT id FROM graph_snapshots WHERE system_id=? AND status='current'", (system_id,)).fetchall()
+                previous = tx.execute("SELECT id,deployment_digest,coverage_json FROM graph_snapshots WHERE system_id=? AND status='current'", (system_id,)).fetchall()
                 for old_snapshot in previous:
                     old_snapshot_id = old_snapshot["id"]
                     tx.execute("UPDATE graph_snapshots SET status='superseded',observed_to=? WHERE id=?", (timestamp, old_snapshot_id))
+                    equivalent = json.loads(old_snapshot["coverage_json"]).get("semantic_digest") == semantic_digest
+                    if equivalent:
+                        continue
                     old_patterns = tx.execute("SELECT id,validity_json,status FROM pattern_versions WHERE status IN ('candidate','trusted','stale')").fetchall()
                     for pattern in old_patterns:
                         if json.loads(pattern["validity_json"]).get("snapshot_id") != old_snapshot_id or pattern["status"] == "stale":
