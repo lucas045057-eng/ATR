@@ -67,3 +67,14 @@ CREATE TABLE IF NOT EXISTS hypothesis_evidence(
 def migrate(connection):
     connection.executescript(SQL)
     connection.execute("INSERT OR IGNORE INTO schema_migrations VALUES(21,datetime('now'))")
+    columns = {r[1] for r in connection.execute("PRAGMA table_info(service_bindings)")}
+    for name, definition in {
+        "freshness_status": "TEXT NOT NULL DEFAULT 'unverified'",
+        "observed_at": "TEXT",
+        "expires_at": "TEXT",
+        "source_json": "TEXT NOT NULL DEFAULT '{}'",
+        "candidate_digest": "TEXT NOT NULL DEFAULT ''",
+    }.items():
+        if name not in columns:
+            connection.execute(f"ALTER TABLE service_bindings ADD COLUMN {name} {definition}")
+    connection.execute("INSERT OR IGNORE INTO schema_migrations VALUES(22,datetime('now'))")

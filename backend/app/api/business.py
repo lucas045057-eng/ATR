@@ -331,6 +331,7 @@ def discoveries(business_id: str):
 
 @router.get("/businesses/{business_id}/bindings")
 def bindings(business_id: str):
+    from app.system.scope import binding_is_current
     s = service()
     s.get(business_id)
     conn = s.db.connect()
@@ -340,6 +341,8 @@ def bindings(business_id: str):
                 **dict(r),
                 "reasons": json.loads(r["reasons_json"]),
                 "evidence_ids": json.loads(r["evidence_ids_json"]),
+                "source": json.loads(r["source_json"]),
+                "runtime_current": binding_is_current(r),
             }
             for r in conn.execute(
                 "SELECT * FROM service_bindings WHERE business_id=? ORDER BY score DESC",

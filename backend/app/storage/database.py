@@ -164,6 +164,16 @@ class Database:
                         connection.backup(backup)
                     finally:
                         backup.close()
+            if migrated and not connection.execute(
+                "SELECT 1 FROM schema_migrations WHERE version=22"
+            ).fetchone():
+                backup_path = self.path.with_name(self.path.name + ".pre-v22.bak")
+                if not backup_path.exists():
+                    backup = sqlite3.connect(backup_path)
+                    try:
+                        connection.backup(backup)
+                    finally:
+                        backup.close()
             connection.executescript(SCHEMA)
             migrate(connection)
             connection.commit()

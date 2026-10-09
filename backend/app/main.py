@@ -30,6 +30,8 @@ async def lifespan(_: FastAPI):
                 summary = json.loads(run["summary_json"] or "{}")
             except json.JSONDecodeError:
                 summary = {}
+            if not isinstance(summary, dict):
+                summary = {}
             summary["interrupted_reason"] = "backend_restarted_before_run_completed"
             tx.execute("UPDATE diagnosis_runs SET status='interrupted',ended_at=?,summary_json=? WHERE id=?",
                        (timestamp, json.dumps(summary), run["id"]))
@@ -39,6 +41,19 @@ async def lifespan(_: FastAPI):
                        (str(uuid.uuid4()), run["system_id"], run["id"], sequence, "run", run["id"],
                         "run_interrupted", "runtime", json.dumps({"reason": "backend_restart"}), timestamp))
         tx.execute("UPDATE tool_calls SET status='interrupted',ended_at=?,error_code='backend_restart' WHERE status='pending'", (timestamp,))
+        for job in tx.execute("SELECT * FROM jobs WHERE status IN ('queued','running') AND kind LIKE 'investigate:%'").fetchall():
+            incident = tx.execute("SELECT system_id FROM incidents WHERE id=?", (job['kind'].split(':', 1)[1],)).fetchone()
+            if not incident:
+                continue
+            try:
+                result = json.loads(job['result_json'])
+                run_id = result.get('run_id') if isinstance(result, dict) else None
+            except (ValueError, TypeError):
+                run_id = None
+            if run_id and not tx.execute("SELECT 1 FROM diagnosis_runs WHERE id=?", (run_id,)).fetchone():
+                run_id = None
+            sequence = tx.execute("SELECT COALESCE(MAX(sequence_no),0)+1 FROM events WHERE run_id=?", (run_id,)).fetchone()[0]
+            tx.execute("INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?,?)", (str(uuid.uuid4()), incident['system_id'], run_id, sequence, 'job', job['id'], 'job_interrupted', 'runtime', json.dumps({'reason':'backend_restart'}), timestamp))
         tx.execute("UPDATE jobs SET status='interrupted',error='backend_restart',ended_at=? WHERE status IN ('queued','running')", (timestamp,))
         tx.execute("UPDATE uploaded_artifacts SET status='failed',error='backend_restart' WHERE status='queued'")
         tx.execute("UPDATE discovery_runs SET status='interrupted' WHERE status='running'")

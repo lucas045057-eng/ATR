@@ -7,6 +7,7 @@ from app.agent.workflow import build_workflow
 from app.business.service import BusinessService
 from app.common import dumps, now, uid
 from app.context.budget import ContextBudgetManager
+from app.system.scope import binding_is_current
 from app.tools.business import BusinessToolRegistry
 
 
@@ -49,6 +50,7 @@ def investigate_business(database, settings, incident_id, business_id, actor, jo
         ]
     finally:
         conn.close()
+    bindings = [b for b in bindings if binding_is_current(b)]
     run_id, stamp = uid(), now()
     symptom = json.loads(incident["symptom_json"])
     with database.transaction() as tx:

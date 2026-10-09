@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import PurePosixPath
 from typing import Literal
 
@@ -70,7 +71,20 @@ class EmptyArgs(StrictModel):
 
 
 class ListArgs(StrictModel):
-    limit: int = Field(default=60, ge=1, le=100)
+    limit: int = Field(default=60, ge=1, le=100, strict=True)
+    name_hints: list[str] = Field(default_factory=list, max_length=8)
+    cursor: str = Field(
+        default="",
+        max_length=130,
+        pattern=r"^(?:[01]:[A-Za-z0-9][A-Za-z0-9_.@-]{0,127})?$",
+    )
+
+    @field_validator("name_hints")
+    @classmethod
+    def validate_hints(cls, values):
+        if any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.@-]{0,127}", v) for v in values):
+            raise ValueError("名称线索仅接受有界服务或进程标识符")
+        return values
 
 
 class ServiceArgs(StrictModel):

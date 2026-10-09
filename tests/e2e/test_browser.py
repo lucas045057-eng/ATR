@@ -77,7 +77,7 @@ def test_browser_complete_onboarding(live_server):
     source = directory / "catalog.zip"
     source.write_bytes(archive(SAMPLE))
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(headless=True, channel=os.environ.get("ATR_BROWSER_CHANNEL") or None)
         context = browser.new_context(viewport={"width": 1440, "height": 1000})
         context.add_init_script(
             "sessionStorage.setItem('atr_operator_token','browser-test-operator-" + "x" * 40 + "')"

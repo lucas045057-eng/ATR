@@ -107,6 +107,9 @@ def fuse_business_graph(database, profile):
             (business_id,),
         ).fetchall()
         for binding in bindings:
+            from app.system.scope import binding_is_current
+            if not binding_is_current(binding):
+                continue
             key = f"service:{binding['service']}"
             if key not in nodes:
                 continue
@@ -130,6 +133,9 @@ def fuse_business_graph(database, profile):
                     "binding_id": binding["id"],
                     "evidence_ids": json.loads(binding["evidence_ids_json"]),
                     "source_type": "Runtime",
+                    "observed_at": binding['observed_at'],
+                    "expires_at": binding['expires_at'],
+                    "freshness_status": binding['freshness_status'],
                 },
             )
             edges.extend(

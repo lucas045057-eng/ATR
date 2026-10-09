@@ -140,6 +140,14 @@ def graph_view(system_id: str) -> dict[str, Any]:
         claims = [dict(row) for row in connection.execute("SELECT * FROM fact_claims WHERE snapshot_id=? ORDER BY source_locator", (sid,))]
         for row in nodes:
             row["attributes"] = decode(row.pop("attributes_json"))
+            binding_id = row['attributes'].get('binding_id')
+            if binding_id:
+                from app.system.scope import binding_is_current
+                binding = connection.execute('SELECT * FROM service_bindings WHERE id=?', (binding_id,)).fetchone()
+                current = bool(binding and binding_is_current(binding))
+                row['attributes']['runtime_current'] = current
+                if not current:
+                    row['attributes']['freshness_status'] = 'stale'
         for row in edges:
             row["attributes"] = decode(row.pop("attributes_json"))
         for row in conflicts:
@@ -522,7 +530,7 @@ def execute_legacy_run(incident_id: str, actor: str, job_id: str | None = None) 
 @router.post("/incidents/{incident_id}/runs", status_code=202)
 def start_run(incident_id: str, actor: str = Depends(require_operator)) -> dict[str, Any]:
     from app.agent.business_investigation import investigate_business
-    from app.jobs import reserve, submit
+    from app.jobs import reserve_investigation, submit
     database, settings = db(), get_settings()
     conn = database.connect()
     try:
@@ -530,20 +538,19 @@ def start_run(incident_id: str, actor: str = Depends(require_operator)) -> dict[
         if not incident:
             raise HTTPException(404, "Incident not found")
         business = conn.execute("SELECT id FROM business_profiles WHERE system_id=?", (incident["system_id"],)).fetchone()
-        if conn.execute("SELECT 1 FROM diagnosis_runs WHERE incident_id=? AND status='running'", (incident_id,)).fetchone():
-            raise HTTPException(409, "Investigation already running")
-        job_id = reserve(database, "investigate:" + incident_id, business["id"] if business else None)
+        try:
+            job_id, status, created = reserve_investigation(database, incident_id, business["id"] if business else None)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
     finally:
         conn.close()
     def execute():
-        try:
-            return investigate_business(database, settings, incident_id, business["id"], actor, job_id) if business else execute_legacy_run(incident_id, actor, job_id)
-        except Exception:
-            with database.transaction() as tx:
-                tx.execute("UPDATE diagnosis_runs SET status='failed',ended_at=? WHERE incident_id=? AND status='running'", (utcnow(), incident_id))
-            raise
-    submit(database, job_id, execute)
-    return {"job_id": job_id, "status": "queued"}
+        return investigate_business(database, settings, incident_id, business["id"], actor, job_id) if business else execute_legacy_run(incident_id, actor, job_id)
+    if created:
+        submit(database, job_id, execute)
+        with database.transaction() as tx:
+            status = tx.execute('SELECT status FROM jobs WHERE id=?', (job_id,)).fetchone()[0]
+    return {"job_id": job_id, "status": status, "reused": not created}
 
 
 @router.get("/incidents/{incident_id}/runs")
