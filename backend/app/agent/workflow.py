@@ -8,6 +8,7 @@ from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
+from app.agent.verification import verify_hypothesis
 from app.settings import Settings
 from app.tools.redaction import redact_text
 
@@ -280,8 +281,16 @@ def _reviewer(state: InvestigationState) -> dict[str, Any]:
                              for evidence_id in relevant_supports)
         prediction = redact_text(str(item.get("prediction", "")))[:500]
         causal = item.get("causal_chain", [])
+        verification = verify_hypothesis(item, state, evidence_targets, allowed_targets,
+                                         relevant_supports, _parse_timestamp, _parse_log_timestamp)
+        for evidence_id in verification["counter_evidence"]:
+            if evidence_id not in refute_ids:
+                links.append({"evidence_id": evidence_id, "relation": "refutes",
+                              "explanation": "Current observation contradicts the hypothesis prediction or required failed state."})
+                refute_ids.add(evidence_id)
         passed = (target_is_current and len(signatures) >= 2 and len(families) >= 2
                   and failure_signal and bool(prediction) and not conflicts and not refute_ids
+                  and verification["passed"]
                   and isinstance(causal, list) and len(causal) >= 2
                   and len(str(item.get("rationale", ""))) >= 20
                   and all(len(link["explanation"]) >= 10 for link in links)
@@ -289,8 +298,8 @@ def _reviewer(state: InvestigationState) -> dict[str, Any]:
         status = "supported" if passed and supported_index is None else "candidate"
         if status == "supported":
             supported_index = index
-            rationale = ("Two independent current observations are bound to the named service or its declared dependency; "
-                         "at least one contains a failure signal, the exact current graph node is valid, and no graph conflict is open.")
+            rationale = ("Current mechanism logs and independent target status verify the prediction; "
+                         "the original evidence minimums pass and no counter-evidence or graph conflict is open.")
         try:
             confidence = float(item.get("confidence", 0.25))
         except (TypeError, ValueError):
@@ -305,6 +314,7 @@ def _reviewer(state: InvestigationState) -> dict[str, Any]:
                                  "causal_chain": [redact_text(str(x))[:300] for x in causal_chain[:12]],
                                  "evidence_ids": sorted(support_ids | refute_ids),
                                  "evidence_links": links, "status": status,
+                                 "verification": verification,
                                  "confidence": min(1, max(0, confidence))})
     return {"gate": {"status": "supported" if supported_index is not None else "unresolved",
                      "supported_index": supported_index, "rationale": rationale,

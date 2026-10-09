@@ -133,6 +133,7 @@ class AdaptiveInvestigationPlanner:
             missing = original.get("missing_evidence", [])
             if not isinstance(missing, list):
                 missing = []
+            missing = list(dict.fromkeys(str(x) for x in missing + item.get("verification", {}).get("missing_evidence", [])))
             predictions = original.get("verification_predictions", [])
             if not isinstance(predictions, list):
                 predictions = []
