@@ -65,7 +65,7 @@ class EvaluationTrialCreate(StrictModel):
     case_id: str = Field(min_length=1, max_length=80)
     run_id: str = Field(min_length=1, max_length=80)
     pair_key: str = Field(min_length=2, max_length=100, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
-    arm: Literal["graph_only", "graph_pattern"]
+    arm: Literal["graph_only", "graph_pattern", "graph_adaptive"]
     repetition: int = Field(ge=1, le=100)
     reset_digest: str = Field(min_length=8, max_length=128)
     verdict: Literal["correct", "incorrect", "unresolved"]

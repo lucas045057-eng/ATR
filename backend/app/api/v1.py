@@ -22,6 +22,7 @@ from app.domain import (
     RepairRecord,
     ReviewRequest,
 )
+from app.evaluation import assess_truth, compare_trials, run_metrics
 from app.settings import get_settings
 from app.storage.database import Database
 from app.system.inventory import SystemOnboarding
@@ -180,6 +181,10 @@ def create_incident(request: IncidentCreate, actor: str = Depends(require_operat
         system = connection.execute("SELECT id FROM systems WHERE id=?", (request.system_id,)).fetchone()
         if not system:
             raise HTTPException(status_code=404, detail="System not found")
+        if request.mode == "graph_adaptive" and not connection.execute(
+            "SELECT 1 FROM business_profiles WHERE system_id=?", (request.system_id,)
+        ).fetchone():
+            raise HTTPException(409, "Adaptive mode requires the reviewed business profile and runtime scope entry")
         incident_id, timestamp = str(uuid.uuid4()), utcnow()
         with db().transaction() as tx:
             tx.execute("INSERT INTO incidents(id,system_id,symptom_json,window_start,window_end,status,created_at) VALUES(?,?,?,?,?,?,?)",
@@ -806,7 +811,7 @@ def metrics() -> dict[str, Any]:
                 durations.append(max(0, (end-start).total_seconds()))
         calls = connection.execute("SELECT status FROM tool_calls WHERE purpose='diagnosis'").fetchall()
         patterns = connection.execute("SELECT decision,validation_outcome,usefulness_outcome FROM pattern_matches").fetchall()
-        paired_rows = connection.execute("SELECT pair_key,repetition,arm,metrics_json FROM evaluation_trials").fetchall()
+        paired_rows = connection.execute("SELECT pair_key,repetition,arm,metrics_json,verdict FROM evaluation_trials").fetchall()
         paired: dict[tuple[str, int], dict[str, Any]] = {}
         for trial in paired_rows:
             paired.setdefault((trial["pair_key"], trial["repetition"]), {})[trial["arm"]] = decode(trial["metrics_json"])
@@ -823,6 +828,7 @@ def metrics() -> dict[str, Any]:
                 "patterns_useful": sum(p["usefulness_outcome"]=="useful" for p in patterns),
                 "pattern_suggestion_rate": rate(sum(p["decision"]=="suggested" for p in patterns), len(patterns)),
                 "complete_paired_evaluations": len(complete_pairs),
+                "three_arm_evaluation": compare_trials(paired_rows),
                 "mean_tool_call_reduction_per_pair": round(sum(call_reductions)/len(call_reductions), 3) if call_reductions else None}
     finally:
         connection.close()
@@ -888,17 +894,14 @@ def create_evaluation_pair(request: EvaluationPairCreate,
                 raise HTTPException(status_code=409, detail="Run graph does not match the evaluation case fixture")
             if run["status"] not in {"supported", "unresolved"}:
                 raise HTTPException(status_code=409, detail="Both runs must be complete")
-            calls = connection.execute("SELECT status FROM tool_calls WHERE run_id=? AND purpose='diagnosis'",
-                                       (run["id"],)).fetchall()
-            steps = connection.execute("SELECT COUNT(*) AS n FROM diagnostic_steps WHERE run_id=?",
-                                       (run["id"],)).fetchone()["n"]
-            duration = None
-            if run["supported_at"]:
-                duration = max(0, (datetime.fromisoformat(run["supported_at"]) -
-                                   datetime.fromisoformat(run["started_at"])).total_seconds())
-            metrics_data = {"diagnostic_tool_calls": len(calls),
-                            "failed_or_denied_calls": sum(c["status"] in {"failed", "denied", "timed_out"} for c in calls),
-                            "diagnostic_steps": steps, "tt_rca_seconds": duration, "run_status": run["status"]}
+            if (run["status"] == "unresolved") != (verdict == "unresolved"):
+                raise HTTPException(409, "An unresolved run must have an unresolved verdict")
+            metrics_data = run_metrics(connection, run)
+            assessment = assess_truth(connection, case, run)
+            if assessment:
+                if verdict != assessment["expected_verdict"]:
+                    raise HTTPException(409, "Verdict does not match the registered fixture ground truth")
+                metrics_data.update(assessment)
             prepared.append((arm, run, verdict, metrics_data))
         mismatch = _run_pair_mismatch(prepared[0][1], prepared[1][1])
         if mismatch:
@@ -954,6 +957,8 @@ def create_evaluation_trial(request: EvaluationTrialCreate,
             raise HTTPException(status_code=409, detail="Run mode does not match the selected evaluation arm")
         if run["status"] not in {"supported", "unresolved"}:
             raise HTTPException(status_code=409, detail="Only completed supported or unresolved runs can be scored")
+        if (run["status"] == "unresolved") != (request.verdict == "unresolved"):
+            raise HTTPException(409, "An unresolved run must have an unresolved verdict")
         siblings = connection.execute("SELECT * FROM evaluation_trials WHERE pair_key=? AND repetition=?",
                                       (request.pair_key, request.repetition)).fetchall()
         if any(sibling["case_id"] != request.case_id or sibling["reset_digest"] != request.reset_digest
@@ -970,29 +975,23 @@ def create_evaluation_trial(request: EvaluationTrialCreate,
             mismatch = _run_pair_mismatch(sibling_run, run)
             if mismatch:
                 raise HTTPException(status_code=409, detail=mismatch)
-        calls = connection.execute("SELECT status FROM tool_calls WHERE run_id=? AND purpose='diagnosis'",
-                                   (run["id"],)).fetchall()
-        steps = connection.execute("SELECT COUNT(*) AS n FROM diagnostic_steps WHERE run_id=?",
-                                   (run["id"],)).fetchone()["n"]
-        duration = None
-        if run["supported_at"]:
-            duration = max(0, (datetime.fromisoformat(run["supported_at"]) -
-                               datetime.fromisoformat(run["started_at"])).total_seconds())
-        run_metrics = {"diagnostic_tool_calls": len(calls), "failed_or_denied_calls": sum(
-            call["status"] in {"failed", "denied", "timed_out"} for call in calls),
-            "diagnostic_steps": steps, "tt_rca_seconds": duration,
-            "run_status": run["status"]}
+        measured = run_metrics(connection, run)
+        assessment = assess_truth(connection, case, run)
+        if assessment:
+            if request.verdict != assessment["expected_verdict"]:
+                raise HTTPException(409, "Verdict does not match the registered fixture ground truth")
+            measured.update(assessment)
         trial_id = str(uuid.uuid4())
         with db().transaction() as tx:
             tx.execute("INSERT INTO evaluation_trials(id,case_id,run_id,pair_key,arm,repetition,reset_digest,metrics_json,verdict,started_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
                        (trial_id, request.case_id, request.run_id, request.pair_key, request.arm,
-                        request.repetition, request.reset_digest, json.dumps(run_metrics), request.verdict, utcnow()))
+                        request.repetition, request.reset_digest, json.dumps(measured), request.verdict, utcnow()))
             emit(tx, run["system_id"], run["id"], "evaluation_trial", trial_id, "evaluation_trial_recorded",
                  {"pair_key": request.pair_key, "arm": request.arm, "repetition": request.repetition,
-                  "verdict": request.verdict, "metrics": run_metrics}, actor)
+                  "verdict": request.verdict, "metrics": measured}, actor)
         return {"id": trial_id, "case_id": request.case_id, "run_id": request.run_id,
                 "pair_key": request.pair_key, "arm": request.arm, "repetition": request.repetition,
-                "reset_digest": request.reset_digest, "metrics": run_metrics, "verdict": request.verdict}
+                "reset_digest": request.reset_digest, "metrics": measured, "verdict": request.verdict}
     finally:
         connection.close()
 
