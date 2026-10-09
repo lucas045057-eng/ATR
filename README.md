@@ -4,6 +4,8 @@ ATR 在本地分析陌生业务资料，建立有来源的业务骨架，经过�
 
 本版基于上游 `73f3603a1df633d7bffe2d9d98b411b6a1e9bc68` 增量开发，保留 LangGraph、LiteLLM、SQLite、System Graph、Evidence Gate、知识审核、效率分析及两个 Compose Demo。新增中文业务接入、业务档案和服务器范围页面，源码更新保留上游 Git 历史。
 
+迁移到有 Docker 的电脑继续开发，请先阅读 [开发交接文档](docs/development-handoff.md)，其中包含新机验收顺序、可上传样例、待验证能力和下一阶段任务。
+
 ## Windows 本地启动
 
 需要 Python 3.11+；前端重新构建需要 Node.js/npm。交付 ZIP 已包含 `frontend/dist`，本地资料接入和 Mock 调查不需要 Docker 或模型 API。
