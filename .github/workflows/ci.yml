@@ -32,7 +32,9 @@ jobs:
       - run: npm ci && npm run build
         working-directory: frontend
       - run: uv run --locked python -m playwright install --with-deps chromium
-      - run: uv run --locked pytest -q --basetemp=test-results/ci-temp --junitxml=test-results/ci.xml
+      - run: |
+          mkdir -p test-results
+          uv run --locked pytest -q --basetemp=test-results/ci-temp --junitxml=test-results/ci.xml
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
