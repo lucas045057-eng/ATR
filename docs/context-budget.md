@@ -19,6 +19,8 @@
 
 业务创建产生初始预算，模型理解复用最新初始预算及历史用量。每个调查产生独立预算。页面可修改业务已有预算；修改不会归零 calls/tokens/tools/bytes。初始理解停止后，提高预算再点击分析可继续；已经结束的调查不能从任意步骤自动断点续跑，需要新调查。
 
+`.env` 的默认值在创建预算时写入数据库。修改 `INVESTIGATION_INPUT_TOKENS` 并重新加载后端配置只影响之后新建的 Run；Docker 环境需重新创建 API 容器。已处于范围审核等待状态的 Run 可以在审核有效映射后恢复，继续原预算、原 SSH 目标，不重置用量。
+
 API：GET `/api/v1/businesses/{id}/budgets`，PUT `/api/v1/businesses/{id}/budgets/{budget_id}`。PUT 为 BudgetLimits 完整 JSON，例如：
 
 ```json
@@ -42,6 +44,10 @@ API：GET `/api/v1/businesses/{id}/budgets`，PUT `/api/v1/businesses/{id}/budge
 无自动模型重试；无效 JSON/超时也记录结算。后端重启使 pending 记录 interrupted 并估算结算，不能以重启释放已可能消费的预算。
 
 ## 上下文选择
+
+`estimate_model_input` 是内容的 UTF-8 字节数加每条消息 128 和固定 256 的保守估算，并非供应商 Token 计数。预算拒绝保留 `budget_reason`、`estimated_input_tokens`、`input_limit` 安全诊断，不创建已发送请求记录；已发送请求保留预检查估算，结算 usage 仍单独采用供应商实际整数计数。
+
+调查先去除与当前假设完全相同的历史摘要，模型侧省略重复权限标志和历史动作哈希；原始动作及权限校验仍保留。随后按上限压缩日志预览，证据编号、反证和结构化状态不变，完整证据仍在数据库。若最小上下文仍超限，停止请求，不自动提高上限或重试。
 
 初始理解最多选服务 25、模块 25、接口 20、已完成索引 40，优先配置/源码元数据。按预算逐项移除索引及较低优先摘要，保持完整 JSON，不截断序列化正文。始终不提供初次源码全文。
 

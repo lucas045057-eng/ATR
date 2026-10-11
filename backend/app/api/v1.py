@@ -17,6 +17,7 @@ from app.domain import (
     EvaluationPairCreate,
     EvaluationTrialCreate,
     IncidentCreate,
+    InvestigationRunRequest,
     OnboardingRequest,
     PatternMatchOutcome,
     RepairRecord,
@@ -418,6 +419,9 @@ def execute_legacy_run(incident_id: str, actor: str, job_id: str | None = None) 
                      "tool_call_id": None, "evidence_id": None, "tool_status": None,
                      "policy_outcome": None}
         iterations.append(iteration)
+        if result_state.get("model_error"):
+            iteration["policy_outcome"] = "model_failed"
+            break
         if gate.get("status") == "supported" or iteration_no >= max_followup_actions:
             break
         proposal = report.get("action")
@@ -481,6 +485,12 @@ def execute_legacy_run(incident_id: str, actor: str, job_id: str | None = None) 
                "gate": gate, "provider_error": result_state.get("provider_error"),
                "evidence_ids": [e["evidence_id"] for e in evidence], "iterations": iteration_summaries}
     summary["budget_id"] = budget_id
+    model_error = result_state.get("model_error")
+    summary.update(stage="stopped" if model_error else "completed", model_error=model_error,
+                   model_status="failed" if model_error else "offline" if report.get("analysis_status") == "offline" else "completed",
+                   analysis_status="model_failed" if model_error else report.get("analysis_status"),
+                   unresolved_reason=model_error["message"] if model_error else None,
+                   stop_reason=model_error["code"] if model_error else "evidence_supported" if gate.get("status") == "supported" else "no_new_actions")
     if mode == "graph_pattern":
         summary["pattern_matches"] = run_matches
     supported_id = None
@@ -548,8 +558,10 @@ def execute_legacy_run(incident_id: str, actor: str, job_id: str | None = None) 
 
 
 @router.post("/incidents/{incident_id}/runs", status_code=202)
-def start_run(incident_id: str, actor: str = Depends(require_operator)) -> dict[str, Any]:
+def start_run(incident_id: str, request: InvestigationRunRequest | None = None,
+              actor: str = Depends(require_operator)) -> dict[str, Any]:
     from app.agent.business_investigation import investigate_business
+    from app.connectors.service import RuntimeService
     from app.jobs import reserve_investigation, submit
     database, settings = db(), get_settings()
     conn = database.connect()
@@ -558,14 +570,41 @@ def start_run(incident_id: str, actor: str = Depends(require_operator)) -> dict[
         if not incident:
             raise HTTPException(404, "Incident not found")
         business = conn.execute("SELECT id FROM business_profiles WHERE system_id=?", (incident["system_id"],)).fetchone()
+        target_id = None
+        if business:
+            runtime = RuntimeService(database, settings)
+            rows = conn.execute("SELECT id,config_json FROM runtime_targets WHERE business_id=? ORDER BY created_at,id", (business["id"],)).fetchall()
+            configs = {row["id"]: runtime.public({"id": row["id"], **decode(row["config_json"])}) for row in rows}
+            readiness = {key: runtime.investigation_readiness(value) for key, value in configs.items()}
+            requested_id = request.target_id if request else None
+            eligible = [key for key, state in readiness.items() if state["eligible"]]
+            if requested_id is None:
+                if len(rows) == 1 and len(eligible) == 1:
+                    target_id = eligible[0]
+                elif len(rows) > 1:
+                    raise HTTPException(409, "当前业务配置了多个 SSH 目标，请明确选择目标；不可用目标不会自动回退")
+                else:
+                    reasons = [state["reason"] for state in readiness.values() if state.get("reason")]
+                    detail = "；".join(dict.fromkeys(reasons))
+                    raise HTTPException(409, "当前业务没有可用于调查的已授权 SSH 目标" + (f"：{detail}" if detail else ""))
+            else:
+                if requested_id not in configs:
+                    raise HTTPException(404, "所选 SSH 目标不存在或不属于当前业务")
+                if not readiness[requested_id]["eligible"]:
+                    raise HTTPException(409, f"所选 SSH 目标不可用于调查：{readiness[requested_id]['reason']}")
+                target_id = requested_id
+            try:
+                runtime.require_credentials(business["id"], target_id)
+            except PermissionError as exc:
+                raise HTTPException(409, "所选 SSH 目标的会话凭据不可用，请重新提供凭据") from exc
         try:
-            job_id, status, created = reserve_investigation(database, incident_id, business["id"] if business else None)
+            job_id, status, created = reserve_investigation(database, incident_id, business["id"] if business else None, target_id)
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
     finally:
         conn.close()
     def execute():
-        return investigate_business(database, settings, incident_id, business["id"], actor, job_id) if business else execute_legacy_run(incident_id, actor, job_id)
+        return investigate_business(database, settings, incident_id, business["id"], actor, job_id, target_id=target_id) if business else execute_legacy_run(incident_id, actor, job_id)
     if created:
         submit(database, job_id, execute)
         with database.transaction() as tx:
@@ -580,10 +619,72 @@ def list_incident_runs(incident_id: str) -> list[dict[str, Any]]:
         if not connection.execute("SELECT 1 FROM incidents WHERE id=?", (incident_id,)).fetchone():
             raise HTTPException(status_code=404, detail="Incident not found")
         return [dict(row) for row in connection.execute(
-            "SELECT id,status,started_at,supported_at,ended_at,graph_snapshot_id,mode FROM diagnosis_runs WHERE incident_id=? ORDER BY started_at DESC",
+            "SELECT id,status,started_at,supported_at,ended_at,graph_snapshot_id,mode,target_id FROM diagnosis_runs WHERE incident_id=? ORDER BY started_at DESC",
             (incident_id,))]
     finally:
         connection.close()
+
+
+@router.post("/runs/{run_id}/resume", status_code=202)
+def resume_business_run(run_id: str, actor: str = Depends(require_operator)):
+    from app.agent.business_investigation import investigate_business
+    from app.agent.discovery import authorization_digest
+    from app.business.service import BusinessService
+    from app.connectors.service import RuntimeService
+    from app.context.budget import ContextBudgetManager
+    from app.jobs import reserve_investigation, submit
+    from app.system.scope import binding_is_current
+    database, settings = db(), get_settings()
+    with database.connect() as c:
+        row = c.execute("SELECT * FROM diagnosis_runs WHERE id=?", (run_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "调查不存在")
+        summary = decode(row["summary_json"])
+        if row["status"] != "awaiting_review" or summary.get("stage") != "awaiting_review":
+            raise HTTPException(409, "调查未处于待审核状态")
+        business_id, incident_id = summary["business_id"], row["incident_id"]
+        target_id = row["target_id"]
+        target_snapshot = decode(row["target_snapshot_json"])
+        if not target_id or target_snapshot.get("id") != target_id:
+            raise HTTPException(409, "历史调查未保存 SSH 目标来源，不能安全恢复；请新建调查并明确选择目标")
+        profile = BusinessService(database, settings).get(business_id)
+        if profile["profile_version"] != summary["profile_version"] or profile["review_status"] != "approved":
+            raise HTTPException(409, "业务画像版本变化，需要重新审核并发起调查")
+        runtime = RuntimeService(database, settings)
+        try:
+            current = runtime.get(business_id, target_id)
+        except KeyError as exc:
+            raise HTTPException(409, "原调查 SSH 目标已删除，不能恢复；请新建调查") from exc
+        target_readiness = runtime.investigation_readiness(current)
+        if not target_readiness["eligible"]:
+            if target_readiness["status"] == "credential_missing":
+                raise HTTPException(403, "SSH 会话凭据不可用，请重新提供密码")
+            raise HTTPException(409, "原调查 SSH 目标已停用或撤销授权，不能恢复")
+        if authorization_digest(current) != target_snapshot.get("authorization_digest"):
+            raise HTTPException(409, "原调查目标授权或执行配置已变化，不能恢复")
+        if summary.get("authorization_digests") and summary["authorization_digests"] != {target_id: authorization_digest(current)}:
+            raise HTTPException(409, "原调查授权记录与 Run 目标不一致，不能恢复")
+        try:
+            runtime.require_credentials(business_id, target_id)
+        except PermissionError as exc:
+            raise HTTPException(403, "SSH 会话凭据不可用，请重新提供密码") from exc
+        current_bindings = [dict(b) for b in c.execute("SELECT * FROM service_bindings WHERE business_id=?", (business_id,))
+                            if binding_is_current(b) and b["kind"] in {"service", "container"} and b["target_id"] == target_id]
+        if not current_bindings:
+            raise HTTPException(409, "请先确认有效的服务或容器映射")
+    manager = ContextBudgetManager(database, settings)
+    budget = manager.get(summary["budget_id"])
+    if budget["stop_reason"] or budget["tool_calls"] >= budget["limits"]["max_tools"] or budget["calls"] >= budget["limits"]["max_calls"]:
+        raise HTTPException(409, "原调查预算已耗尽，恢复不会重置预算")
+    from app.context.budget import BudgetExceeded
+    try:
+        manager.remaining_seconds(summary["budget_id"])
+    except BudgetExceeded as exc:
+        raise HTTPException(409, "原调查执行时间预算已耗尽") from exc
+    job_id, status, created = reserve_investigation(database, incident_id, business_id, target_id)
+    if created:
+        submit(database, job_id, lambda: investigate_business(database, settings, incident_id, business_id, actor, job_id, resume_run_id=run_id, target_id=target_id))
+    return {"job_id": job_id, "status": status, "reused": not created, "run_id": run_id}
 
 
 @router.get("/runs")
@@ -609,6 +710,12 @@ def get_run(run_id: str) -> dict[str, Any]:
             raise HTTPException(status_code=404, detail="Run not found")
         result = dict(row)
         result["summary"] = decode(result.pop("summary_json"))
+        target_snapshot = decode(result.pop("target_snapshot_json", None))
+        if not isinstance(target_snapshot, dict):
+            target_snapshot = {}
+        target_snapshot.pop("authorization_digest", None)
+        result["runtime_target"] = target_snapshot or None
+        result["target_binding_status"] = "bound" if result.get("target_id") else "unknown"
         from app.context.budget import ContextBudgetManager
         budget_row = connection.execute("SELECT id FROM context_budgets WHERE run_id=? ORDER BY created_at DESC LIMIT 1", (run_id,)).fetchone()
         result["context_budget"] = ContextBudgetManager(db(), get_settings()).get(budget_row["id"]) if budget_row else None
@@ -625,7 +732,27 @@ def get_run(run_id: str) -> dict[str, Any]:
             item["action"] = decode(item.pop("action_json"))
             result["diagnostic_steps"].append(item)
         result["events"] = [dict(e) for e in connection.execute("SELECT * FROM events WHERE run_id=? ORDER BY sequence_no", (run_id,))]
-        result["tool_calls"] = [dict(c) for c in connection.execute("SELECT * FROM tool_calls WHERE run_id=? ORDER BY started_at", (run_id,))]
+        result["tool_calls"] = []
+        for call in connection.execute("SELECT t.*,o.diagnostics_json,o.target_id AS actual_target_id FROM tool_calls t LEFT JOIN runtime_observations o ON o.id=t.request_id WHERE t.run_id=? ORDER BY t.started_at", (run_id,)):
+            item = {**dict(call), "diagnostic": decode(call["diagnostics_json"] or "{}")}
+            item.pop("diagnostics_json", None)
+            actual_id = item.pop("actual_target_id", None)
+            item["actual_target_id"] = actual_id
+            if actual_id:
+                if target_snapshot.get("id") == actual_id:
+                    item["actual_target"] = target_snapshot
+                else:
+                    target_row = connection.execute("SELECT config_json FROM runtime_targets WHERE id=?", (actual_id,)).fetchone()
+                    if target_row:
+                        config = decode(target_row["config_json"])
+                        item["actual_target"] = {"id": actual_id, "name": config.get("name"), "host": config.get("host"),
+                                                  "port": config.get("port"), "execution_mode": config.get("execution_mode", "forced_gateway"),
+                                                  "connector": config.get("connector")}
+                    else:
+                        item["actual_target"] = {"id": actual_id, "source": "runtime_observation"}
+            else:
+                item["actual_target"] = None
+            result["tool_calls"].append(item)
         result["evidence"] = []
         for evidence in connection.execute("SELECT e.*,t.tool_id,t.status AS call_status FROM evidence e JOIN tool_calls t ON t.id=e.tool_call_id WHERE t.run_id=? ORDER BY e.observed_at", (run_id,)):
             item = dict(evidence)

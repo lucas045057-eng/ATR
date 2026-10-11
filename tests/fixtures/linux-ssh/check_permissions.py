@@ -1,7 +1,7 @@
 import json
 import os
 
-assert os.getuid() == 10002 and os.getgid() == 10002
+assert os.getuid() in {10002, 10003} and os.getgid() == os.getuid()
 paths = ["/srv/atr-fixture", "/srv/atr-fixture/app.conf", "/etc/atr/policy.json",
          "/etc/atr/client.pub", "/opt/atr/ssh_gateway.py"]
 for path in paths:

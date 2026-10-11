@@ -175,6 +175,21 @@ class Database:
                     finally:
                         backup.close()
             connection.executescript(SCHEMA)
+            if migrated and not connection.execute("SELECT 1 FROM schema_migrations WHERE version=23").fetchone():
+                backup_path = self.path.with_name(self.path.name + ".pre-model-governance.bak")
+                if not backup_path.exists():
+                    with sqlite3.connect(backup_path) as backup:
+                        connection.backup(backup)
+            if migrated and not connection.execute("SELECT 1 FROM schema_migrations WHERE version=24").fetchone():
+                backup_path = self.path.with_name(self.path.name + ".pre-discovery.bak")
+                if not backup_path.exists():
+                    with sqlite3.connect(backup_path) as backup:
+                        connection.backup(backup)
+            if migrated and not connection.execute("SELECT 1 FROM schema_migrations WHERE version=25").fetchone():
+                backup_path = self.path.with_name(self.path.name + ".pre-target-binding.bak")
+                if not backup_path.exists():
+                    with sqlite3.connect(backup_path) as backup:
+                        connection.backup(backup)
             migrate(connection)
             connection.commit()
         finally:

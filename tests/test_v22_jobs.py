@@ -6,10 +6,12 @@ from app import jobs
 from app.settings import get_settings
 from app.storage.database import Database
 from test_business import onboard
+from test_runtime import target
 
 
 def incident_for(client):
     profile = onboard(client)
+    target(client, profile)
     response = client.post('/api/v1/incidents', json={'system_id': profile['system_id'], 'symptom': 'catalog-api unavailable'})
     assert response.status_code == 200
     return profile, response.json()['id']
@@ -98,7 +100,8 @@ def test_restart_interrupts_malformed_summary_job_and_settles_pending_budget(cli
         tx.execute("UPDATE jobs SET status='running',result_json=? WHERE id=?", (json.dumps({'run_id': 'restart-run'}), job_id))
     manager = ContextBudgetManager(db, get_settings())
     budget_id = manager.create('investigation', profile['business_id'], 'restart-run')
-    manager.reserve(budget_id, [{'role': 'user', 'content': 'hello'}], 64)
+    reservation = manager.reserve(budget_id, [{'role': 'user', 'content': 'hello'}], 64)
+    manager.start_attempt(budget_id, reservation)
     with TestClient(app):
         pass
     jobs.finish(db, job_id, {'run_id': 'late-completion'})
@@ -111,3 +114,6 @@ def test_restart_interrupts_malformed_summary_job_and_settles_pending_budget(cli
     assert budget['input_tokens'] == 389
     assert budget['output_tokens'] == 64
     assert budget['usage_records'][0]['usage_kind'] == 'estimate'
+    audit = budget['usage_records'][0]['diagnostic']
+    assert audit['usage_status'] == 'interrupted' and audit['usage_kind'] == 'estimate'
+    assert audit['ended_at'] is None and audit['recovered_at']

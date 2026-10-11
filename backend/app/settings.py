@@ -3,6 +3,7 @@ from __future__ import annotations
 import secrets
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, field_validator
@@ -22,6 +23,8 @@ class Settings(BaseSettings):
     model_base_url: str = ""
     model_api_key: SecretStr = SecretStr("")
     model_name: str = ""
+    model_wire_api: Literal['chat_completions', 'responses'] = 'chat_completions'
+    model_reasoning_effort: Literal['low', 'medium', 'high'] | None = None
     model_timeout_seconds: float = Field(default=45, ge=2, le=180)
     allowed_health_urls: str = ""
     max_source_files: int = Field(default=1000, ge=1, le=1000)

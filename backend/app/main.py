@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -12,12 +13,15 @@ from fastapi.staticfiles import StaticFiles
 from app.api.business import router as business_router
 from app.api.health import router as health_router
 from app.api.v1 import router as v1_router
+from app.connectors.credentials import SSH_SESSIONS
+from app.context.budget import interrupt_usage
 from app.settings import get_settings
 from app.storage.database import Database
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    SSH_SESSIONS.clear()
     settings = get_settings()
     database = Database(settings.database_path)
     database.initialize()
@@ -59,10 +63,20 @@ async def lifespan(_: FastAPI):
         tx.execute("UPDATE discovery_runs SET status='interrupted' WHERE status='running'")
         tx.execute("UPDATE runtime_observations SET status='interrupted',error='backend_restart' WHERE status='pending'")
         for usage in tx.execute("SELECT * FROM model_usage_records WHERE status='pending'").fetchall():
-            reserved = usage["input_tokens"] + usage["output_tokens"]
-            tx.execute("UPDATE context_budgets SET reserved_tokens=MAX(0,reserved_tokens-?),input_tokens=input_tokens+?,output_tokens=output_tokens+?,stop_reason='interrupted_request_usage_estimated' WHERE id=?", (reserved, usage["input_tokens"], usage["output_tokens"], usage["budget_id"]))
-            tx.execute("UPDATE model_usage_records SET status='interrupted',usage_kind='estimate' WHERE id=?", (usage["id"],))
-    yield
+            interrupt_usage(tx, usage)
+    async def purge_passwords():
+        while True:
+            await asyncio.sleep(30)
+            SSH_SESSIONS.purge()
+
+    purge_task = asyncio.create_task(purge_passwords())
+    try:
+        yield
+    finally:
+        purge_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await purge_task
+        SSH_SESSIONS.clear()
 
 
 app = FastAPI(

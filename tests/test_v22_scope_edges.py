@@ -157,7 +157,7 @@ def test_total_collection_failure_keeps_authorized_binding_and_provenance(client
     original = MockConnector.read
 
     def failed(self, tool, args):
-        if tool.endswith(".list") or tool in {"host.info", "network.listeners"}:
+        if tool.endswith(".list") or tool in {"host.info", "host.memory", "host.disk", "network.listeners"}:
             raise error("isolated discovery failure")
         return original(self, tool, args)
 

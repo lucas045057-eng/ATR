@@ -148,6 +148,7 @@ def test_failure_settles_reserved_usage_without_charging_another_run(client, mon
     run_id = insert_run(database, profile, incident, job_id, {"checkpoint": "evidence_kept"})
     budget_id = manager.create("investigation", profile["business_id"], run_id)
     reservation = manager.reserve(budget_id, [{"role": "user", "content": "hello"}], 64)
+    manager.start_attempt(budget_id, reservation)
     other_budget = manager.create("investigation")
     manager.reserve(other_budget, [{"role": "user", "content": "other"}], 20)
     with database.transaction() as tx:
@@ -175,6 +176,9 @@ def test_failure_settles_reserved_usage_without_charging_another_run(client, mon
     assert budget["output_tokens"] == 64
     assert budget["usage_records"][0]["usage_kind"] == "estimate"
     assert budget["usage_records"][0]["status"] == "interrupted"
+    audit = budget["usage_records"][0]["diagnostic"]
+    assert audit['usage_status'] == 'interrupted' and audit['usage_kind'] == 'estimate'
+    assert audit['ended_at'] is None and audit['recovered_at']
     untouched = manager.get(other_budget)
     assert untouched["reserved_tokens"] > 0
     assert untouched["input_tokens"] == untouched["output_tokens"] == 0
@@ -238,7 +242,9 @@ def test_duplicate_worker_submission_executes_only_once(client, monkeypatch):
 def test_duplicate_reservation_survives_full_queue(client):
     profile, incident = incident_for(client)
     database = database_for_client()
-    existing = jobs.reserve(database, "investigate:" + incident, profile["business_id"])
+    with database.connect() as connection:
+        target_id = connection.execute("SELECT id FROM runtime_targets WHERE business_id=? LIMIT 1", (profile["business_id"],)).fetchone()["id"]
+    existing = jobs.reserve(database, "investigate:" + incident, profile["business_id"], target_id)
     for i in range(11):
         jobs.reserve(database, f"other:{i}")
     response = client.post(f"/api/v1/incidents/{incident}/runs")

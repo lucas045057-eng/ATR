@@ -67,6 +67,7 @@ def stub_report(context):
             "prediction": "The affected service is failed during this incident",
             "causal_chain": ["observed mechanism prevents service operation", "required business requests cannot complete"],
             "rationale": "Require separately sampled current failed state and timestamped mechanism log on this exact service.",
+            "missing_evidence": [],
             "confidence": .9, "evidence_links": [{"evidence_id": e["evidence_id"], "relation": "supports", "explanation": "Current observation must be checked for causal relevance and independent origin."} for e in evidence],
             "verification_predictions": [{"target_node_id": node_id, "tool_id": "service.status", "field": "state", "operator": "eq", "value": "failed"}],
         })
@@ -167,7 +168,7 @@ def evaluate(work_dir, output, *, wsl=None, docker=False, repetitions=1):
                 return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(body)))], usage=None)
 
             patch.setattr(MockConnector, "read", read)
-            patch.setitem(sys.modules, "litellm", SimpleNamespace(completion=completion))
+            patch.setattr("app.context.model._completion", completion)
             with TestClient(app, headers={"Authorization": "Bearer evaluation-local-" + "x" * 40}) as client:
                 settings = get_settings()
                 settings.external_model_enabled = True

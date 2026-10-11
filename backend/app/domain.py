@@ -36,6 +36,10 @@ class IncidentCreate(StrictModel):
         return parsed.astimezone(timezone.utc).isoformat()
 
 
+class InvestigationRunRequest(StrictModel):
+    target_id: str | None = Field(default=None, min_length=1, max_length=80)
+
+
 class ReviewRequest(StrictModel):
     decision: Literal["approve", "reject"]
     reason: str = Field(min_length=5, max_length=1000)

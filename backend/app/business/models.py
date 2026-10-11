@@ -45,6 +45,7 @@ class BusinessProfile(StrictModel):
     conflicts: list[dict] = Field(default_factory=list)
     review_status: Literal["pending", "approved", "rejected"] = "pending"
     model_status: str = "pending"
+    model_error: dict | None = None
     coverage: dict = Field(default_factory=dict)
     changes: dict = Field(default_factory=dict)
 
@@ -74,3 +75,10 @@ class CodeContext(StrictModel):
 class ManualMediaReview(StrictModel):
     text: str = Field(min_length=5, max_length=4000)
     expected_version: int = Field(ge=1)
+
+
+class MediaBatchReview(StrictModel):
+    file_ids: list[str] = Field(min_length=1, max_length=200)
+    action: Literal["optional", "restore"]
+    expected_version: int = Field(ge=1)
+    reason: str = Field(default="批量审核明确静态附件分类", min_length=5, max_length=1000)

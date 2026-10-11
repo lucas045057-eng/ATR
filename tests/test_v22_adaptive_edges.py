@@ -83,10 +83,9 @@ def test_model_cannot_replace_candidate_arguments(client, monkeypatch):
     model_stub(monkeypatch, reply)
     result = investigate(client, profile)
     assert result["status"] == "unresolved"
-    assert any(
-        call["tool_id"] == "service.status" and "store.service" in call["args_redacted_json"]
-        and call["status"] == "succeeded" for call in result["tool_calls"]
-    )
+    assert len(result["tool_calls"]) == 2
+    assert result["summary"]["stop_reason"] == "model_schema_error"
+    assert result["context_budget"]["usage_records"][0]["status"] == "failed"
     assert not any("unauthorized.service" in call["args_redacted_json"] for call in result["tool_calls"])
     assert not any(call["tool_id"] == "shell.exec" for call in result["tool_calls"])
 
@@ -148,7 +147,7 @@ def test_malformed_model_scope_request_stops_without_failing_job(client, monkeyp
     model_stub(monkeypatch, lambda context, _: report(scope_requests=[{"service": service, "reason": "needs access"}]))
     result = investigate(client, profile)
     assert result["status"] == "unresolved"
-    assert result["summary"]["stop_reason"] in {"no_new_actions", "provider_error", "action_rejected"}
+    assert result["summary"]["stop_reason"] == "model_schema_error"
     assert len(result["tool_calls"]) == 2
 
 

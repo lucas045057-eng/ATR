@@ -11,7 +11,7 @@ services:
       COLLECTOR_URL: http://collector:8090
       ARTIFACT_ROOT: /data/artifacts
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:28000:8000"
     volumes:
       - runtime-data:/data
       - ./demo:/demo:ro
@@ -49,7 +49,7 @@ services:
       context: .
       dockerfile: frontend/Dockerfile
     ports:
-      - "127.0.0.1:8080:80"
+      - "127.0.0.1:28080:80"
     depends_on: [api]
     networks: [runtime]
 volumes:

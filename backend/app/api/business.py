@@ -18,11 +18,19 @@ from app.business.models import (
     CodeContext,
     CodeSearch,
     ManualMediaReview,
+    MediaBatchReview,
 )
 from app.business.service import BusinessService
 from app.business.source_index import SourceIndex
-from app.common import dumps, now, uid
-from app.connectors.models import BindingReview, RuntimeTargetCreate, ToolRequest
+from app.common import digest, now, uid
+from app.connectors.credentials import SSH_SESSIONS
+from app.connectors.models import (
+    BindingReview,
+    DockerReaderSelection,
+    RuntimeTargetCreate,
+    SSHPassword,
+    ToolRequest,
+)
 from app.connectors.service import RuntimeService
 from app.context.budget import BudgetLimits, ContextBudgetManager
 from app.context.model import capabilities
@@ -42,6 +50,8 @@ class BusinessRoute(APIRoute):
                 return await original(request)
             except RequestValidationError as exc:
                 # Never echo submitted private credentials or file contents in validation errors.
+                if request.url.path.endswith("/credential"):
+                    raise HTTPException(422, detail="SSH 密码请求格式无效；请提交非空且有界的 password 字段") from exc
                 detail = "; ".join(
                     f"{'.'.join(str(x) for x in e['loc'])}: {e['msg']}" for e in exc.errors()
                 )
@@ -222,8 +232,44 @@ def media_review(business_id: str, file_id: str, request: ManualMediaReview):
             raise KeyError("没有可人工录入的图片/PDF")
         parsed = json.loads(row["parse_json"])
         parsed.update(manual_text=redact_text(request.text), parse_state="complete")
-        tx.execute("UPDATE artifact_files SET parse_json=? WHERE id=?", (dumps(parsed), file_id))
-    return s.rebuild(business_id)
+    return s.rebuild(business_id, {file_id: parsed}, request.expected_version)
+
+
+@router.post("/businesses/{business_id}/files/media-batch-review")
+def media_batch_review(business_id: str, request: MediaBatchReview, actor: str = Depends(require_operator)):
+    from app.business.media import optional_image
+    ensure_idle(business_id)
+    s = service()
+    profile = s.get(business_id)
+    if request.expected_version != profile["profile_version"]:
+        raise ValueError("资料审核版本过期")
+    updates = {}
+    with s.db.connect() as c:
+        for file_id in set(request.file_ids):
+            row = c.execute("SELECT * FROM artifact_files WHERE id=? AND business_id=? AND active=1", (file_id, business_id)).fetchone()
+            if not row or row["media_type"] != "image":
+                raise ValueError("批量分类仅接受当前业务的图片附件")
+            parsed = json.loads(row["parse_json"])
+            if request.action == "optional":
+                if not optional_image(row["path"]):
+                    raise ValueError("架构图和用途不明图片需单独审核，不能批量设为可选附件")
+                if parsed.get("parse_state") == "optional_static_attachment":
+                    continue
+                parsed["optional_previous"] = {k: v for k, v in parsed.items() if k not in {"optional_history", "optional_previous"}}
+                parsed.update(parse_state="optional_static_attachment", media_role="optional_static")
+            else:
+                if parsed.get("parse_state") != "optional_static_attachment" or not isinstance(parsed.get("optional_previous"), dict):
+                    raise ValueError("此文件没有可撤销的静态附件分类")
+                history = parsed.get("optional_history", [])
+                parsed = {**parsed["optional_previous"], "optional_history": history}
+            parsed["optional_history"] = [*parsed.get("optional_history", [])[-15:],
+                {"action": request.action, "actor": actor, "reason": redact_text(request.reason), "at": now(), "profile_version": request.expected_version}]
+            updates[file_id] = parsed
+    if not updates:
+        return profile
+    record = (uid(), business_id, request.expected_version + 1, "media_batch", digest(sorted(updates)), request.action,
+              redact_text(request.reason), actor, now())
+    return s.rebuild(business_id, updates, request.expected_version, record)
 
 
 @router.get("/businesses/{business_id}/budgets")
@@ -280,12 +326,13 @@ def targets(business_id: str):
     s.get(business_id)
     conn = s.db.connect()
     try:
-        return [
-            {"id": r["id"], **json.loads(r["config_json"])}
-            for r in conn.execute(
-                "SELECT * FROM runtime_targets WHERE business_id=?", (business_id,)
-            )
-        ]
+        runtime = RuntimeService(s.db, s.settings)
+        result = []
+        for row in conn.execute("SELECT * FROM runtime_targets WHERE business_id=? ORDER BY created_at,id", (business_id,)):
+            target = runtime.public({"id": row["id"], **json.loads(row["config_json"])})
+            target["investigation_readiness"] = runtime.investigation_readiness(target)
+            result.append(target)
+        return result
     finally:
         conn.close()
 
@@ -297,10 +344,32 @@ def create_target(business_id: str, request: RuntimeTargetCreate):
     return RuntimeService(s.db, s.settings).create(business_id, request)
 
 
+@router.patch("/businesses/{business_id}/targets/{target_id}/docker-reader")
+def select_docker_reader(business_id: str, target_id: str, request: DockerReaderSelection):
+    ensure_idle(business_id)
+    s = service()
+    return RuntimeService(s.db, s.settings).select_docker_reader(business_id, target_id, request.docker_reader)
+
+
+@router.post("/businesses/{business_id}/targets/{target_id}/credential")
+def provide_ssh_password(business_id: str, target_id: str, request: SSHPassword):
+    s = service()
+    return RuntimeService(s.db, s.settings).provide_password(business_id, target_id, request.password)
+
+
+@router.delete("/businesses/{business_id}/targets/{target_id}/credential")
+def clear_ssh_password(business_id: str, target_id: str):
+    s = service()
+    runtime = RuntimeService(s.db, s.settings)
+    config = runtime.get(business_id, target_id)
+    SSH_SESSIONS.clear_target(config, s.settings.operator_id)
+    return runtime.public(config)
+
+
 @router.post("/businesses/{business_id}/targets/{target_id}/discover", status_code=202)
 def discover(business_id: str, target_id: str):
     s = service()
-    RuntimeService(s.db, s.settings).get(business_id, target_id)
+    RuntimeService(s.db, s.settings).require_credentials(business_id, target_id)
     job_id = reserve(s.db, "discover", business_id)
     submit(s.db, job_id, lambda: ScopeResolver(s.db, s.settings).discover(business_id, target_id))
     return {"job_id": job_id, "status": "queued"}
@@ -370,7 +439,7 @@ def review_binding(
 @router.post("/businesses/{business_id}/targets/{target_id}/tools", status_code=202)
 def runtime_tool(business_id: str, target_id: str, request: ToolRequest):
     s = service()
-    RuntimeService(s.db, s.settings).get(business_id, target_id)
+    RuntimeService(s.db, s.settings).require_credentials(business_id, target_id)
     job_id = reserve(s.db, "runtime_read", business_id)
 
     def execute():

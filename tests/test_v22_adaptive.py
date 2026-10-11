@@ -1,5 +1,4 @@
 import json
-import sys
 from types import SimpleNamespace
 
 import pytest
@@ -69,7 +68,7 @@ def model_stub(monkeypatch, reply):
     settings.external_model_enabled = True
     settings.model_name = "adaptive-test-stub"
     settings.model_api_key = SecretStr("test-adaptive-key")
-    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(completion=completion))
+    monkeypatch.setattr("app.context.model._completion", completion)
     return contexts
 
 
@@ -176,7 +175,8 @@ def test_config_files_have_distinct_actions_and_each_is_read_once(client, monkey
     reads = [c for c in result["tool_calls"] if c["tool_id"] == "config.read"]
     assert [json.loads(c["args_redacted_json"])["path"] for c in reads] == ["/srv/catalog/app.conf", "/srv/catalog/cache.conf"]
     assert len({i["executed_action"]["action_id"] for i in result["summary"]["iterations"] if i["executed_action"]}) == 3
-    assert all(a.get("scheduling", {}).get("permission_allowed") for a in contexts[0]["available_actions"])
+    assert all(a.get("scheduling", {}).get("permission_allowed") for a in result["summary"]["iterations"][0]["candidate_actions"])
+    assert all("permission_allowed" not in a.get("scheduling", {}) for a in contexts[0]["available_actions"])
     assert result["summary"]["stop_reason"] == "no_new_actions"
     assert result["status"] == "unresolved"
 
@@ -232,7 +232,8 @@ def test_unknown_action_id_and_injected_arguments_never_execute(client, monkeypa
     profile = prepared_profile(client, monkeypatch)
     model_stub(monkeypatch, lambda context, n: report(action={"action_id": "not-a-candidate", "tool_id": "shell.exec", "arguments": {"command": "touch /srv/catalog/owned"}}))
     result = investigate(client, profile)
-    assert result["summary"]["stop_reason"] == "action_rejected"
+    assert result["summary"]["stop_reason"] == "model_schema_error"
+    assert result["context_budget"]["usage_records"][0]["status"] == "failed"
     assert len(result["tool_calls"]) == 2
     assert not any(c["tool_id"] == "shell.exec" for c in result["tool_calls"])
 

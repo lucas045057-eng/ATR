@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import './styles.css'
 import { api } from './api'
 import { BusinessPages } from './business'
+import { ModelError, ModelAttempt } from './model-error'
 
 type Row = Record<string, any>
 type Page = 'systems' | 'investigation' | 'knowledge' | 'efficiency' | 'onboarding' | 'business' | 'scope'
@@ -13,6 +14,10 @@ const badge = (value: string) => <span className={`badge ${value.toLowerCase().r
 function App() {
   const [page, setPage] = useState<Page>('systems')
   const [systems, setSystems] = useState<Row[]>([])
+  const [businesses, setBusinesses] = useState<Row[]>([])
+  const [runtimeTargets, setRuntimeTargets] = useState<Row[]>([])
+  const [targetBusinessId, setTargetBusinessId] = useState('')
+  const [selectedTarget, setSelectedTarget] = useState('')
   const [incidents, setIncidents] = useState<Row[]>([])
   const [patterns, setPatterns] = useState<Row[]>([])
   const [knowledgeFailures, setKnowledgeFailures] = useState<Row[]>([])
@@ -31,8 +36,9 @@ function App() {
   const [token, setToken] = useState(sessionStorage.getItem('atr_operator_token') || '')
 
   const refresh = useCallback(async () => {
-    const [s, i, p, m, c, e, r, failures] = await Promise.all([api('/systems'), api('/incidents'), api('/patterns'), api('/metrics'), api('/evaluation-cases'), api('/evaluations'), api('/runs'), api('/knowledge-counterexamples')])
+    const [s, b, i, p, m, c, e, r, failures] = await Promise.all([api('/systems'), api('/businesses'), api('/incidents'), api('/patterns'), api('/metrics'), api('/evaluation-cases'), api('/evaluations'), api('/runs'), api('/knowledge-counterexamples')])
     setSystems(s); setIncidents(i); setPatterns(p); setMetrics(m); setEvaluationCases(c); setEvaluationTrials(e); setRuns(r)
+    setBusinesses(b)
     setKnowledgeFailures(failures)
     if (!selectedSystem && s.length) setSelectedSystem(s[0].id)
   }, [selectedSystem])
@@ -43,6 +49,24 @@ function App() {
     if (!selectedSystem) { setGraph(null); return }
     api(`/systems/${selectedSystem}/graph`).then(setGraph).catch(() => setGraph(null))
   }, [selectedSystem])
+  const currentBusiness = businesses.find(x => x.system_id === selectedSystem)
+  useEffect(() => {
+    if (page !== 'investigation' || !currentBusiness) {
+      setRuntimeTargets([]); setTargetBusinessId(''); setSelectedTarget(''); return
+    }
+    let cancelled = false
+    setTargetBusinessId('')
+    api(`/businesses/${currentBusiness.id}/targets`).then((targets: Row[]) => {
+      if (cancelled) return
+      setRuntimeTargets(targets)
+      setTargetBusinessId(currentBusiness.id)
+      setSelectedTarget(previous => targets.some(t => t.id === previous && t.investigation_readiness?.eligible)
+        ? previous
+        : targets.length === 1 && targets.filter(t => t.investigation_readiness?.eligible).length === 1
+          ? targets.find(t => t.investigation_readiness?.eligible)?.id || '' : '')
+    }).catch(e => { if (!cancelled) { setRuntimeTargets([]); setTargetBusinessId(currentBusiness.id); setSelectedTarget(''); setError(e.message) } })
+    return () => { cancelled = true }
+  }, [currentBusiness?.id, page])
   useEffect(() => {
     if (!selectedIncident) { setRun(null); return }
     const incident = incidents.find(x => x.id === selectedIncident)
@@ -60,7 +84,7 @@ function App() {
         if (stopped) return
         const id = state.result?.run_id || state.result?.id
         if (id) setRun(await api(`/runs/${id}`))
-        if (['queued','running'].includes(state.status)) timer = setTimeout(poll,700)
+        if (['queued','running'].includes(state.status)) timer = setTimeout(poll,1500)
         else {setRunJob(''); await refresh(); if(state.status!=='completed')setError(state.error || '调查被中断')}
       } catch(e) {if(!stopped){setError((e as Error).message);setRunJob('')}}
     }
@@ -94,7 +118,11 @@ function App() {
   }
 
   const runIncident = (incidentId: string) => void act(async () => {
-    const result = await api(`/incidents/${incidentId}/runs`, { method: 'POST', body: '{}' })
+    const incident = incidents.find(x => x.id === incidentId)
+    const business = businesses.find(x => x.system_id === incident?.system_id)
+    if (business && (targetBusinessId !== business.id || !runtimeTargets.some(t => t.id === selectedTarget && t.investigation_readiness?.eligible)))
+      throw new Error('请先为本次调查选择一个当前有效且已授权的 SSH 目标。')
+    const result = await api(`/incidents/${incidentId}/runs`, { method: 'POST', body: JSON.stringify(business ? {target_id: selectedTarget} : {}) })
     setSelectedIncident(incidentId); setRunJob(result.job_id); setPage('investigation'); setNotice('只读调查已排入后台，可查看实际执行过程。')
     if (selectedSystem) setGraph(await api(`/systems/${selectedSystem}/graph`))
   })
@@ -155,6 +183,9 @@ function App() {
 
   const currentSystem = systems.find(x => x.id === selectedSystem)
   const activeIncident = incidents.find(x => x.id === selectedIncident)
+  const activeBusiness = businesses.find(x => x.system_id === (activeIncident?.system_id || selectedSystem))
+  const activeTargetsLoaded = !!activeBusiness && targetBusinessId === activeBusiness.id
+  const activeSelectedTarget = runtimeTargets.find(x => x.id === selectedTarget)
   const totals = useMemo(() => ({ nodes: graph?.nodes?.length || 0, conflicts: graph?.conflicts?.filter((x: Row) => x.status === 'open').length || 0 }), [graph])
 
   return <div className="app-shell">
@@ -202,8 +233,12 @@ function App() {
               <div className="divider"/><div className="panel-title compact"><div><h2>事件列表</h2><p>共 {incidents.length} 个事件</p></div></div>
               <div className="incident-list">{incidents.length === 0 ? <Empty title="还没有故障事件" text="创建事件后即可开始调查。"/> : incidents.map(x => <button key={x.id} className={`incident-row ${selectedIncident === x.id ? 'selected' : ''}`} onClick={() => {setSelectedIncident(x.id); setSelectedSystem(x.system_id)}}><span className="incident-mark">⌁</span><span><strong>{x.symptom?.text || '未命名事件'}</strong><small>{x.system_name} · {fmtDate(x.created_at)}</small></span><span className="incident-right">{badge(x.status)}<b>›</b></span></button>)}</div>
             </section>
-            <section className="panel run-panel"><div className="panel-title"><div><h2>诊断运行</h2><p>{activeIncident ? activeIncident.symptom?.text : '选择一个事件或创建新事件'}</p></div>{activeIncident && <button className="btn primary" disabled={busy||!!runJob} onClick={() => runIncident(activeIncident.id)}>▶　{runJob?'调查进行中':'开始只读调查'}</button>}</div>
-              {!run ? <div className="run-empty"><div className="empty-orbit"><span>⌁</span><i/><i/><i/></div><h3>等待调查运行</h3><p>运行会先读取服务状态和近期日志，所有调用都会进入审计时间线。</p><div className="run-steps"><span><b>01</b> 定位当前图版本</span><span><b>02</b> 采集状态与日志</span><span><b>03</b> 检查证据门</span></div></div> : <RunView run={run} onRepair={recordRepair} onMatchOutcome={recordMatchOutcome} verificationDefault={currentSystem?.compose_project === 'atr-system-b' ? 'http://ingress_proxy/health' : 'http://edge_proxy/health'}/>}
+            <section className="panel run-panel"><div className="panel-title"><div><h2>诊断运行</h2><p>{activeIncident ? activeIncident.symptom?.text : '选择一个事件或创建新事件'}</p></div>{activeIncident && <button className="btn primary" disabled={busy||!!runJob||!!activeBusiness&&(!activeTargetsLoaded||!activeSelectedTarget?.investigation_readiness?.eligible)} onClick={() => runIncident(activeIncident.id)}>▶　{runJob?'调查进行中':'开始只读调查'}</button>}</div>
+              {activeBusiness && <div className="target-picker"><label>本次调查 SSH 目标<select aria-label="本次调查 SSH 目标" value={activeTargetsLoaded ? selectedTarget : ''} disabled={busy||!!runJob||!activeTargetsLoaded} onChange={e => setSelectedTarget(e.target.value)}><option value="">{activeTargetsLoaded ? '请选择已授权目标' : '正在读取目标…'}</option>{runtimeTargets.map((target: Row) => <option key={target.id} value={target.id} disabled={!target.investigation_readiness?.eligible}>{target.name} · {target.host}:{target.port} · {target.execution_mode} · {target.investigation_readiness?.eligible ? '已授权' : target.investigation_readiness?.reason || '不可用'}</option>)}</select><small>{activeSelectedTarget ? `${activeSelectedTarget.name} · ${activeSelectedTarget.host}:${activeSelectedTarget.port} · ${activeSelectedTarget.execution_mode} · ${activeSelectedTarget.investigation_readiness?.status === 'mock' ? 'Mock 测试目标' : activeSelectedTarget.investigation_readiness?.eligible ? '授权有效' : activeSelectedTarget.investigation_readiness?.reason}` : runtimeTargets.length > 1 ? '配置了多个目标，请明确选择；不可用目标不会触发回退。调查开始后绑定固定。' : runtimeTargets.length === 0 ? '当前业务没有服务器目标，无法启动调查。' : '目标已失效或授权/凭据不可用，不能用于调查。'}</small></label></div>}
+              {!run ? <div className="run-empty"><div className="empty-orbit"><span>⌁</span><i/><i/><i/></div><h3>等待调查运行</h3><p>运行会先读取服务状态和近期日志，所有调用都会进入审计时间线。</p><div className="run-steps"><span><b>01</b> 定位当前图版本</span><span><b>02</b> 采集状态与日志</span><span><b>03</b> 检查证据门</span></div></div> : <RunView run={run} onScope={() => setPage('scope')} onResume={() => void act(async () => {
+                const result = await api(`/runs/${run.id}/resume`, {method: 'POST', body: '{}'});
+                setRunJob(result.job_id); setNotice('在原调查预算内继续，后台会再次核验范围授权。');
+              })} onRepair={recordRepair} onMatchOutcome={recordMatchOutcome} verificationDefault={currentSystem?.compose_project === 'atr-system-b' ? 'http://ingress_proxy/health' : 'http://edge_proxy/health'}/>}
             </section>
           </div>
         </>}
@@ -245,13 +280,29 @@ function GraphPanel({ graph, onReview }: {graph: Row; onReview: (id: string) => 
   const nodeNames = Object.fromEntries(graph.nodes.map((node: Row) => [node.id, node.name]))
   return <div className="graph-section"><div className="graph-heading"><div><h3>当前系统图</h3><span>快照 v{graph.snapshot.version} · {graph.snapshot.repo_revision.slice(0,12)}</span></div><span className="count-pill">{graph.nodes.length} NODES</span></div><div className="graph-nodes">{graph.nodes.map((node: Row) => <div className="graph-node" key={node.id}><i className={`node-dot ${node.role}`}/><div><strong>{node.name}</strong><small>{node.kind} · {node.role}</small></div></div>)}</div>{graph.edges.length > 0 && <div className="edge-list">{graph.edges.map((edge: Row) => <span key={edge.id}>{nodeNames[edge.from_node_id] || '?'} <b>→</b> {edge.relation} <b>→</b> {nodeNames[edge.to_node_id] || '?'}</span>)}</div>}{graph.conflicts.filter((x: Row) => x.status === 'open').map((c: Row) => <div className="conflict-row" key={c.id}><span>⚑</span><div><strong>{c.property}</strong><small>{c.subject_key} · {c.severity}</small></div>{badge('open')}<button className="btn small" onClick={() => onReview(c.id)}>标记已解释</button></div>)}<details className="claims-details"><summary>来源事实 · {graph.claims.length} 项</summary><div className="claim-list">{graph.claims.slice(0, 20).map((c: Row) => <div key={c.id}><span>{c.source_type || c.truth_type}</span><strong>{c.property}</strong><small>{c.source_locator}</small></div>)}</div></details></div>
 }
-function RunView({ run, onRepair, onMatchOutcome, verificationDefault }: {run: Row; onRepair: (e: React.FormEvent<HTMLFormElement>) => void; onMatchOutcome: (id: string, payload: Row) => void; verificationDefault: string}) {
+function RunView({ run, onRepair, onMatchOutcome, verificationDefault, onResume, onScope }: {run: Row; onResume: () => void; onScope: () => void; onRepair: (e: React.FormEvent<HTMLFormElement>) => void; onMatchOutcome: (id: string, payload: Row) => void; verificationDefault: string}) {
   const summary = run.summary || {}
   const gate = summary.gate || {}
   const budget = run.context_budget
   return <div className="run-view"><div className="run-status-line"><div><span className={`status-pulse ${run.status}`}/><strong>{run.status === 'supported' ? '证据门通过' : run.status === 'unresolved' ? '尚未建立根因' : run.status}</strong><small>运行 {run.id.slice(0,8)} · 图版本 {run.graph_snapshot_id?.slice(0,8)}</small></div>{badge(run.status)}</div>
-    <div className="diagnosis-summary"><div className="summary-label"><span>诊断摘要</span><span>{run.evidence?.length || 0} 条当前证据</span></div><p>{summary.summary || '本次运行没有可展示的摘要。'}</p>{summary.next_action && <div className="next-action"><span>建议的下一步</span><p>{summary.next_action}</p></div>}<div className="gate-note"><b>证据门：</b>{gate.rationale || '无支持结论。'}　当前冲突：{gate.open_conflict_count ?? 0}</div></div>
-    <div className="business-block"><p className="muted">Agent 阶段：{summary.stage||run.status} {summary.round&&`· 第 ${summary.round} 轮`} · 数据来源：{summary.connector_types?.join('、')||'查看下方工具审计'}</p>{summary.unresolved_reason&&<p className="alert error">未解决原因：{summary.unresolved_reason}</p>}{budget&&<p>输入 {budget.input_tokens} · 输出 {budget.output_tokens} Tokens · 模型 {budget.calls}/{budget.limits.max_calls} 次 · 工具 {budget.tool_calls}/{budget.limits.max_tools} 次 · 读取 {budget.retrieved_bytes} bytes {budget.stop_reason&&`· 停止：${budget.stop_reason}`}</p>}{budget?.usage_records.map((u:Row)=><p className="muted" key={u.id}>{u.model} · {u.usage_kind==='actual'?'供应商实际 usage':'估算'} · {u.input_tokens}+{u.output_tokens} Tokens · 费用 {u.cost==null?'未知':`估算 $${u.cost.toFixed(6)}`}</p>)}<details><summary>每次实际执行的工具与策略结果</summary>{run.tool_calls?.map((c:Row)=><div className="business-row" key={c.id}><strong>{c.tool_id}</strong>{badge(c.status)}<small>{fmtDate(c.started_at)} · {c.policy_version} · {c.error_code||c.id}</small></div>)}</details></div>
+    <div className="target-binding"><strong>Run 的 SSH 目标</strong>{run.target_binding_status === 'unknown' ? <span>历史运行：来源未知，未保存目标绑定</span> : <span>{run.runtime_target?.name || '目标名称未保存'} · {run.runtime_target?.host || '地址未知'}{run.runtime_target?.port ? `:${run.runtime_target.port}` : ''} · {run.runtime_target?.execution_mode || '执行方式未知'} · {run.target_id}</span>}</div>
+    {summary.discovery_ids && <section className="panel"><h3>自主发现与范围建议</h3>
+      <p>基础采集：{summary.collection_status || '已保留'}。候选证据用于范围审核，尚未构成根因结论。</p>
+      {(summary.mapping_proposals || []).map((p: Row) => <div className="business-row" key={p.binding_id}>
+        <div><strong>{p.service}（{p.role}） → {p.runtime_candidate || p.candidate_key} · {p.kind}</strong>
+          <small>依据：{p.reasons.join('；')} · 证据 {p.evidence_ids.join(', ')}</small>
+          <small>反证或冲突：{p.counterevidence.join('；') || '未提供'} · 不确定性：{p.uncertainty}</small>
+          <small>审核后可考虑：{p.next_tools.join('、') || '无'}</small></div>
+        {badge(p.state)}
+      </div>)}
+      {summary.stage === 'awaiting_review' && <><button className="btn" onClick={onScope}>审核运行范围</button>
+        <button className="btn primary" onClick={onResume}>审核后继续调查</button></>}
+      {(summary.tool_errors || []).map((e: Row, i: number) => <p className="alert error" key={i}>
+        {e.tool_id} · {e.error_code} · 阶段 {e.failure_stage || 'budget'} · {e.message}
+        {e.line_number != null && ` · 行 ${e.line_number}`} · 输出 {e.output_bytes || 0} 字节 · 异常 {e.invalid_item_count || 0} 项</p>)}
+    </section>}
+    <div className="diagnosis-summary"><div className="summary-label"><span>诊断摘要</span><span>{run.evidence?.length || 0} 条当前证据</span></div><p>{summary.model_error?.message || summary.summary || '本次运行没有可展示的摘要。'}</p>{summary.next_action && <div className="next-action"><span>建议的下一步</span><p>{summary.next_action}</p></div>}<div className="gate-note"><b>证据门：</b>{gate.rationale || '无支持结论。'}　当前冲突：{gate.open_conflict_count ?? 0}</div></div>
+    <div className="business-block"><p className="muted">Agent 阶段：{summary.stage === 'stopped' ? '已停止' : summary.stage === 'completed' ? '已完成' : summary.stage === 'awaiting_review' ? '等待范围审核' : summary.stage||run.status} · 模型：{summary.model_status === 'failed' ? '调用失败' : summary.model_status === 'offline' ? '离线' : summary.model_status || '历史记录未提供'} {summary.round&&`· 第 ${summary.round} 轮`} · 数据来源：{summary.connector_types?.join('、')||'查看下方工具审计'}</p><ModelError error={summary.model_error}/>{summary.unresolved_reason&&!summary.model_error&&<p className="alert error">未解决原因：{summary.unresolved_reason}</p>}{budget&&<p>输入 {budget.input_tokens} · 输出 {budget.output_tokens} Tokens · 模型 {budget.calls}/{budget.limits.max_calls} 次 · 工具 {budget.tool_calls}/{budget.limits.max_tools} 次 · 读取 {budget.retrieved_bytes} bytes {budget.stop_reason&&`· 停止：${budget.stop_reason}`}</p>}{budget?.usage_records.map((u:Row)=><ModelAttempt key={u.id} usage={u}/>)}<details><summary>每次实际执行的工具与策略结果</summary>{run.tool_calls?.map((c:Row)=><div className="business-row" key={c.id}><strong>{c.tool_id}</strong>{badge(c.status)}<small>{fmtDate(c.started_at)} · {c.policy_version} · {c.error_code||c.id}</small>{c.actual_target_id && <small>实际目标：{c.actual_target?.name || '名称未知'} · {c.actual_target?.host || '地址未知'} · {c.actual_target?.execution_mode || '执行方式未知'} · {c.actual_target_id}</small>}{c.diagnostic?.error_code && <small>{c.diagnostic.message} · 阶段 {c.diagnostic.failure_stage} · 行 {c.diagnostic.line_number ?? "—"} · 输出 {c.diagnostic.output_bytes} 字节 · 异常 {c.diagnostic.invalid_item_count} 项</small>}</div>)}</details></div>
     <div className="run-section-title"><h3>假设与证据</h3><span>{run.hypotheses?.length || 0} HYPOTHESES</span></div>
     {!!summary.hypothesis_history?.length&&<details className="business-block"><summary>查看每轮假设与反证</summary>{summary.hypothesis_history.map((h:Row)=><div className="business-row" key={h.hypothesis_id+'-'+h.round}><strong>第 {h.round} 轮 · {h.failure_mode}</strong>{badge(h.status)}<p>{h.prediction}</p><small>支持 {h.support_evidence?.length||0} · 反证 {h.counter_evidence?.length||0}{h.missing_evidence?.length?` · 尚缺：${h.missing_evidence.join('、')}`:''}</small></div>)}</details>}
     {!!summary.scope_requests?.length&&<div className="alert">需要人工确认额外范围：{summary.scope_requests.map((r:Row)=>`${r.service}（${r.reason}）`).join('；')}</div>}

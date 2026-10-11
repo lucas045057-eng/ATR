@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from pathlib import PurePosixPath
 
+from app.business.media import optional_image
 from app.business.models import BusinessProfile, Fact
 from app.common import digest, now
 
@@ -56,13 +57,16 @@ def build_static(business, files, previous):
         info = row["analysis"]
         ref = {key: row[key] for key in ("id", "path", "content_digest", "bytes", "media_type")}
         ref["parse_state"] = info.get("parse_state")
+        if row["media_type"] == "image":
+            ref.update(media_role=info.get("media_role"), optional_suggested=optional_image(row["path"]),
+                       can_restore=info.get("parse_state") == "optional_static_attachment" and bool(info.get("optional_previous")))
         profile.source_references.append(ref)
         if info.get("manual_text"):
             add(f"document:{row['path']}", "describes", info["manual_text"], row, "Documented")
         if info.get("language"):
             stacks.add(info["language"])
         if info.get("parse_state") not in {"complete", "partial_parser_error"}:
-            if info.get("parse_state") not in {"excluded_irrelevant", "unsupported"}:
+            if info.get("parse_state") not in {"excluded_irrelevant", "unsupported", "optional_static_attachment"}:
                 profile.unknowns.append(f"资料 {row['path']}：{info.get('parse_state')}")
             continue
         for candidate in info.get("services", []):
@@ -296,9 +300,10 @@ def build_static(business, files, previous):
         "static_parsed": sum(r["analysis"].get("parse_state") == "complete" for r in files),
         "pending_files": sum(
             r["analysis"].get("parse_state")
-            not in {"complete", "excluded_irrelevant", "unsupported"}
+            not in {"complete", "excluded_irrelevant", "unsupported", "optional_static_attachment"}
             for r in files
         ),
+        "optional_attachments": sum(r["analysis"].get("parse_state") == "optional_static_attachment" for r in files),
         "services_declared": len(profile.services),
         "runtime_verified": any(
             f.source_type == "Runtime" and f.verification_status == "confirmed"

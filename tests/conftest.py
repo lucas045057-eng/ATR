@@ -17,6 +17,9 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("SSH_ENABLED", "false")
     monkeypatch.setenv("MODEL_NAME", "")
     monkeypatch.setenv("MODEL_API_KEY", "")
+    monkeypatch.setenv("INITIAL_INPUT_TOKENS", "8000")
+    monkeypatch.setenv("INVESTIGATION_INPUT_TOKENS", "12000")
+    monkeypatch.setenv("BUDGET_TOTAL_TOKENS", "100000")
     get_settings.cache_clear()
     from app.main import app
 

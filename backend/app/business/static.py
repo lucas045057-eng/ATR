@@ -45,7 +45,7 @@ def inspect_file(path: Path, relative: str, read_limit: int) -> dict:
         "datastores": [],
     }
     if suffix in {".png", ".jpg", ".jpeg"}:
-        return {**info, "media_type": "image", **parse_image(raw, suffix)}
+        return {**info, "media_type": "image", **parse_image(raw, suffix, relative)}
     if suffix == ".pdf":
         return {**info, "media_type": "pdf", **parse_pdf(raw)}
     info["media_type"] = (

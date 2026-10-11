@@ -18,9 +18,10 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.fixture
-def live_server(tmp_path):
+def live_server(tmp_path, request):
     external = os.environ.get("ATR_E2E_BASE_URL")
     if external:
+        assert "fake_model" not in request.fixturenames, "模型错误测试必须启动专用隔离 API"
         parsed = urlsplit(external)
         assert parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost"}, "仅允许隔离回环验收"
         assert os.environ.get("ATR_E2E_OPERATOR_TOKEN"), "隔离验收需要专用本地 token"
@@ -40,11 +41,16 @@ def live_server(tmp_path):
         OPERATOR_TOKEN="browser-test-operator-" + "x" * 40,
         COLLECTOR_TOKEN="browser-test-collector-" + "y" * 40,
         EXTERNAL_MODEL_ENABLED="false",
-        SSH_ENABLED="false",
+        SSH_ENABLED="true" if "ssh_server_enabled" in request.fixturenames else "false",
         MODEL_NAME="",
         MODEL_API_KEY="",
         PYTHONPATH=str(ROOT / "backend"),
     )
+    if "fake_model" in request.fixturenames:
+        _, model_settings, _, _ = request.getfixturevalue("fake_model")
+        env.update(EXTERNAL_MODEL_ENABLED="true", MODEL_NAME=model_settings.model_name,
+                   MODEL_API_KEY=model_settings.model_api_key.get_secret_value(),
+                   MODEL_BASE_URL=model_settings.model_base_url, MODEL_TIMEOUT_SECONDS="2")
     log = (tmp_path / "server.log").open("wb")
     process = subprocess.Popen(
         [
@@ -123,17 +129,22 @@ def test_browser_complete_onboarding(live_server):
         page.get_by_role("button", name="保存环境关联").click()
         expect(page.get_by_role("button", name="定向轻量发现")).to_be_enabled()
         page.get_by_role("button", name="定向轻量发现").click()
-        expect(page.get_by_role("button", name="确认", exact=True)).to_be_visible(timeout=15000)
-        page.get_by_role("button", name="确认", exact=True).click()
+        expect(page.get_by_role("button", name="确认", exact=True).first).to_be_visible(timeout=15000)
+        page.get_by_role("button", name="确认", exact=True).first.click()
         expect(page.get_by_text("已确认", exact=True)).to_be_visible()
         page.get_by_role("button", name="故障调查", exact=False).click()
         expect(page.get_by_label("目标系统")).to_contain_text("浏览器 Catalog")
         expect(page.get_by_label("目标系统").locator("option:checked")).to_have_text("浏览器 Catalog")
+        target_selector = page.get_by_label("本次调查 SSH 目标")
+        expect(target_selector).to_be_visible()
+        expect(target_selector.locator("option:checked")).to_contain_text("隔离测试环境")
         page.get_by_label("故障现象", exact=True).fill("catalog-api startup failure")
         page.get_by_role("button", name="创建故障事件", exact=False).click()
         expect(page.get_by_role("button", name="开始只读调查", exact=False)).to_be_visible()
         page.get_by_role("button", name="开始只读调查", exact=False).click()
         expect(page.get_by_text("尚未建立根因", exact=True)).to_be_visible(timeout=20000)
+        expect(page.locator(".target-binding")).to_contain_text("隔离测试环境")
+        expect(page.locator(".target-binding")).to_contain_text("forced_gateway")
         expect(page.get_by_text("未解决原因：", exact=False)).to_be_visible()
         page.evaluate("window.scrollTo(0,0)")
         page.screenshot(path=str(directory / "investigation.png"), full_page=False)

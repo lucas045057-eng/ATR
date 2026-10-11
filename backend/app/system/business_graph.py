@@ -102,6 +102,22 @@ def fuse_business_graph(database, profile):
                         relation["fact_id"],
                     )
                 )
+        for observed in tx.execute(
+            "SELECT t.id,t.config_json,o.id AS observation_id,o.observed_at,o.tool_id,o.payload_json "
+            "FROM runtime_targets t JOIN runtime_observations o ON o.target_id=t.id "
+            "WHERE t.business_id=? AND o.status='succeeded' AND o.id=(SELECT id FROM runtime_observations "
+            "WHERE target_id=t.id AND status='succeeded' ORDER BY observed_at DESC,id DESC LIMIT 1)",
+            (business_id,),
+        ):
+            config = json.loads(observed["config_json"])
+            if config.get("execution_mode") != "standard_ssh_readonly":
+                continue
+            payload = json.loads(observed["payload_json"])
+            add("host", observed["id"], "host", {
+                "address": config["host"], "source_type": "Runtime", "execution_mode": "standard_ssh_readonly",
+                "observation_id": observed["observation_id"], "observed_at": observed["observed_at"],
+                "identity": payload.get("identity", {}), "server_enforced_readonly": False,
+            })
         bindings = tx.execute(
             "SELECT b.*,t.config_json FROM service_bindings b JOIN runtime_targets t ON t.id=b.target_id WHERE b.business_id=? AND b.status='confirmed'",
             (business_id,),
@@ -114,7 +130,7 @@ def fuse_business_graph(database, profile):
             if key not in nodes:
                 continue
             config = json.loads(binding["config_json"])
-            host = add(
+            host = nodes.get(f"host:{binding['target_id']}") or add(
                 "host",
                 binding["target_id"],
                 "host",

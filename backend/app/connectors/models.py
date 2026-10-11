@@ -4,8 +4,9 @@ import re
 from pathlib import PurePosixPath
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, SecretStr, field_validator
 
+from app.connectors.unit_names import valid_service_name
 from app.domain import StrictModel
 
 
@@ -30,6 +31,8 @@ class RuntimeTargetCreate(StrictModel):
     )
     port: int = Field(default=22, ge=1, le=65535)
     username: str = Field(default="atr-read", max_length=64, pattern=r"^[a-zA-Z_][a-zA-Z0-9_.-]*$")
+    auth_mode: Literal["password", "private_key"] = "private_key"
+    execution_mode: Literal["forced_gateway", "standard_ssh_readonly"] = "forced_gateway"
     credential_ref: str = Field(default="", max_length=80, pattern=r"^[A-Za-z0-9_.-]*$")
     host_public_key: str = Field(default="", max_length=2048)
     allowed_paths: list[str] = Field(default_factory=list, max_length=20)
@@ -37,9 +40,10 @@ class RuntimeTargetCreate(StrictModel):
     timeout_seconds: int = Field(default=10, ge=1, le=60)
     max_output_bytes: int = Field(default=48000, ge=1024, le=64000)
     access_authorized: bool = False
-    permission_boundary: Literal["mock", "forced_command_gateway"] = "mock"
+    permission_boundary: Literal["mock", "forced_command_gateway", "client_readonly"] = "mock"
     boundary_attestation: str = Field(default="", max_length=1000)
-    docker_reads_enabled: bool = False
+    docker_reads_enabled: bool = True
+    docker_reader: Literal["direct_cli", "restricted_list"] = "direct_cli"
     mock_scenario: Literal[
         "mixed", "datastore_conflict", "permission_denied", "timeout", "disconnect"
     ] = "mixed"
@@ -49,10 +53,16 @@ class RuntimeTargetCreate(StrictModel):
     def validate_paths(cls, values):
         return [authorized_path(v) for v in values]
 
+    @field_validator("username")
+    @classmethod
+    def reject_root(cls, value):
+        if value.casefold() == "root":
+            raise ValueError("SSH 仅允许受限低权限账号，禁止 root")
+        return value
+
     @field_validator("host_public_key")
     @classmethod
     def validate_public_key(cls, value):
-        import re
 
         if value and not re.fullmatch(
             r"(?:ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256) [A-Za-z0-9+/]+={0,2}", value
@@ -66,6 +76,18 @@ class ToolRequest(StrictModel):
     arguments: dict = Field(default_factory=dict)
 
 
+class SSHPassword(StrictModel):
+    model_config = {"extra": "forbid", "str_strip_whitespace": False, "hide_input_in_errors": True}
+    password: SecretStr = Field(min_length=1, max_length=1024)
+
+    @field_validator("password")
+    @classmethod
+    def valid_password(cls, value):
+        if any(c in value.get_secret_value() for c in ("\x00", "\r", "\n")):
+            raise ValueError("密码包含不支持的控制字符")
+        return value
+
+
 class EmptyArgs(StrictModel):
     pass
 
@@ -75,20 +97,34 @@ class ListArgs(StrictModel):
     name_hints: list[str] = Field(default_factory=list, max_length=8)
     cursor: str = Field(
         default="",
-        max_length=130,
-        pattern=r"^(?:[01]:[A-Za-z0-9][A-Za-z0-9_.@-]{0,127})?$",
+        max_length=257,
     )
+
+    @field_validator("cursor")
+    @classmethod
+    def validate_cursor(cls, value):
+        if value and (value[:2] not in {"0:", "1:"} or not valid_service_name(value[2:])):
+            raise ValueError("清单游标不合法")
+        return value
 
     @field_validator("name_hints")
     @classmethod
     def validate_hints(cls, values):
-        if any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.@-]{0,127}", v) for v in values):
+        if any(not valid_service_name(v) for v in values):
             raise ValueError("名称线索仅接受有界服务或进程标识符")
         return values
 
 
 class ServiceArgs(StrictModel):
-    name: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.@-]*$")
+    model_config = {"str_strip_whitespace": False, "hide_input_in_errors": True}
+    name: str = Field(min_length=1, max_length=255)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value):
+        if not valid_service_name(value):
+            raise ValueError("服务标识不合法")
+        return value
 
 
 class ServiceLogArgs(ServiceArgs):
@@ -115,3 +151,7 @@ class ConfigArgs(StrictModel):
 class BindingReview(StrictModel):
     decision: Literal["confirm", "reject"]
     reason: str = Field(min_length=5, max_length=1000)
+
+
+class DockerReaderSelection(StrictModel):
+    docker_reader: Literal["direct_cli", "restricted_list"]

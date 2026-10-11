@@ -78,3 +78,26 @@ def migrate(connection):
         if name not in columns:
             connection.execute(f"ALTER TABLE service_bindings ADD COLUMN {name} {definition}")
     connection.execute("INSERT OR IGNORE INTO schema_migrations VALUES(22,datetime('now'))")
+    columns = {r[1] for r in connection.execute("PRAGMA table_info(model_usage_records)")}
+    if "diagnostics_json" not in columns:
+        connection.execute("ALTER TABLE model_usage_records ADD COLUMN diagnostics_json TEXT NOT NULL DEFAULT '{}'")
+    connection.execute("INSERT OR IGNORE INTO schema_migrations VALUES(23,datetime('now'))")
+    columns = {r[1] for r in connection.execute("PRAGMA table_info(runtime_observations)")}
+    if "diagnostics_json" not in columns:
+        connection.execute("ALTER TABLE runtime_observations ADD COLUMN diagnostics_json TEXT NOT NULL DEFAULT '{}'")
+    connection.execute("INSERT OR IGNORE INTO schema_migrations VALUES(24,datetime('now'))")
+    columns = {r[1] for r in connection.execute("PRAGMA table_info(context_budgets)")}
+    if "elapsed_ms" not in columns:
+        connection.execute("ALTER TABLE context_budgets ADD COLUMN elapsed_ms REAL NOT NULL DEFAULT 0")
+    columns = {r[1] for r in connection.execute("PRAGMA table_info(diagnosis_runs)")}
+    if "target_id" not in columns:
+        connection.execute("ALTER TABLE diagnosis_runs ADD COLUMN target_id TEXT")
+    if "target_snapshot_json" not in columns:
+        connection.execute("ALTER TABLE diagnosis_runs ADD COLUMN target_snapshot_json TEXT")
+    columns = {r[1] for r in connection.execute("PRAGMA table_info(jobs)")}
+    if "target_id" not in columns:
+        connection.execute("ALTER TABLE jobs ADD COLUMN target_id TEXT")
+    columns = {r[1] for r in connection.execute("PRAGMA table_info(tool_calls)")}
+    if "target_id" not in columns:
+        connection.execute("ALTER TABLE tool_calls ADD COLUMN target_id TEXT")
+    connection.execute("INSERT OR IGNORE INTO schema_migrations VALUES(25,datetime('now'))")

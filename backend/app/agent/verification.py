@@ -20,6 +20,24 @@ MECHANISMS = {
 NON_EVENTS = re.compile(r"historical|example|test message|simulated example|not failed|no failure", re.I)
 
 
+def prediction_error_field(proposal):
+    tool, field, op, value = (proposal.get(k) for k in ("tool_id", "field", "operator", "value"))
+    tools = {"state": STATUS_TOOLS, "status_code": {"health.get"},
+             "listening": {"network.listeners"}, "log_signal": LOG_TOOLS}
+    if not isinstance(field, str) or field not in tools:
+        return "field"
+    if not isinstance(tool, str) or tool not in tools[field]:
+        return "tool_id"
+    if not isinstance(op, str) or op not in ({"contains"} if field == "log_signal" else {"eq", "ne"}):
+        return "operator"
+    valid = ((field == "state" and isinstance(value, str) and value in FAILED | HEALTHY)
+             or (field == "status_code" and type(value) is int and 100 <= value <= 599)
+             or (field == "listening" and type(value) is bool)
+             or (field == "log_signal" and isinstance(value, str) and 6 <= len(value) <= 160
+                 and value.casefold() not in {"error", "failed", "exception", "unavailable", "timeout", "traceback"}))
+    return None if valid else "value"
+
+
 def verify_hypothesis(item, state, evidence_targets, allowed_targets, supports, parse_time, parse_log):
     nodes = {n["id"]: n for n in state.get("graph", {}).get("nodes", [])}
     target = str(item.get("target_node_id", ""))[:80]
@@ -65,17 +83,8 @@ def verify_hypothesis(item, state, evidence_targets, allowed_targets, supports, 
         p = proposal if isinstance(proposal, dict) else {}
         node, tool, field, op, value = (p.get(k) for k in ("target_node_id", "tool_id", "field", "operator", "value"))
         valid_node = isinstance(node, str) and node in allowed_targets and nodes.get(node, {}).get("kind") == "service"
-        feasible = valid_node and isinstance(op, str) and (
-            (field == "state" and (tool in STATUS_TOOLS if isinstance(tool, str) else False)
-             and op in {"eq", "ne"} and isinstance(value, str) and value in FAILED | HEALTHY)
-            or (canonical and field == "state" and tool == "runtime.status")
-            or (field == "status_code" and tool == "health.get" and op in {"eq", "ne"}
-                and isinstance(value, int) and not isinstance(value, bool) and 100 <= value <= 599)
-            or (field == "listening" and tool == "network.listeners" and op in {"eq", "ne"} and isinstance(value, bool))
-            or (field == "log_signal" and isinstance(tool, str) and tool in LOG_TOOLS and op == "contains"
-                and isinstance(value, str) and 6 <= len(value) <= 160
-                and value.casefold() not in {"error", "failed", "exception", "unavailable", "timeout", "traceback"})
-        )
+        feasible = valid_node and isinstance(op, str) and isinstance(tool, str) and (
+            prediction_error_field(p) is None or (canonical and field == "state" and tool == "runtime.status"))
         matches, opposite = [], []
         if feasible:
             for eid, e in current.items():

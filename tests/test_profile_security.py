@@ -1,5 +1,4 @@
 import json
-import sys
 from types import SimpleNamespace
 
 from app.settings import get_settings
@@ -50,7 +49,7 @@ def test_prompt_content_cannot_create_runtime_actions_or_unsupported_facts(clien
             usage=SimpleNamespace(prompt_tokens=300, completion_tokens=100),
         )
 
-    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(completion=completion))
+    monkeypatch.setattr("app.context.model._completion", completion)
     job = client.post(base + "/analyze").json()
     assert wait_job(client, job["job_id"])["status"] == "completed"
     latest = client.get(base).json()

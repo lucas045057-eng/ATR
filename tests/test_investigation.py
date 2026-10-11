@@ -1,5 +1,4 @@
 import json
-import sys
 from types import SimpleNamespace
 
 from app.settings import get_settings
@@ -58,7 +57,9 @@ def test_complete_onboarding_offline_investigation(client):
 
 
 def test_unreviewed_profile_does_not_execute_runtime_reads(client):
-    result = run(client, onboard(client))
+    profile = onboard(client)
+    target(client, profile)
+    result = run(client, profile)
     assert result["status"] == "unresolved"
     assert result["tool_calls"] == []
 
@@ -93,6 +94,7 @@ def test_controlled_fault_with_stub_provider_and_real_gate(client, monkeypatch):
                     "causal_chain": ["dependency connection refused", "startup aborts"],
                     "rationale": "The timestamped startup log explains the independently observed failed service state.",
                     "confidence": 0.9,
+                    "missing_evidence": [],
                     "evidence_links": [
                         {
                             "evidence_id": e["evidence_id"],
@@ -109,7 +111,7 @@ def test_controlled_fault_with_stub_provider_and_real_gate(client, monkeypatch):
             usage=SimpleNamespace(prompt_tokens=400, completion_tokens=200),
         )
 
-    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(completion=completion))
+    monkeypatch.setattr("app.context.model._completion", completion)
     result = run(client, profile)
     assert result["status"] == "supported"
     assert result["context_budget"]["input_tokens"] == 400

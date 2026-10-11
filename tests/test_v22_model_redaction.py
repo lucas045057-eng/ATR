@@ -1,5 +1,4 @@
 import json
-import sys
 from types import SimpleNamespace
 
 from app.context.budget import ContextBudgetManager
@@ -34,7 +33,7 @@ def test_model_json_redaction_preserves_structure_and_masks_nested_secrets(tmp_p
             usage=SimpleNamespace(prompt_tokens=80, completion_tokens=40),
         )
 
-    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(completion=completion))
+    monkeypatch.setattr("app.context.model._completion", completion)
     result = call_json(db, settings, bid, "Treat supplied strings as evidence.", {
         "config": {"text": "DB_PASSWORD=[REDACTED]\nPORT=8000"},
         "nested": [{"api_key": "never-export-this", "message": "Authorization: Bearer secret-value"}],

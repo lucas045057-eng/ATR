@@ -1,5 +1,6 @@
 from pathlib import PurePosixPath
 
+from app.connectors.diagnostics import CapabilityUnavailable
 from app.connectors.models import (
     ConfigArgs,
     ContainerArgs,
@@ -38,8 +39,18 @@ DISCOVERY_TOOLS = {
 
 
 def check(config, tool, arguments, approved=()):
+    if config.get("connector") == "ssh" and config.get("execution_mode", "forced_gateway") == "standard_ssh_readonly":
+        # Reject ambiguous whitespace rather than silently normalizing remote parameters.
+        strings = [v for v in arguments.values() if isinstance(v, str)]
+        strings += arguments.get("name_hints", []) if isinstance(arguments.get("name_hints"), list) else []
+        if any(not isinstance(v, str) or v != v.strip() for v in strings):
+            raise ValueError("普通 SSH 参数不接受首尾空白")
+        if any(key in arguments and type(arguments[key]) is not int for key in ("limit", "tail")):
+            raise ValueError("普通 SSH 数量参数必须为整数")
     if tool not in SCHEMAS:
         raise PermissionError("工具不在固定只读注册表")
+    if (tool in {"container.status", "container.logs"} and config.get("docker_reader") == "restricted_list"):
+        raise CapabilityUnavailable("受限 Docker 网关仅提供 list")
     args = SCHEMAS[tool].model_validate(arguments).model_dump()
     if tool.startswith("container.") and not config["docker_reads_enabled"]:
         raise PermissionError("没有授权 Docker 元数据读取；不访问 Docker socket")

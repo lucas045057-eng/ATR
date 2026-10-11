@@ -51,7 +51,7 @@ def test_failed_discovery_keeps_authorization_and_original_observation(client, m
     assert read(client, profile, runtime, 'service.status', {'name': 'catalog-api.service'})['payload']
 
 
-def test_complete_empty_discovery_stales_fact_but_preserves_read_authorization(client, monkeypatch):
+def test_complete_empty_discovery_stales_fact_and_denies_deep_reads(client, monkeypatch):
     profile, runtime, binding = setup_binding(client)
     original = MockConnector.read
 
@@ -68,7 +68,7 @@ def test_complete_empty_discovery_stales_fact_but_preserves_read_authorization(c
     assert row['runtime_current'] is False
     graph = client.get(f"/api/v1/systems/{profile['system_id']}/graph").json()
     assert not any(n['name'] == 'runtime:catalog-api.service' for n in graph['nodes'])
-    assert read(client, profile, runtime, 'service.status', {'name': 'catalog-api.service'})['payload']
+    assert read(client, profile, runtime, 'service.status', {'name': 'catalog-api.service'})['status'] == 'denied'
 
 
 def test_partial_empty_listing_cannot_prove_confirmed_service_disappeared(client, monkeypatch):

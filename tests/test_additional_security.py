@@ -1,6 +1,5 @@
 import io
 import json
-import sys
 import tarfile
 from types import SimpleNamespace
 
@@ -80,12 +79,18 @@ def test_api_budget_stop_retains_static_and_resume(client, monkeypatch):
             usage=SimpleNamespace(prompt_tokens=400, completion_tokens=100),
         )
 
-    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(completion=completion))
+    monkeypatch.setattr("app.context.model._completion", completion)
     budget = client.get(base + "/budgets").json()[0]
     limits = {**budget["limits"], "max_input_tokens": 10}
     assert client.put(base + f"/budgets/{budget['id']}", json=limits).status_code == 200
     job = client.post(base + "/analyze").json()
-    assert wait_job(client, job["job_id"])["status"] == "completed"
+    # Budget exhaustion must not present the requested model analysis as successful.
+    stopped = wait_job(client, job["job_id"])
+    assert stopped["status"] == "failed"
+    assert stopped["result"]["model_error"]["code"] == "model_budget_exceeded"
+    usage = client.get(base + "/budgets").json()[0]
+    assert usage["calls"] == usage["reserved_tokens"] == 0
+    assert usage["usage_records"] == []
     latest = client.get(base).json()
     assert latest["model_status"].startswith("budget_exceeded")
     assert latest["services"] == profile["services"]

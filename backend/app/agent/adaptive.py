@@ -96,17 +96,21 @@ class AdaptiveInvestigationPlanner:
                 for suffix in ("status", "logs"):
                     add(f"{binding['kind']}.{suffix}", node_id, args, binding["target_id"], binding["id"])
                 for path in self.targets.get(binding["target_id"], {}).get("allowed_paths", [])[:2]:
-                    add("config.list", node_id, {"path": path}, binding["target_id"])
+                    add("config.list", node_id, {"path": path}, binding["target_id"], binding["id"])
         for entry in evidence:
             if entry.get("tool_id") != "config.list":
                 continue
             target_id = entry.get("target_id")
+            binding = next((b for b in fresh if b["target_id"] == target_id and
+                            self.nodes.get(entry["target_node_id"], {}).get("name") == b["service"]), None)
+            if not binding:
+                continue
             files = entry.get("payload", {}).get("files", [])
             if not isinstance(files, list):
                 continue
             for path in files[:8]:
                 if isinstance(path, str) and (PurePosixPath(path).name == ".env" or PurePosixPath(path).suffix.lower() in {".conf", ".ini", ".cfg", ".env", ".yaml", ".yml", ".json", ".toml", ".properties"}):
-                    add("config.read", entry["target_node_id"], {"path": path}, target_id)
+                    add("config.read", entry["target_node_id"], {"path": path}, target_id, binding["id"])
         if self.root_id:
             keywords = list(dict.fromkeys(re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", self.symptom)))[:4]
             for word in keywords:

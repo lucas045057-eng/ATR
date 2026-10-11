@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from datetime import datetime, timedelta, timezone
 
 from app.business.profile import claim
 from app.business.service import BusinessService
 from app.common import digest, dumps, now, uid
+from app.connectors.diagnostics import TERMINAL_CODES
 from app.connectors.models import ToolRequest
 from app.connectors.service import RuntimeService
+from app.connectors.unit_names import valid_service_name
+from app.context.budget import BudgetExceeded, ContextBudgetManager
 
 BINDING_TTL_SECONDS = 86400
 
@@ -37,12 +41,27 @@ def candidate_digest(candidate):
 INVENTORY_FIELDS = {'service.list': 'services', 'process.list': 'processes', 'container.list': 'containers'}
 
 
+def discovery_requests(profile, target, include_configs=False):
+    hints = [s['name'] for s in profile['services'] if valid_service_name(s['name'])][:8]
+    tools = [ToolRequest(tool_id=t) for t in ("host.info", "host.memory", "host.disk", "network.listeners")]
+    tools.append(ToolRequest(tool_id="service.list", arguments={"name_hints": hints}))
+    if target["docker_reads_enabled"]:
+        tools.append(ToolRequest(tool_id="container.list", arguments={"name_hints": hints}))
+    tools.append(ToolRequest(tool_id="process.list", arguments={"name_hints": hints}))
+    if include_configs:
+        tools.extend(ToolRequest(tool_id="config.list", arguments={"path": p}) for p in target["allowed_paths"][:10])
+    return tools
+
+
 def valid_candidate(candidate, tool):
     if not isinstance(candidate, dict):
         return False
     if candidate.get('kind') != tool.split('.')[0]:
         return False
-    if any(not isinstance(candidate.get(k), str) or not 1 <= len(candidate[k]) <= 128 for k in ('id', 'name')):
+    limit = 255 if candidate.get('kind') == 'service' else 128
+    if any(not isinstance(candidate.get(k), str) or not 1 <= len(candidate[k]) <= limit for k in ('id', 'name')):
+        return False
+    if candidate.get('kind') == 'service' and not valid_service_name(candidate['id']):
         return False
     if not isinstance(candidate.get('image', ''), str):
         return False
@@ -104,7 +123,7 @@ class ScopeResolver:
         self.runtime = RuntimeService(database, settings)
         self.business = BusinessService(database, settings)
 
-    def discover(self, business_id, target_id):
+    def discover(self, business_id, target_id, observations=None):
         profile = self.business.get(business_id)
         target = self.runtime.get(business_id, target_id)
         discovery_id = uid()
@@ -114,18 +133,25 @@ class ScopeResolver:
                 (discovery_id, business_id, target_id, now()),
             )
         hints = [s['name'] for s in profile['services'] if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.@-]{0,127}', s['name'])][:8]
-        tools = [
-            ToolRequest(tool_id=t)
-            for t in ("host.info", "network.listeners")
-        ]
-        tools.extend(ToolRequest(tool_id=t, arguments={'name_hints': hints}) for t in ('process.list', 'service.list'))
-        if target["docker_reads_enabled"]:
-            tools.append(ToolRequest(tool_id="container.list", arguments={'name_hints': hints}))
-        tools.extend(
-            ToolRequest(tool_id="config.list", arguments={"path": p})
-            for p in target["allowed_paths"][:10]
-        )
-        observations = [self.runtime.execute(business_id, target_id, request) for request in tools]
+        if observations is None:
+            observations = []
+            manager = ContextBudgetManager(self.db, self.settings)
+            budget_id = manager.create("discovery", business_id)
+            for request in discovery_requests(profile, target, include_configs=True):
+                started = time.monotonic()
+                try:
+                    manager.consume_tool(budget_id)
+                    observation = self.runtime.execute(business_id, target_id, request, timeout_cap=manager.remaining_seconds(budget_id))
+                    observations.append(observation)
+                    manager.retrieval(budget_id, max(observation["bytes"], observation.get("payload", {}).get("output_bytes", 0)))
+                except BudgetExceeded:
+                    observations.append({"tool_id": request.tool_id, "status": "failed", "error_code": "global_budget_exhausted",
+                                         "message": "发现预算已用尽", "observation_id": None})
+                    break
+                finally:
+                    manager.record_time(budget_id, time.monotonic() - started)
+                if observation.get("error_code") in TERMINAL_CODES:
+                    break
         candidates = []
         for observation in observations:
             if "payload" not in observation:
@@ -142,12 +168,14 @@ class ScopeResolver:
                 )
         matches, unmatched, changes = [], [], []
         by_tool = {o["tool_id"]: o for o in observations}
-        by_id = {o["observation_id"]: o for o in observations}
+        by_id = {o["observation_id"]: o for o in observations if o.get("observation_id")}
         with self.db.transaction() as tx:
             existing = [dict(r) for r in tx.execute(
-                "SELECT * FROM service_bindings WHERE target_id=? AND status IN ('pending','confirmed')",
+                "SELECT * FROM service_bindings WHERE target_id=? AND status IN ('pending','confirmed','rejected')",
                 (target_id,))]
             for old in existing:
+                if old['status'] == 'rejected':
+                    continue
                 source = by_tool.get(f"{old['kind']}.list", {})
                 payload = source.get("payload")
                 field = {"service": "services", "process": "processes", "container": "containers"}.get(old["kind"])
@@ -177,12 +205,16 @@ class ScopeResolver:
                     stamp = observation.get("observed_at", now())
                     expires = (datetime.fromisoformat(stamp) + timedelta(seconds=BINDING_TTL_SECONDS)).isoformat()
                     signature = candidate_digest(candidate)
+                    if any(b['status'] == 'rejected' and b['service'] == service['name'] and b['kind'] == candidate['kind']
+                           and b['runtime_id'] == candidate['id'] and b['candidate_digest'] == signature for b in existing):
+                        continue
                     source = {"discovery_id": discovery_id, "observation_id": observation_id,
                               "tool_id": observation['tool_id'], "connector": target['connector'],
                               "runtime_name": candidate['name']}
                     same = next((b for b in existing if b['service'] == service['name']
                                  and b['runtime_id'] == candidate['id'] and b['kind'] == candidate['kind']
-                                 and b['candidate_digest'] == signature), None)
+                                 and b['candidate_digest'] == signature
+                                 and (b['status'] == 'pending' or binding_is_current(b))), None)
                     binding_id = same['id'] if same else uid()
                     if same:
                         tx.execute("UPDATE service_bindings SET observed_at=?,expires_at=?,source_json=?,evidence_ids_json=?,discovery_id=?,freshness_status=? WHERE id=?",
@@ -224,6 +256,22 @@ class ScopeResolver:
                     )
                 if not any(m["business_service"] == service["name"] for m in matches):
                     unmatched.append(service["name"])
+            objects = []
+            for candidate, observation_id in candidates:
+                rejected = any(b['status'] == 'rejected' and b['runtime_id'] == candidate['id'] and b['kind'] == candidate['kind']
+                               and b['candidate_digest'] == candidate_digest(candidate) for b in existing)
+                related = [m for m in matches if m['runtime_candidate'] == candidate['id'] and m['kind'] == candidate['kind']]
+                classification = ('unrelated' if rejected else 'confirmed' if any(m['verification_status'] == 'confirmed' for m in related)
+                                  else 'insufficient_evidence' if candidate['kind'] == 'process' or related else 'unmatched')
+                objects.append({**candidate, 'observation_id': observation_id,
+                                'evidence_id': by_id[observation_id].get('evidence_id', observation_id), 'classification': classification})
+            objects.sort(key=lambda c: ({'service': 0, 'container': 1, 'process': 2}[c['kind']], c['name'], c['id']))
+            groups = {}
+            for item in objects:
+                if item['kind'] == 'process':
+                    group = groups.setdefault((item['name'], item.get('state', 'unknown')), {'name': item['name'], 'state': item.get('state', 'unknown'), 'processes': []})
+                    group['processes'].append({'pid': item.get('pid', item['id']), 'classification': item['classification'],
+                                               'evidence_id': item['evidence_id'], 'observation_id': item['observation_id']})
             summary = {
                 "connector": target["connector"],
                 "matches": sorted(matches, key=lambda m: m["match_score"], reverse=True),
@@ -233,8 +281,11 @@ class ScopeResolver:
                     for c, _ in candidates
                     if not any(m["runtime_candidate"] == c["id"] for m in matches)
                 ],
+                "runtime_objects": objects,
+                "process_groups": [{**g, 'count': len(g['processes'])} for g in groups.values()],
                 "observations": observations,
                 "errors": [o for o in observations if "payload" not in o],
+                "incomplete_tools": [o["diagnostic"] for o in observations if o.get("diagnostic", {}).get("partial")],
                 "configuration_mismatches": [],
                 "collection_status": "failed" if not any('payload' in o for o in observations) else "partial" if any(collection_incomplete(o) for o in observations) else "completed",
                 "binding_changes": changes,
@@ -249,6 +300,28 @@ class ScopeResolver:
 
         fuse_business_graph(self.db, profile)
         return {"id": discovery_id, **summary}
+
+    def propose(self, business_id, proposal, candidate, discovery_id, profile_version):
+        stamp = candidate["observed_at"]
+        expires = (datetime.fromisoformat(stamp) + timedelta(seconds=BINDING_TTL_SECONDS)).isoformat()
+        signature = candidate_digest(candidate)
+        with self.db.transaction() as tx:
+            previous = tx.execute("SELECT * FROM service_bindings WHERE business_id=? AND target_id=? AND service=? AND runtime_id=? AND kind=? AND candidate_digest=? ORDER BY observed_at DESC LIMIT 1",
+                (business_id, candidate["target_id"], proposal["service"], candidate["id"], candidate["kind"], signature)).fetchone()
+            if previous and previous["status"] in {"rejected", "confirmed"}:
+                return {"binding_id": previous["id"], "state": previous["status"], **proposal}
+            source = {"discovery_id": discovery_id, "observation_id": candidate["observation_id"],
+                      "tool_id": candidate["kind"] + ".list", "runtime_name": candidate["name"],
+                      "profile_version": profile_version, "mapping_state": "proposed", "ai_proposal": proposal}
+            if previous:
+                binding_id = previous["id"]
+                tx.execute("UPDATE service_bindings SET source_json=?,reasons_json=? WHERE id=?", (dumps(source), dumps(proposal["reasons"]), binding_id))
+            else:
+                binding_id = uid()
+                tx.execute("INSERT INTO service_bindings(id,business_id,target_id,service,runtime_id,kind,score,reasons_json,evidence_ids_json,status,discovery_id,freshness_status,observed_at,expires_at,source_json,candidate_digest) VALUES(?,?,?,?,?,?,?,?,?,'pending',?,'unverified',?,?,?,?)",
+                    (binding_id, business_id, candidate["target_id"], proposal["service"], candidate["id"], candidate["kind"], 0,
+                     dumps(proposal["reasons"]), dumps([candidate["observation_id"]]), discovery_id, stamp, expires, dumps(source), signature))
+        return {"binding_id": binding_id, "state": "awaiting_review", "runtime_candidate": candidate["id"], "target_id": candidate["target_id"], **proposal}
 
     def confirm(self, business_id, binding_id, decision, reason, actor):
         with self.db.transaction() as tx:
@@ -294,6 +367,9 @@ class ScopeResolver:
     def reconcile(self, business_id, observation):
         if "payload" not in observation:
             return
+        if observation["payload"].get("execution_mode") == "standard_ssh_readonly":
+            from app.system.business_graph import fuse_business_graph
+            fuse_business_graph(self.db, self.business.get(business_id))
         text = observation["payload"].get("text", "")
         runtime_store = (
             "PostgreSQL"

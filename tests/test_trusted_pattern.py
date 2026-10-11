@@ -1,5 +1,4 @@
 import json
-import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
@@ -30,6 +29,7 @@ def test_trusted_requires_recorded_repair_actual_http_verification_and_review(cl
             "causal_chain": ["dependency refused", "startup exits"],
             "rationale": "The current timestamped connection refusal explains the separately observed failed state.",
             "confidence": 0.9,
+            "missing_evidence": [],
             "evidence_links": [
                 {
                     "evidence_id": e["evidence_id"],
@@ -44,7 +44,7 @@ def test_trusted_requires_recorded_repair_actual_http_verification_and_review(cl
                 SimpleNamespace(
                     message=SimpleNamespace(
                         content=json.dumps(
-                            {"summary": "Mock fixture diagnosis", "hypotheses": [h], "action": None}
+                            {"summary": "Mock fixture diagnosis", "next_action": "人工核验", "hypotheses": [h], "action": None}
                         )
                     )
                 )
@@ -52,7 +52,7 @@ def test_trusted_requires_recorded_repair_actual_http_verification_and_review(cl
             usage=SimpleNamespace(prompt_tokens=400, completion_tokens=150),
         )
 
-    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(completion=completion))
+    monkeypatch.setattr("app.context.model._completion", completion)
     incident = client.post(
         "/api/v1/incidents",
         json={"system_id": profile["system_id"], "symptom": "catalog-api startup failure"},

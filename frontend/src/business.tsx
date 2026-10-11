@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { api, Row } from "./api";
+import { RuntimeInventory } from "./runtime-inventory";
+import { MediaReviewList } from "./media-review-list";
 
 const labels: Row = {
   Static: "静态解析",
@@ -14,10 +16,11 @@ const labels: Row = {
   approved: "已审核",
   complete: "已解析",
   pending_manual: "待人工录入",
+  optional_static_attachment: "可选静态附件",
   completed: "已完成",
   pending_model_configuration: "模型待配置",
 };
-const label = (s: string) => labels[s] || s;
+const label = (s: string) => s.startsWith("model_error:") || s.startsWith("pending_model_error:") ? "模型调用失败" : s.startsWith("budget_exceeded:") ? "模型预算已耗尽" : labels[s] || s;
 const mark = (s: string) => <span className={`badge ${s}`}>{label(s)}</span>;
 
 export function BusinessPages({
@@ -46,6 +49,8 @@ export function BusinessPages({
   const [search, setSearch] = useState<Row[]>([]);
   const [comparison, setComparison] = useState<Row | null>(null);
   const [connector, setConnector] = useState("mock");
+  const [authMode, setAuthMode] = useState("private_key");
+  const [executionMode, setExecutionMode] = useState("forced_gateway");
   const [chosenTarget, setChosenTarget] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
   const base = `/businesses/${selected}`;
@@ -96,6 +101,11 @@ export function BusinessPages({
     void reload().catch((e) => setError(e.message));
   }, [reload]);
   useEffect(() => {
+    if (page !== "scope" || !targets.some((t) => t.auth_mode === "password")) return;
+    const timer = setInterval(() => void reload().catch((e) => setError(e.message)), 15000);
+    return () => clearInterval(timer);
+  }, [page, targets, reload]);
+  useEffect(() => {
     if (!job?.job_id) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
@@ -105,7 +115,7 @@ export function BusinessPages({
         if (cancelled) return;
         setJob({ ...state, job_id: state.id });
         if (["queued", "running"].includes(state.status))
-          timer = setTimeout(poll, 700);
+          timer = setTimeout(poll, 1500);
         else {
           setBusy(false);
           if (state.status !== "completed")
@@ -206,7 +216,7 @@ export function BusinessPages({
         </div>
       )}
       {job && (
-        <div className="alert success">
+        <div className={`alert ${job.status === "failed" ? "error" : "success"}`}>
           <span>后台任务：{job.status}</span>
           {job.result?.files != null && (
             <span>
@@ -334,6 +344,9 @@ export function BusinessPages({
                 画像 v{profile.profile_version} · {mark(profile.review_status)}{" "}
                 · {mark(profile.model_status)}
               </p>
+              {profile.model_error && <p role="alert" className="alert error">
+                {profile.model_error.message} · 错误类型：{profile.model_error.exception_type}
+              </p>}
               <p className="muted">
                 模型：{model.model || "未配置"} · 外部分析：
                 {model.external_analysis_enabled ? "已启用" : "未启用"} ·
@@ -653,38 +666,14 @@ export function BusinessPages({
                 <pre className="code-preview">{code.text}</pre>
               </>
             )}
-            <details>
-              <summary>查看文件清单、解析状态和摘要</summary>
-              {profile.source_references.slice(0, 150).map((r: Row) => (
-                <div className="business-row" key={r.id}>
-                  <span>{r.path}</span>
-                  <small>
-                    {label(r.parse_state)} · {r.content_digest.slice(0, 12)}
-                  </small>
-                  {["image", "pdf"].includes(r.media_type) && (
-                    <button
-                      className="btn small"
-                      onClick={() => {
-                        const text =
-                          window.prompt("人工录入该资料的业务结构摘要");
-                        if (text)
-                          void act(() =>
-                            api(base + `/files/${r.id}/media-review`, {
-                              method: "POST",
-                              body: JSON.stringify({
-                                text,
-                                expected_version: profile.profile_version,
-                              }),
-                            }),
-                          );
-                      }}
-                    >
-                      人工录入
-                    </button>
-                  )}
-                </div>
-              ))}
-            </details>
+            <MediaReviewList key={`${selected}:${profile.profile_version}`} profile={profile} busy={busy}
+              onBatch={(ids, action) => void act(() => api(base + '/files/media-batch-review', {
+                method: 'POST', body: JSON.stringify({file_ids: ids, action, expected_version: profile.profile_version,
+                  reason: action === 'optional' ? '人工批量分类明确图标或装饰资源' : '人工撤销静态附件分类，恢复原审核状态'}),
+              }))}
+              onManual={(id) => { const text = window.prompt('人工录入该资料的业务结构摘要'); if (text) void act(() => api(base + `/files/${id}/media-review`, {
+                method: 'POST', body: JSON.stringify({text, expected_version: profile.profile_version}),
+              })); }} />
           </section>
           <section className="panel business-block">
             <h2>可追溯事实与人工审核</h2>
@@ -798,13 +787,18 @@ export function BusinessPages({
         <>
           <div className="two-column">
             <section className="panel">
-              <h2>关联 Linux 测试环境</h2>
+              <h2>关联 Linux 环境</h2>
               <form
                 className="form"
                 onSubmit={(e) => {
                   e.preventDefault();
                   const f = new FormData(e.currentTarget);
+                  const passwordInput = e.currentTarget.elements.namedItem("ssh_password") as HTMLInputElement | null;
+                  let password = passwordInput?.value || "";
+                  f.delete("ssh_password");
+                  if (passwordInput) passwordInput.value = "";
                   void act(async () => {
+                    try {
                     const t = await api(base + "/targets", {
                       method: "POST",
                       body: JSON.stringify({
@@ -813,6 +807,11 @@ export function BusinessPages({
                         host: connector === "mock" ? "mock" : f.get("host"),
                         port: Number(f.get("port") || 22),
                         username: f.get("username") || "atr-read",
+                        auth_mode: connector === "ssh" ? authMode : "private_key",
+                        execution_mode: executionMode,
+                        timeout_seconds: Number(f.get("timeout_seconds") || 10),
+                        max_calls: Number(f.get("max_calls") || 100),
+                        max_output_bytes: Number(f.get("max_output_bytes") || 48000),
                         credential_ref: f.get("credential_ref") || "",
                         host_public_key: f.get("host_public_key") || "",
                         allowed_paths: String(f.get("paths") || "")
@@ -823,16 +822,23 @@ export function BusinessPages({
                         permission_boundary:
                           connector === "mock"
                             ? "mock"
-                            : "forced_command_gateway",
+                            : executionMode === "standard_ssh_readonly" ? "client_readonly" : "forced_command_gateway",
                         boundary_attestation: String(
                           f.get("attestation") || "",
                         ),
                         docker_reads_enabled: f.get("docker") === "on",
+                        docker_reader: connector === "ssh" && executionMode === "standard_ssh_readonly" ? (f.get("docker_reader") || "direct_cli") : "direct_cli",
                         mock_scenario: f.get("scenario") || "mixed",
                       }),
                     });
                     setChosenTarget(t.id);
+                    if (connector === "ssh" && authMode === "password") {
+                      return await api(base + `/targets/${t.id}/credential`, {
+                        method: "POST", body: JSON.stringify({ password }),
+                      });
+                    }
                     return t;
+                    } finally { password = ""; }
                   });
                 }}
               >
@@ -847,11 +853,34 @@ export function BusinessPages({
                     onChange={(e) => setConnector(e.target.value)}
                   >
                     <option value="mock">隔离 Mock（可离线验收）</option>
-                    <option value="ssh">SSH 测试服务器（需要显式授权）</option>
+                    <option value="ssh">SSH（需要显式授权）</option>
                   </select>
                 </label>
                 {connector === "ssh" ? (
                   <>
+                    <label>SSH 执行方式
+                      <select value={executionMode} onChange={(e) => {
+                        setExecutionMode(e.target.value);
+                        const form = e.currentTarget.form;
+                        const declaration = form?.elements.namedItem("attestation") as HTMLTextAreaElement | null;
+                        const authorized = form?.elements.namedItem("authorized") as HTMLInputElement | null;
+                        if (declaration) declaration.value = "";
+                        if (authorized) authorized.checked = false;
+                      }}>
+                        <option value="standard_ssh_readonly">普通 SSH 只读兼容（无需安装网关）</option>
+                        <option value="forced_gateway">SSH 安全网关（atr-read-v1）</option>
+                      </select>
+                    </label>
+                    {executionMode === "standard_ssh_readonly" && <p className="alert">
+                      只读限制由 ATR 固定工具和 SSH 账号权限控制，不等同于服务器端强制隔离。
+                      允许 AI 调用已授权只读工具；必须使用已授权低权限账号。账号可能仍具有其他程序可使用的写权限。
+                    </p>}
+                    {executionMode === "standard_ssh_readonly" && <label>Docker 读取方式
+                      <select name="docker_reader" defaultValue="restricted_list">
+                        <option value="restricted_list">受限网关（atr-docker-read · 仅清单）</option>
+                        <option value="direct_cli">已有账号权限读取 Docker CLI</option>
+                      </select>
+                    </label>}
                     <label>
                       地址
                       <input name="host" required />
@@ -867,13 +896,24 @@ export function BusinessPages({
                       </label>
                     </div>
                     <label>
+                      认证方式
+                      <select value={authMode} onChange={(e) => setAuthMode(e.target.value)}>
+                        <option value="private_key">用户名 + 私钥（原有方式）</option>
+                        <option value="password">用户名 + 密码（短期会话）</option>
+                      </select>
+                    </label>
+                    {authMode === "password" ? <label>
+                      SSH 密码
+                      <input aria-label="SSH 密码" name="ssh_password" type="password" required maxLength={1024} autoComplete="off" />
+                      <small>仅在后端内存保存 30 分钟；后端重启后需重新输入。</small>
+                    </label> : <label>
                       凭据引用
                       <input
                         name="credential_ref"
                         required
                         placeholder="运维配置中的引用名称"
                       />
-                    </label>
+                    </label>}
                     <label>
                       已核对的主机公钥
                       <textarea
@@ -888,13 +928,21 @@ export function BusinessPages({
                         name="attestation"
                         required
                         minLength={10}
-                        placeholder="确认受限账号、强制只读入口和禁用转发已由服务器所有者配置"
+                        placeholder={executionMode === "standard_ssh_readonly"
+                          ? "确认低权限账号、主机和资料授权范围，并理解客户端只读限制及 AI 调查权限"
+                          : "确认受限账号、强制只读入口和禁用转发已由服务器所有者配置"}
                       />
                     </label>
                     <label className="check-label">
                       <input name="authorized" type="checkbox" required />{" "}
                       已授权访问这台测试服务器
                     </label>
+                    <div className="split-input">
+                      <label>单次超时（秒）<input name="timeout_seconds" type="number" min={1} max={60} defaultValue={10} required /></label>
+                      <label>最大调用次数<input name="max_calls" type="number" min={1} max={1000} defaultValue={100} required /></label>
+                    </div>
+                    <label>输出大小上限（字节）<input name="max_output_bytes" type="number" min={1024} max={64000} defaultValue={48000} required /></label>
+                    <small>允许 ATR 已注册的只读工具；服务、资料目录和容器仍受授权范围限制，Docker 只读默认勾选，可关闭。</small>
                   </>
                 ) : (
                   <label>
@@ -915,7 +963,7 @@ export function BusinessPages({
                   <textarea name="paths" rows={2} placeholder="/srv/catalog" />
                 </label>
                 <label className="check-label">
-                  <input name="docker" type="checkbox" /> 已授权受限的 Docker
+                  <input name="docker" type="checkbox" defaultChecked /> 已授权受限的 Docker
                   元数据读取入口
                 </label>
                 <button className="btn primary" disabled={busy || !selected}>
@@ -943,13 +991,54 @@ export function BusinessPages({
                   {target.host} ·{" "}
                   {target.connector === "mock"
                     ? "明确的隔离 Mock 数据"
-                    : "SSH 固定只读入口"}{" "}
+                    : target.execution_mode === "standard_ssh_readonly"
+                      ? "普通 SSH · 客户端只读约束 · AI 可调用已授权工具"
+                      : "SSH 固定只读网关"}{" "}
                   · 最大调用 {target.max_calls}
                 </p>
               )}
+              {target?.execution_mode === "standard_ssh_readonly" && <p className="alert">
+                操作员已声明授权；每次采集检查账号身份。服务器端强制只读隔离：未验证。
+                更换执行方式需创建并重新授权新目标，原有服务绑定不会自动沿用。
+              </p>}
+              {target?.execution_mode === "standard_ssh_readonly" && <label>当前目标 Docker 读取方式
+                <select aria-label="当前 Docker 读取方式" value={target.docker_reader || "direct_cli"} disabled={busy}
+                  onChange={(e) => { const reader = e.target.value; void act(() => api(base + `/targets/${chosenTarget}/docker-reader`, {
+                    method: "PATCH", body: JSON.stringify({docker_reader: reader}),
+                  })); }}>
+                  <option value="direct_cli">已有账号权限读取 Docker CLI</option>
+                  <option value="restricted_list">受限网关（仅清单，无状态和日志能力）</option>
+                </select>
+                <small>切换后容器映射需重新发现和审核；不会更改服务器权限。</small>
+              </label>}
+              {target?.auth_mode === "password" && <>
+                <p role="status">
+                  {target.credential_status?.state === "ready"
+                    ? `密码会话有效至 ${new Date(target.credential_status.expires_at).toLocaleString()}`
+                    : "密码会话未提供、已过期或已清除；后端重启后需重新输入。"}
+                </p>
+                <form className="form" onSubmit={(e) => {
+                  e.preventDefault();
+                  const input = e.currentTarget.elements.namedItem("refresh_password") as HTMLInputElement;
+                  let password = input.value;
+                  input.value = "";
+                  void act(async () => {
+                    try { return await api(base + `/targets/${chosenTarget}/credential`, {
+                      method: "POST", body: JSON.stringify({ password }),
+                    }); } finally { password = ""; }
+                  });
+                }}>
+                  <label>重新提供 SSH 密码
+                    <input name="refresh_password" type="password" required maxLength={1024} autoComplete="off" />
+                  </label>
+                  <button className="btn" disabled={busy}>更新密码会话</button>
+                </form>
+                <button className="btn danger-outline" disabled={busy} onClick={() => void act(() =>
+                  api(base + `/targets/${chosenTarget}/credential`, { method: "DELETE" }))}>清除密码会话</button>
+              </>}
               <button
                 className="btn primary"
-                disabled={busy || !chosenTarget}
+                disabled={busy || !chosenTarget || (target?.auth_mode === "password" && target.credential_status?.state !== "ready")}
                 onClick={() =>
                   void act(() =>
                     api(base + `/targets/${chosenTarget}/discover`, {
@@ -965,7 +1054,7 @@ export function BusinessPages({
               </p>
               {bindings
                 .filter(
-                  (b) => b.target_id === chosenTarget && b.status !== "stale",
+                  (b) => b.target_id === chosenTarget && b.status !== "stale" && b.kind !== "process",
                 )
                 .map((b) => (
                   <div key={b.id} className="business-row">
@@ -1028,14 +1117,16 @@ export function BusinessPages({
                     未匹配业务服务：
                     {latestDiscovery.unmatched_services?.join("、") || "无"}
                   </p>
-                  <p>
-                    无关或未确认对象：
-                    {latestDiscovery.unassigned_runtime_objects?.join("、") ||
-                      "无"}
-                  </p>
+                  <RuntimeInventory key={latestDiscovery.id} discovery={latestDiscovery} />
+                  {latestDiscovery.incomplete_tools?.map((r: Row) => <p className="alert" key={r.observation_id}>
+                    {r.tool_id} · 数据不完整 · {r.message} · {r.failure_stage} · 输出 {r.output_bytes} 字节 · 异常 {r.invalid_item_count} 项
+                  </p>)}
                   {latestDiscovery.errors?.map((r: Row) => (
                     <p className="alert error" key={r.observation_id}>
-                      {r.tool_id} · {r.status} · {r.error}
+                      {r.tool_id} · {label(r.status)} · {r.error_code || r.error} · 阶段 {r.failure_stage || "历史记录未知"}
+                      {r.message ? ` · ${r.message}` : ""}
+                      {r.line_number != null ? ` · 行 ${r.line_number}` : ""}
+                      {r.output_bytes != null ? ` · 输出 ${r.output_bytes} 字节 · 异常记录 ${r.invalid_item_count || 0}` : ""}
                     </p>
                   ))}
                 </>
@@ -1054,9 +1145,9 @@ export function BusinessPages({
                   const b = confirmed.find((x) => x.id === f.get("binding"));
                   const args: Row = tool.startsWith("config.")
                     ? { path: f.get("path") }
-                    : tool.startsWith("service.")
+                    : ["service.status", "service.logs"].includes(tool)
                       ? { name: b?.runtime_id }
-                      : tool.startsWith("container.")
+                      : ["container.status", "container.logs"].includes(tool)
                         ? { container_id: b?.runtime_id }
                         : {};
                   void act(() =>
@@ -1072,6 +1163,11 @@ export function BusinessPages({
                     "host.info",
                     "host.memory",
                     "host.disk",
+                    "process.list",
+                    "network.listeners",
+                    "service.list",
+                    "container.list",
+                    "config.list",
                     "service.status",
                     "service.logs",
                     "container.status",
@@ -1099,10 +1195,11 @@ export function BusinessPages({
                 </button>
               </form>
               {job?.result?.payload && (
-                <pre className="code-preview">
+                <><p>{job.result.payload.identity?.precheck === "passed" ? "账号身份预检查通过 · 操作员已声明授权 · 服务器端强制只读隔离未验证" : "已采集运行观测"}</p><pre className="code-preview">
                   {JSON.stringify(job.result, null, 2)}
-                </pre>
+                </pre></>
               )}
+              {job?.result?.error && <p className="alert error">{job.result.message || `${job.result.tool_id} · ${job.result.status} · ${job.result.error}`}</p>}
             </section>
           )}
         </>
