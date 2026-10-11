@@ -25,7 +25,7 @@ def standard(**changes):
     return {**config(), "execution_mode": "standard_ssh_readonly", "permission_boundary": "client_readonly", **changes}
 
 
-def test_defaults_and_legacy_gateway():
+def test_defaults_and_legacy_gateway(client):
     cfg = RuntimeTargetCreate(name="legacy").model_dump()
     assert cfg["execution_mode"] == "forced_gateway" and cfg["auth_mode"] == "private_key"
     assert cfg["docker_reads_enabled"] is True
@@ -75,7 +75,7 @@ def test_four_combinations_and_immutable_targets(client, mode, auth):
     ("config.read", {"path": "/etc/shadow"}), ("config.read", {"path": "/srv/atr-fixture/../x"}),
     ("container.status", {"container_id": "f" * 64}),
 ])
-def test_invalid_parameters_never_connect(tool, args, monkeypatch):
+def test_invalid_parameters_never_connect(client, tool, args, monkeypatch):
     monkeypatch.setattr(StandardSSHConnector, "connection", lambda *a: pytest.fail("Must reject before SSH"))
     with pytest.raises((ValueError, PermissionError)):
         StandardSSHConnector(standard(allowed_paths=["/srv/atr-fixture"], _approved={("service", "catalog.service")}), get_settings()).read(tool, args)
@@ -122,7 +122,7 @@ def test_unparseable_output_is_not_evidence(tool, raw):
         parse(tool, raw, {"path": "/srv/a", "name": "catalog.service"})
 
 
-def test_identity_check_precedes_tools_and_each_call(monkeypatch):
+def test_identity_check_precedes_tools_and_each_call(client, monkeypatch):
     captured = []
     values = [b"Linux", b"10003", b"atrpassword", b"10003", b"10003", b"atrpassword"]
     @contextmanager

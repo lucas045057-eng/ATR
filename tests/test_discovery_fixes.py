@@ -73,7 +73,7 @@ def test_restricted_reader_formats_and_safe_partial():
         parse_list(b"secret unknown incompatible\n", {})
 
 
-def test_restricted_no_fallback_or_extra_arguments(monkeypatch):
+def test_restricted_no_fallback_or_extra_arguments(client, monkeypatch):
     from test_standard_ssh import standard
     cfg = standard(docker_reader="restricted_list", _approved={("container", "a" * 64)})
     remote = StandardSSHConnector(cfg, get_settings())

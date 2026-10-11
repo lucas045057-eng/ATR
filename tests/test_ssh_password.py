@@ -144,7 +144,7 @@ def test_authentication_and_target_bound_reference(client):
                        json={"password": PASSWORD}).status_code == 404
 
 
-def test_root_rejected_even_for_old_unvalidated_configuration(monkeypatch):
+def test_root_rejected_even_for_old_unvalidated_configuration(client, monkeypatch):
     monkeypatch.setattr(paramiko.SSHClient, "connect", lambda *a, **k: pytest.fail("No network"))
     with pytest.raises(ValueError, match="root"):
         RuntimeTargetCreate(name="bad", connector="ssh", username="root")
