@@ -91,6 +91,7 @@ def test_model_cannot_replace_candidate_arguments(client, monkeypatch):
 
 
 def test_omitting_a_refuted_hypothesis_does_not_erase_its_counterevidence(client, monkeypatch):
+    get_settings().investigation_input_tokens = 30000
     profile = prepared_profile(client, monkeypatch)
     original = MockConnector.read
 

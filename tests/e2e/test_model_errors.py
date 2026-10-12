@@ -155,7 +155,8 @@ def test_browser_529_investigation_history_and_manual_recovery(live_server, fake
         browser.close()
 
 
-def test_browser_schema_error_shows_safe_field_path(live_server, fake_model):  # noqa: F811
+@pytest.mark.parametrize('invalid_reference', [False, True, 'prediction', 'counter'])
+def test_browser_schema_error_shows_safe_field_path(live_server, fake_model, invalid_reference):  # noqa: F811
     base, directory = live_server
     _, _, state, _ = fake_model
     token = "browser-test-operator-" + "x" * 40
@@ -171,6 +172,17 @@ def test_browser_schema_error_shows_safe_field_path(live_server, fake_model):  #
 
         def reply(c, _):
             h = hypothesis(c, 'catalog-api')
+            if invalid_reference == 'counter':
+                h = hypothesis(c, 'store')
+                h['evidence_links'] = [{'evidence_id': c['current_evidence'][0]['evidence_id'],
+                                       'relation': 'refutes', 'explanation': 'Application state is not datastore counterevidence.'}]
+                return report([h])
+            if invalid_reference == 'prediction':
+                h['verification_predictions'][0]['target_node_id'] = 'PRIVATE-INVALID-PREDICTION'
+                return report([h])
+            if invalid_reference:
+                h['target_node_id'] = 'PRIVATE-INVALID-TARGET'
+                return report([h])
             h['confidence'] = 'PRIVATE-OUTPUT-VALUE'
             return report([h], **{'PRIVATE-FIELD-KEY': 'PRIVATE-OUTPUT-VALUE'})
 
@@ -180,7 +192,7 @@ def test_browser_schema_error_shows_safe_field_path(live_server, fake_model):  #
         task = api.post('/api/v1/incidents/' + incident['id'] + '/runs').json()
         job = wait_job(api, task['job_id'], timeout=20)
         result = api.get('/api/v1/runs/' + job['result']['id']).json()
-        assert result['summary']['model_error']['validation_kind'] == 'format'
+        assert result['summary']['model_error']['validation_kind'] == ('decision' if invalid_reference else 'format')
         assert len(result['tool_calls']) == 2
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, channel=os.environ.get('ATR_BROWSER_CHANNEL') or None)
@@ -193,12 +205,69 @@ def test_browser_schema_error_shows_safe_field_path(live_server, fake_model):  #
         page.get_by_role('button', name='故障调查', exact=False).click()
         page.locator('.incident-list').get_by_text(symptom, exact=True).click()
         panel = page.get_by_test_id('model-error')
-        expect(panel).to_contain_text('hypotheses[0].confidence', timeout=10000)
-        expect(panel).to_contain_text('float_type')
-        expect(panel).to_contain_text('格式校验失败')
-        expect(panel).to_contain_text('<extra_field>')
+        if invalid_reference == 'counter':
+            expect(panel).to_contain_text('hypotheses[0].evidence_links[0].relation', timeout=10000)
+            expect(panel).to_contain_text('counterevidence_target_mismatch')
+            expect(panel).to_contain_text('反证必须属于该假设的目标节点')
+        elif invalid_reference == 'prediction':
+            expect(panel).to_contain_text('hypotheses[0].verification_predictions[0].target_node_id', timeout=10000)
+            expect(panel).to_contain_text('unknown_prediction_target')
+            expect(panel).to_contain_text('预测目标不在本轮允许引用的服务节点集合中')
+        elif invalid_reference:
+            expect(panel).to_contain_text('hypotheses[0].target_node_id', timeout=10000)
+            expect(panel).to_contain_text('unknown_target')
+            expect(panel).to_contain_text('不在本轮允许引用的服务节点集合中')
+        else:
+            expect(panel).to_contain_text('hypotheses[0].confidence', timeout=10000)
+            expect(panel).to_contain_text('float_type')
+            expect(panel).to_contain_text('格式校验失败')
+            expect(panel).to_contain_text('<extra_field>')
         assert 'PRIVATE-' not in page.locator('body').inner_text()
         assert 'synthetic-secret' not in page.locator('body').inner_text()
         assert errors == [] and state['requests'] == 1
-        page.screenshot(path=str(directory / 'schema-fields.png'), full_page=True)
+        page.screenshot(path=str(directory / f'schema-fields-{invalid_reference}.png'), full_page=True)
+        browser.close()
+
+
+def test_browser_discovery_next_tools_error_is_safe_and_specific(live_server, fake_model):  # noqa: F811
+    from test_autonomous_discovery import mapping
+
+    base, _ = live_server
+    _, _, provider, _ = fake_model
+    token = "browser-test-operator-" + "x" * 40
+    with httpx.Client(base_url=base, headers={"Authorization": "Bearer " + token}) as api:
+        profile = onboard(api)
+        target(api, profile)
+        path = '/api/v1/businesses/' + profile['business_id']
+        profile = api.post(path + '/review', json={"expected_version": profile['profile_version'],
+            "decision": "approve", "reason": "Only isolated discovery, no confirmed mappings"}).json()
+
+        def invalid(context, _):
+            data = mapping(context)
+            data['proposals'][0]['next_tools'] = ['PRIVATE-UNAUTHORIZED-TOOL']
+            return data
+
+        provider['reply'] = invalid
+        symptom = '候选工具契约验收 ' + profile['business_id'][:8]
+        incident = api.post('/api/v1/incidents', json={'system_id': profile['system_id'], 'symptom': symptom, 'mode': 'normal'}).json()
+        task = api.post('/api/v1/incidents/' + incident['id'] + '/runs').json()
+        job = wait_job(api, task['job_id'])
+        result = api.get('/api/v1/runs/' + job['result']['run_id']).json()
+        assert len(result['tool_calls']) == 6  # Docker is explicitly disabled in this fixture.
+        assert result['summary']['mapping_proposals'] == []
+        assert result['summary']['model_error']['validation_errors'][0]['type'] == 'action_not_allowed'
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, channel=os.environ.get('ATR_BROWSER_CHANNEL') or None)
+        context = browser.new_context()
+        context.add_init_script("sessionStorage.setItem('atr_operator_token'," + json.dumps(token) + ")")
+        page = context.new_page()
+        page.goto(base)
+        page.get_by_role('button', name='故障调查', exact=False).click()
+        page.locator('.incident-list').get_by_text(symptom, exact=True).click()
+        panel = page.get_by_test_id('model-error')
+        expect(panel).to_contain_text('proposals[0].next_tools')
+        expect(panel).to_contain_text('action_not_allowed')
+        expect(panel).to_contain_text('动作不在本轮授权候选中')
+        assert 'PRIVATE-' not in page.locator('body').inner_text()
+        assert provider['requests'] == 1
         browser.close()

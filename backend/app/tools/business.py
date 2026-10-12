@@ -125,7 +125,7 @@ class BusinessToolRegistry:
                     with self.db.transaction() as tx:
                         tx.execute(
                             "UPDATE tool_calls SET status=?,ended_at=?,error_code=? WHERE id=?",
-                            (status, now(), error, call_id),
+                            (status, now(), "ssh_credential_unavailable" if observation.get("error_code") == "ssh_credential_unavailable" else error, call_id),
                         )
                     return {
                         "call_id": call_id, "tool_id": tool, "status": status,

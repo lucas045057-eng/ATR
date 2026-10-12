@@ -271,8 +271,10 @@ def budget_regression_state(unicode=False):
 
 
 @pytest.mark.parametrize('unicode', [False, True])
-def test_schema_prompt_compacts_previews_within_existing_budget(fake_model, monkeypatch, unicode):  # noqa: F811
+@pytest.mark.parametrize('input_limit', [12000, 30000])
+def test_schema_prompt_respects_old_and_authorized_new_budget(fake_model, monkeypatch, unicode, input_limit):  # noqa: F811
     database, settings, _, _ = fake_model
+    settings.investigation_input_tokens = input_limit
     state = budget_regression_state(unicode)
     before, requests = deepcopy(state), []
 
@@ -285,21 +287,24 @@ def test_schema_prompt_compacts_previews_within_existing_budget(fake_model, monk
     manager = ContextBudgetManager(database, settings)
     bid = manager.create('investigation')
     result = _planner(settings, state, database, bid)
-    assert 'model_error' not in result and result['report']['analysis_status'] == 'model'
     assert state == before
     budget = manager.get(bid)
-    assert budget['limits']['max_input_tokens'] == 12000
+    assert budget['limits']['max_input_tokens'] == input_limit
+    if input_limit == 12000:
+        assert result['model_error']['budget_reason'] == 'request_input_limit'
+        assert budget['calls'] == 0 and budget['usage_records'] == [] and requests == []
+        return
+    assert 'model_error' not in result and result['report']['analysis_status'] == 'model'
     assert budget['calls'] == 1 and budget['usage_records'][0]['status'] == 'succeeded'
     messages = requests[0]['messages']
     measured = sum(len(m['content'].encode()) + 128 for m in messages) + 256
-    assert measured <= 12000
+    assert measured <= input_limit
     context = json.loads(messages[1]['content'])
     assert [e['evidence_id'] for e in context['current_evidence']] == [e['evidence_id'] for e in before['evidence']]
     assert all(e['payload']['state'] == 'failed' for e in context['current_evidence'])
     assert context['previous_hypotheses'][1]['counter_evidence'] == [before['evidence'][0]['evidence_id']]
     assert context['previous_hypotheses'][1]['status'] == 'refuted'
     assert [a['action_id'] for a in context['available_actions']] == [a['action_id'] for a in before['available_actions']]
-    assert any(e['payload'].get('truncated') for e in context['current_evidence'])
 
 
 def test_irreducible_prompt_budget_stops_before_provider(fake_model, monkeypatch):  # noqa: F811

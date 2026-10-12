@@ -10,6 +10,7 @@ const budgetReasons: Record<string, string> = {
   total_token_limit: '调查累计 Token 预算', model_call_limit: '模型调用次数',
   tool_call_limit: '工具调用次数', retrieval_limit: '资料读取量',
   execution_time_limit: '调查执行时间', provider_usage_exceeded_reservation: '供应商用量超过预留预算',
+  target_candidate_limit: '本轮服务节点候选容量',
 }
 
 const validationTypes: Record<string, string> = {
@@ -18,10 +19,11 @@ const validationTypes: Record<string, string> = {
   bool_type: '必须是布尔值', list_type: '必须是数组', dict_type: '必须是对象',
   literal_error: '不在允许的枚举值内', greater_than_equal: '低于允许下限',
   less_than_equal: '超过允许上限', too_short: '未达到最小长度', too_long: '超过最大长度',
-  unknown_target: '目标节点不存在', target_role_mismatch: '角色与目标节点不匹配',
-  unknown_evidence: '证据编号不在当前证据中', unknown_prediction_target: '预测目标不存在',
+  unknown_target: '不在本轮允许引用的服务节点集合中', target_role_mismatch: '角色与目标节点不匹配',
+  unknown_evidence: '证据编号不在当前证据中', unknown_prediction_target: '预测目标不在本轮允许引用的服务节点集合中',
   prediction_tool_not_allowed: '预测工具不在白名单中', invalid_prediction: '预测的工具、字段、比较方式或取值组合无效',
   action_not_allowed: '动作不在本轮授权候选中', finite_number: '必须是有限数值',
+  counterevidence_target_mismatch: '反证必须属于该假设的目标节点；依赖故障请单独建立假设',
 }
 
 function ValidationIssues({ error }: { error: Row }) {
@@ -49,6 +51,9 @@ export function ModelError({ error }: { error?: Row | null }) {
       触发限制：{budgetReasons[error.budget_reason] || '预算预检查'}。
       {error.estimated_input_tokens != null && <> 本地输入估算 {error.estimated_input_tokens}（UTF-8 字节加固定开销）。</>}
       {error.input_limit != null && <> 单次输入上限 {error.input_limit}。</>}
+      {error.budget_reason === 'target_candidate_limit' && <>
+        {' '}服务节点 {error.candidate_count} 个，上限 {error.candidate_limit} 个；候选未被截断，模型请求未发送。请由操作者审核调查范围。
+      </>}
     </p>}
     <p>已有证据和假设历史已保留；未执行额外未授权工具；未自动重试。</p>
     <p>可由操作员手动重新调查，可能产生额外费用。</p>

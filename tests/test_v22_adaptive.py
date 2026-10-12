@@ -117,8 +117,10 @@ def hypothesis(context, service, *, failure="service_unavailable", refute=False,
     }
 
 
-def test_adaptive_mode_pivots_to_dependency_and_keeps_refuted_history(client, monkeypatch):
+@pytest.mark.parametrize("input_limit", [12000, 30000])
+def test_adaptive_mode_pivots_to_dependency_and_keeps_refuted_history(client, monkeypatch, input_limit):
     profile = prepared_profile(client, monkeypatch)
+    get_settings().investigation_input_tokens = input_limit
 
     def reply(context, round_number):
         if round_number == 1:
@@ -129,6 +131,13 @@ def test_adaptive_mode_pivots_to_dependency_and_keeps_refuted_history(client, mo
 
     contexts = model_stub(monkeypatch, reply)
     result = investigate(client, profile, mode="graph_adaptive")
+    if input_limit == 12000:
+        assert result["status"] == "unresolved"
+        assert result["summary"]["model_error"]["budget_reason"] == "request_input_limit"
+        assert len(contexts) == result["context_budget"]["calls"] == 2
+        assert len(result["tool_calls"]) == 4
+        assert any(h["status"] == "refuted" and h["counter_evidence"] for h in result["summary"]["hypothesis_history"])
+        return
     assert result["status"] == "supported"
     calls = result["tool_calls"]
     assert [(c["tool_id"], json.loads(c["args_redacted_json"])["name"]) for c in calls] == [

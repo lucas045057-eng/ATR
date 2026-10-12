@@ -10,6 +10,49 @@ from app.settings import get_settings
 from app.storage.database import Database
 from pydantic import SecretStr
 from test_model_output_compatibility import budget_regression_state
+from test_v22_adaptive import candidate, investigate, model_stub, prepared_profile, proposal, report
+
+
+def test_provider_usage_stop_is_not_reported_as_tool_count_exhaustion(client, monkeypatch):
+    profile = prepared_profile(client, monkeypatch)
+    contexts = model_stub(monkeypatch, lambda context, _: report(
+        action=proposal(candidate(context, "service.status", "store"))))
+    from app.context import model
+    original = model._completion
+
+    def reported_usage(**request):
+        response = original(**request)
+        response.usage = SimpleNamespace(prompt_tokens=27809, completion_tokens=2620)
+        return response
+
+    monkeypatch.setattr(model, "_completion", reported_usage)
+    settings = get_settings()
+    settings.investigation_input_tokens, settings.budget_total_tokens = 30000, 200000
+    result = investigate(client, profile)
+    assert result["status"] == "unresolved"
+    assert result["context_budget"]["stop_reason"] == "provider_usage_exceeded_reservation"
+    assert result["summary"]["stop_reason"] == "provider_usage_exceeded_reservation"
+    assert "供应商" in result["summary"]["unresolved_reason"]
+    assert "工具调用预算已耗尽" not in result["summary"]["unresolved_reason"]
+    assert len(contexts) == result["context_budget"]["calls"] == 1
+    assert result["context_budget"]["tool_calls"] == 2
+    assert [u["status"] for u in result["context_budget"]["usage_records"]] == ["succeeded"]
+    assert not any(call["status"] == "succeeded" and "store.service" in call["args_redacted_json"]
+                   for call in result["tool_calls"])
+
+
+def test_setting_increase_changes_only_new_budget_snapshots(client):
+    settings = get_settings()
+    settings.investigation_input_tokens, settings.budget_total_tokens = 20000, 100000
+    manager = ContextBudgetManager(Database(settings.database_path), settings)
+    old_id = manager.create("investigation")
+    old = manager.get(old_id)
+    settings.investigation_input_tokens, settings.budget_total_tokens = 30000, 200000
+    new = manager.get(manager.create("investigation"))
+    assert manager.get(old_id) == old
+    assert old["limits"]["max_input_tokens"] == 20000
+    assert old["limits"]["max_total_tokens"] == 100000
+    assert new["limits"] == {**old["limits"], "max_input_tokens": 30000, "max_total_tokens": 200000}
 
 
 def test_input_rejection_reports_numbers_without_creating_request(client):

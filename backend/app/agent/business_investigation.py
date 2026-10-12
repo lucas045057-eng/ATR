@@ -304,12 +304,21 @@ def investigate_business(database, settings, incident_id, business_id, actor, jo
                 "new_information": bool(result.get("evidence_id")),
             }
         )
-        if result.get("status") == "denied" or result.get("error") == "PermissionError":
+        if result.get("error_code") == "ssh_credential_unavailable":
+            reason, stop_reason = "SSH 密码会话未提供、已过期或后端重启后失效；请在所选目标页面重新输入密码", "ssh_credential_unavailable"
+        elif result.get("status") == "denied" or result.get("error") == "PermissionError":
             reason, stop_reason = "服务器权限拒绝了关键只读检查，需要审核业务范围", "permission_blocked"
         elif result.get("error") == "BudgetExceeded":
             budget_reason = manager.get(budget_id)["stop_reason"]
-            stop_reason = "context_budget_exhausted" if budget_reason == "retrieval_limit" else "tool_budget_exhausted"
-            reason = "读取资料预算已耗尽" if budget_reason == "retrieval_limit" else "工具调用预算已耗尽"
+            stop_reason, reason = {
+                "retrieval_limit": ("context_budget_exhausted", "读取资料预算已耗尽"),
+                "tool_call_limit": ("tool_budget_exhausted", "工具调用预算已耗尽"),
+                "execution_time_limit": ("execution_time_limit", "调查执行时间预算已耗尽"),
+                "provider_usage_exceeded_reservation": (
+                    "provider_usage_exceeded_reservation",
+                    "供应商实际用量超过本次预留预算，已停止后续工具和模型请求，需要人工审核预算",
+                ),
+            }.get(budget_reason, (budget_reason or "context_budget_exhausted", "调查预算已阻止后续工具执行"))
         if result.get("evidence_id"):
             if action["tool_id"].startswith("code."):
                 code_context.append(result["payload"])

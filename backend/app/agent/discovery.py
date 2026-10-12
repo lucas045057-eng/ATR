@@ -1,10 +1,12 @@
 """Basic metadata can suggest scope; only the operator can authorize deep reads."""
 import json
+from typing import Literal
 
 from pydantic import Field
 
-from app.agent.model_schema import StrictModel
+from app.agent.model_schema import StrictModel, compact_schema, references, role_constraints
 from app.common import digest
+from app.connectors.policy import SCHEMAS
 from app.context.budget import BudgetExceeded, ContextBudgetManager, estimate_model_input
 from app.context.model import ModelUnavailable, call_json, model_messages
 from app.context.model_errors import ModelCallError, ModelDecisionError
@@ -15,7 +17,7 @@ class MappingProposal(StrictModel):
     service: str = Field(min_length=1, max_length=255)
     role: str = Field(min_length=1, max_length=80)
     candidate_key: str = Field(min_length=1, max_length=400)
-    kind: str = Field(pattern="^(service|container|process)$")
+    kind: Literal["service", "container", "process"]
     evidence_ids: list[str] = Field(min_length=1, max_length=8)
     reasons: list[str] = Field(min_length=1, max_length=6)
     counterevidence: list[str] = Field(max_length=6)
@@ -26,6 +28,62 @@ class MappingProposal(StrictModel):
 class MappingReport(StrictModel):
     summary: str = Field(min_length=1, max_length=2000)
     proposals: list[MappingProposal] = Field(max_length=12)
+
+
+def mapping_tools(candidate, target=None):
+    kind = candidate["kind"]
+    tools = {kind + ".list"} | ({kind + ".status", kind + ".logs"} if kind != "process" else set())
+    tools &= SCHEMAS.keys()
+    if target is not None and kind == "container":
+        if not target.get("docker_reads_enabled"):
+            tools = set()
+        elif target.get("docker_reader") == "restricted_list":
+            tools &= {"container.list"}
+    return tools & set(candidate.get("allowed_next_tools", tools))
+
+
+def mapping_candidates(context):
+    return {c["candidate_key"]: c for c in context["candidates"]
+            if c["kind"] != "process" or c.get("business_identity_evidence")}
+
+
+def mapping_output_contract(context):
+    schema = MappingReport.model_json_schema()
+    proposal = schema["$defs"]["MappingProposal"]
+    services = {s["name"]: s["role"] for s in context["services"]}
+    candidates = mapping_candidates(context)
+    proposal["properties"]["service"].update(references(services))
+    proposal["properties"]["candidate_key"].update(references(candidates))
+    proposal["allOf"] = role_constraints(services, "service", "role") + [
+        {"if": {"properties": {"candidate_key": {"const": key}}},
+         "then": {"properties": {"kind": {"const": c["kind"]},
+                                  "evidence_ids": {"items": references(c["evidence_ids"])},
+                                  "next_tools": {"items": references(sorted(mapping_tools(c)))}}}}
+        for key, c in candidates.items()
+    ]
+    if not proposal["allOf"]:
+        proposal.pop("allOf")
+    # Pair identity must stay unique even when explanations differ.
+    if services and candidates:
+        schema["properties"]["proposals"]["allOf"] = [
+            {"contains": {"properties": {"service": {"const": service}, "candidate_key": {"const": key}}},
+             "minContains": 0, "maxContains": 1}
+            for service in services for key in candidates
+        ]
+    return compact_schema(schema)
+
+
+def mapping_model_input(context, input_limit):
+    context = {**context, "candidates": list(context["candidates"])}
+    while True:
+        prompt = ("根据脱敏基础证据提出候选映射。名称相似只是线索；说明反证和不确定性。"
+                  "service/role、candidate_key/kind/evidence_ids 必须符合当前候选组合；同一 service/candidate_key 不得重复。"
+                  "next_tools 只能是当前候选 allowed_next_tools 中工具名称的字符串数组，不能填对象、Action ID、参数或 Shell。"
+                  "这些仅为人工审核后的检查建议，不授予权限、不执行工具、不诊断根因。没有合法建议时返回空 proposals。"
+                  "只返回契约中的 JSON：" + json.dumps(mapping_output_contract(context), ensure_ascii=False, separators=(",", ":")))
+        if not context["candidates"] or estimate_model_input(model_messages(prompt, context)) <= input_limit:
+            return prompt, context
+        context["candidates"].pop()
 
 
 def authorization_digest(target):
@@ -39,22 +97,22 @@ def authorization_digest(target):
 def validate_mapping(data, context):
     report = MappingReport.model_validate(data)
     services = {s["name"]: s["role"] for s in context["services"]}
-    candidates = {c["candidate_key"]: c for c in context["candidates"]}
+    candidates = mapping_candidates(context)
     seen = set()
     for i, proposal in enumerate(report.proposals):
         path = ("proposals", i)
         candidate = candidates.get(proposal.candidate_key)
         if not candidate or candidate["kind"] != proposal.kind:
             raise ModelDecisionError(path + ("candidate_key",), "unknown_target")
-        if services.get(proposal.service) != proposal.role:
+        if proposal.service not in services:
             raise ModelDecisionError(path + ("service",), "unknown_target")
+        if services[proposal.service] != proposal.role:
+            raise ModelDecisionError(path + ("role",), "target_role_mismatch")
         if not set(proposal.evidence_ids) <= set(candidate["evidence_ids"]):
             raise ModelDecisionError(path + ("evidence_ids",), "unknown_evidence")
-        allowed_tools = {proposal.kind + ".list"}
-        if proposal.kind != "process":
-            allowed_tools |= {proposal.kind + ".status", proposal.kind + ".logs"}
+        allowed_tools = mapping_tools(candidate)
         if not set(proposal.next_tools) <= allowed_tools:
-            raise ModelDecisionError(path + ("next_tools",), "unknown_action")
+            raise ModelDecisionError(path + ("next_tools",), "action_not_allowed")
         # A PID/name match is insufficient for a business identity, even if the model says otherwise.
         if proposal.kind == "process" and not candidate.get("business_identity_evidence"):
             raise ModelDecisionError(path + ("kind",), "unknown_target")
@@ -98,6 +156,7 @@ def discover_for_run(database, settings, profile, targets, registry, service_nod
                     continue
                 candidates.append({**item, "target_id": target_id, "observation_id": o["observation_id"],
                                    "observed_at": o["observed_at"], "evidence_ids": [o["evidence_id"]],
+                                   "allowed_next_tools": sorted(mapping_tools(item, target)),
                                    "candidate_key": f"{target_id}:{item['kind']}:{item['id']}", "discovery_id": discovery["id"]})
         if terminal:
             break
@@ -106,10 +165,8 @@ def discover_for_run(database, settings, profile, targets, registry, service_nod
                "services": [{"name": s["name"], "role": s["role"]} for s in profile["services"][:20]],
                "candidates": candidates[:80], "collection_errors": errors,
                "boundary": "候选元数据仅用于范围建议；未确认对象禁止读取日志、业务配置或作根因结论"}
-    prompt = "根据脱敏基础证据提出候选映射。名称相似只是线索；说明反证和不确定性。不得确认权限、执行工具或诊断根因。只返回契约中的 JSON：" + json.dumps(MappingReport.model_json_schema(), ensure_ascii=False)
     limit = manager.get(budget_id)["limits"]["max_input_tokens"]
-    while context["candidates"] and estimate_model_input(model_messages(prompt, context)) > limit:
-        context["candidates"].pop()
+    prompt, context = mapping_model_input(context, limit)
     model_status, model_error, proposals = "not_called", None, []
     summary = "已采集基础证据，需要人工审核运行范围"
     if not terminal and context["candidates"]:

@@ -18,23 +18,31 @@ MECHANISMS = {
     "redis_unavailable": r"redis.*(?:failed|unavailable)|fatal.*(?:config|bind)|cannot.*bind",
 }
 NON_EVENTS = re.compile(r"historical|example|test message|simulated example|not failed|no failure", re.I)
+GENERIC_LOG_SIGNALS = {"error", "failed", "exception", "unavailable", "timeout", "traceback"}
+PREDICTION_RULES = {
+    "state": (STATUS_TOOLS, ["eq", "ne"], {"enum": sorted(FAILED | HEALTHY)}),
+    "status_code": ({"health.get"}, ["eq", "ne"], {"type": "integer", "minimum": 100, "maximum": 599}),
+    "listening": ({"network.listeners"}, ["eq", "ne"], {"type": "boolean"}),
+    "log_signal": (LOG_TOOLS, ["contains"], {"type": "string", "minLength": 6, "maxLength": 160,
+        "not": {"pattern": "^(?:" + "|".join("".join(f"[{c}{c.upper()}{'K' if c == 'k' else ''}]" for c in word)
+                                               for word in sorted(GENERIC_LOG_SIGNALS)) + ")(?![\\s\\S])"}}),
+}
 
 
 def prediction_error_field(proposal):
     tool, field, op, value = (proposal.get(k) for k in ("tool_id", "field", "operator", "value"))
-    tools = {"state": STATUS_TOOLS, "status_code": {"health.get"},
-             "listening": {"network.listeners"}, "log_signal": LOG_TOOLS}
-    if not isinstance(field, str) or field not in tools:
+    if not isinstance(field, str) or field not in PREDICTION_RULES:
         return "field"
-    if not isinstance(tool, str) or tool not in tools[field]:
+    tools, operators, constraints = PREDICTION_RULES[field]
+    if not isinstance(tool, str) or tool not in tools:
         return "tool_id"
-    if not isinstance(op, str) or op not in ({"contains"} if field == "log_signal" else {"eq", "ne"}):
+    if not isinstance(op, str) or op not in operators:
         return "operator"
-    valid = ((field == "state" and isinstance(value, str) and value in FAILED | HEALTHY)
-             or (field == "status_code" and type(value) is int and 100 <= value <= 599)
+    valid = ((field == "state" and isinstance(value, str) and value in constraints["enum"])
+             or (field == "status_code" and type(value) is int and constraints["minimum"] <= value <= constraints["maximum"])
              or (field == "listening" and type(value) is bool)
-             or (field == "log_signal" and isinstance(value, str) and 6 <= len(value) <= 160
-                 and value.casefold() not in {"error", "failed", "exception", "unavailable", "timeout", "traceback"}))
+             or (field == "log_signal" and isinstance(value, str) and constraints["minLength"] <= len(value) <= constraints["maxLength"]
+                 and value.casefold() not in GENERIC_LOG_SIGNALS))
     return None if valid else "value"
 
 
