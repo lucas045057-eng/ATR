@@ -114,9 +114,13 @@ def test_running_database_does_not_refute_api_database_connection_claim():
 
 def test_no_action_runtime_path_does_not_invoke_model(monkeypatch):
     from app.agent.workflow import _planner
-    from app.settings import get_settings
+    from app.settings import Settings
 
-    settings = get_settings()
+    settings = Settings(
+        _env_file=None,
+        operator_token="test-operator-" + "x" * 40,
+        collector_token="test-collector-" + "y" * 40,
+    )
     settings.external_model_enabled = True
     settings.model_name = "must-not-be-called"
     settings.agent_decision_protocol = "minimal_v2"
