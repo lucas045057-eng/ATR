@@ -72,12 +72,24 @@ def _normalized_run_symptom(run: Any) -> str:
     return " ".join(str(symptom).split()).casefold()
 
 
+def _normalized_model_configuration(run: Any) -> dict[str, Any]:
+    configuration = decode(run["model_config_json"])
+    if not isinstance(configuration, dict):
+        return {}
+    snapshot = configuration.get("task_stop_policy")
+    if isinstance(snapshot, dict) and isinstance(snapshot.get("objective"), dict):
+        snapshot = {**snapshot, "objective": {key: value for key, value in snapshot["objective"].items()
+                                                if key != "task_id"}}
+        configuration = {**configuration, "task_stop_policy": snapshot}
+    return configuration
+
+
 def _run_pair_mismatch(left: Any, right: Any) -> str | None:
     if left["graph_snapshot_id"] != right["graph_snapshot_id"]:
         return "Paired runs must use the same graph snapshot"
     if _normalized_run_symptom(left) != _normalized_run_symptom(right):
         return "Paired runs must use the same symptom"
-    if decode(left["model_config_json"]) != decode(right["model_config_json"]):
+    if _normalized_model_configuration(left) != _normalized_model_configuration(right):
         return "Paired runs must use the same model and prompt configuration"
     return None
 
@@ -90,14 +102,16 @@ def _evaluation_run_query() -> str:
       JOIN graph_snapshots g ON g.id=r.graph_snapshot_id WHERE r.id=?"""
 
 
-def _model_configuration(settings: Any) -> dict[str, Any]:
+def _model_configuration(settings: Any, decision_protocol: str | None = None) -> dict[str, Any]:
     configured = bool(settings.model_name and settings.model_api_key.get_secret_value())
     endpoint = settings.model_base_url.strip() if configured else ""
+    protocol = decision_protocol or settings.agent_decision_protocol
     return {
         "provider": settings.model_provider,
         "model": settings.model_name if configured else "offline",
         "endpoint_digest": hashlib.sha256(endpoint.encode()).hexdigest() if endpoint else None,
-        "prompt_version": "planner-review-v2.2",
+        "prompt_version": "reasoner-runtime-v2.3" if protocol == "minimal_v2" else "planner-review-v2.2",
+        "decision_protocol": protocol,
         "timeout_seconds": settings.model_timeout_seconds if configured else None,
     }
 
@@ -196,10 +210,12 @@ def create_incident(request: IncidentCreate, actor: str = Depends(require_operat
         incident_id, timestamp = str(uuid.uuid4()), utcnow()
         with db().transaction() as tx:
             tx.execute("INSERT INTO incidents(id,system_id,symptom_json,window_start,window_end,status,created_at) VALUES(?,?,?,?,?,?,?)",
-                       (incident_id, request.system_id, json.dumps({"text": request.symptom, "mode": request.mode}),
+                       (incident_id, request.system_id, json.dumps({"text": request.symptom, "mode": request.mode,
+                                                                    "task_type": request.task_type}),
                         request.window_start or timestamp, None, "open", timestamp))
         return {"id": incident_id, "system_id": request.system_id, "symptom": request.symptom,
-                "mode": request.mode, "created_at": timestamp, "status": "open"}
+                "mode": request.mode, "task_type": request.task_type,
+                "created_at": timestamp, "status": "open"}
     finally:
         connection.close()
 
@@ -295,7 +311,7 @@ def execute_legacy_run(incident_id: str, actor: str, job_id: str | None = None) 
                 role_node_ids.setdefault(node["role"], []).append(node["id"])
         with database.transaction() as tx:
             tx.execute("INSERT INTO diagnosis_runs(id,incident_id,graph_snapshot_id,mode,model_config_json,budget_json,started_at,status,summary_json) VALUES(?,?,?,?,?,?,?,?,?)",
-                       (run_id, incident_id, sid, mode, json.dumps(_model_configuration(settings), sort_keys=True),
+                        (run_id, incident_id, sid, mode, json.dumps(_model_configuration(settings, "legacy_v22"), sort_keys=True),
                         json.dumps({"tool_attempts_max": 15, "wall_seconds_max": 600}), started, "running", "{}"))
             emit(tx, system["id"], run_id, "run", run_id, "run_started", {"graph_snapshot_id": sid, "mode": mode}, actor)
         connection.commit()
@@ -400,7 +416,7 @@ def execute_legacy_run(incident_id: str, actor: str, job_id: str | None = None) 
                                 "role": node["role"], "service": node["name"]})
         return actions[:32]
 
-    workflow = build_workflow(settings, database, budget_id)
+    workflow = build_workflow(settings, database, budget_id, "legacy_v22")
     action_history: list[dict[str, Any]] = []
     iterations: list[dict[str, Any]] = []
     max_followup_actions = settings.investigation_model_rounds - 1

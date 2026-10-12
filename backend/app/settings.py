@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     model_name: str = ""
     model_wire_api: Literal['chat_completions', 'responses'] = 'chat_completions'
     model_reasoning_effort: Literal['low', 'medium', 'high'] | None = None
+    agent_decision_protocol: Literal["legacy_v22", "minimal_v2"] = "legacy_v22"
     model_timeout_seconds: float = Field(default=45, ge=2, le=180)
     allowed_health_urls: str = ""
     max_source_files: int = Field(default=1000, ge=1, le=1000)
@@ -45,8 +46,17 @@ class Settings(BaseSettings):
     initial_input_tokens: int = Field(default=8000, ge=1)
     investigation_input_tokens: int = Field(default=12000, ge=1)
     initial_model_calls: int = Field(default=6, ge=1, le=20)
-    investigation_model_rounds: int = Field(default=8, ge=1, le=20)
-    investigation_tool_calls: int = Field(default=20, ge=1, le=100)
+    investigation_model_rounds: int = Field(default=8, ge=1, le=100)
+    investigation_tool_calls: int = Field(default=20, ge=1, le=500)
+    task_health_model_rounds: int = Field(default=3, ge=1, le=100)
+    task_health_tool_calls: int = Field(default=4, ge=1, le=500)
+    task_focused_model_rounds: int = Field(default=5, ge=1, le=100)
+    task_focused_tool_calls: int = Field(default=6, ge=1, le=500)
+    task_rca_model_rounds: int = Field(default=12, ge=1, le=100)
+    task_rca_tool_calls: int = Field(default=20, ge=1, le=500)
+    investigation_no_progress_rounds: int = Field(default=2, ge=1, le=5)
+    investigation_minimum_useful_score: float = Field(default=3.5, ge=0, le=10)
+    investigation_high_value_score: float = Field(default=4.5, ge=0, le=10)
     budget_total_tokens: int = Field(default=100000, ge=1)
     code_search_limit: int = Field(default=20, ge=1, le=100)
     model_input_cost_per_million: float | None = Field(default=None, ge=0)

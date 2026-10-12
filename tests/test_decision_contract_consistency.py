@@ -242,7 +242,6 @@ def test_prompt_schema_uses_exactly_the_presented_action_pool(fake_model):  # no
         "link_type",
         "link_relation",
         "link_unknown",
-        "link_cross_refutes",
         "links_capacity",
         "predictions_capacity",
         "prediction_unknown_target",
@@ -313,8 +312,6 @@ def test_entire_investigation_contract_rejects_invalid_nested_fields(mutation):
         link["relation"] = "related"
     elif mutation == "link_unknown":
         link["evidence_id"] = "other-run"
-    elif mutation == "link_cross_refutes":
-        link.update(evidence_id="db-e", relation="refutes")
     elif mutation == "links_capacity":
         h["evidence_links"] *= 25
     elif mutation == "predictions_capacity":

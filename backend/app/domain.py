@@ -21,6 +21,7 @@ class IncidentCreate(StrictModel):
     symptom: str = Field(min_length=3, max_length=500)
     window_start: str | None = None
     mode: Literal["normal", "graph_only", "graph_pattern", "graph_adaptive", "alert_only"] = "normal"
+    task_type: Literal["health_check", "focused_diagnosis", "root_cause_investigation"] = "focused_diagnosis"
 
     @field_validator("window_start")
     @classmethod

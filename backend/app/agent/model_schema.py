@@ -11,7 +11,12 @@ from app.agent.verification import (
     prediction_error_field,
 )
 from app.context.budget import BudgetExceeded
-from app.context.model_errors import ModelCallError, ModelDecisionError, diagnostic
+from app.context.model_errors import (
+    ModelCallError,
+    ModelDecisionError,
+    diagnostic,
+    safe_validation_errors,
+)
 
 SERVICE_TARGET_LIMIT = 30
 
@@ -54,6 +59,10 @@ def allowed_service_nodes(state):
     """One complete, bounded reference set for both prompt and validation."""
     nodes = {n["id"]: n for n in state.get("graph", {}).get("nodes", [])
              if n.get("kind") == "service" and n.get("role") != "runtime"}
+    scope = state.get("scope_node_ids")
+    if isinstance(scope, list):
+        allowed = set(scope)
+        nodes = {node_id: node for node_id, node in nodes.items() if node_id in allowed}
     if len(nodes) > SERVICE_TARGET_LIMIT:
         raise BudgetExceeded("target_candidate_limit", candidate_count=len(nodes),
                              candidate_limit=SERVICE_TARGET_LIMIT)
@@ -223,6 +232,8 @@ def validate_report(data, state):
     evidence = {e["evidence_id"]: e for e in state.get("evidence", [])}
     prediction_tools = set().union(*(rule[0] for rule in PREDICTION_RULES.values()))
     observable = observable_prediction_tools(state)
+    rejected_relations = []
+    rejected_hypotheses = set()
     for index, hypothesis in enumerate(report.hypotheses):
         path = ("hypotheses", index)
         node = nodes.get(hypothesis.target_node_id)
@@ -234,7 +245,9 @@ def validate_report(data, state):
             if link.evidence_id not in evidence:
                 raise ModelDecisionError(path + ("evidence_links", link_index, "evidence_id"), "unknown_evidence")
             if link.relation == "refutes" and evidence[link.evidence_id].get("target_node_id") != hypothesis.target_node_id:
-                raise ModelDecisionError(path + ("evidence_links", link_index, "relation"), "counterevidence_target_mismatch")
+                rejected_relations.append({"loc": path + ("evidence_links", link_index, "relation"),
+                                           "type": "counterevidence_target_mismatch"})
+                rejected_hypotheses.add(index)
         for prediction_index, prediction in enumerate(hypothesis.verification_predictions):
             prediction_path = path + ("verification_predictions", prediction_index)
             if prediction.target_node_id not in nodes:
@@ -260,4 +273,19 @@ def validate_report(data, state):
             allowed = any(a.get("tool_id") == action.tool_id and a.get("target_node_id") == action.target_node_id for a in actions)
         if not allowed:
             raise ModelDecisionError(("action", "action_id" if state.get("adaptive") else "tool_id"), "action_not_allowed")
-    return report.model_dump()
+    result = report.model_dump()
+    if rejected_relations:
+        rejected_indexes = sorted(rejected_hypotheses)
+        for index in rejected_indexes:
+            result["hypotheses"][index]["evidence_links"] = [
+                link for link in result["hypotheses"][index]["evidence_links"]
+                if not (link["relation"] == "refutes"
+                        and evidence[link["evidence_id"]].get("target_node_id")
+                        != result["hypotheses"][index]["target_node_id"])
+            ]
+        result["_decision_audit"] = {
+            "rejected_relation_count": len(rejected_relations),
+            "rejected_hypothesis_indexes": rejected_indexes,
+            "validation_errors": safe_validation_errors(rejected_relations),
+        }
+    return result

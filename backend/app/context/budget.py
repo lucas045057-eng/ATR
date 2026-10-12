@@ -37,7 +37,7 @@ class BudgetLimits(StrictModel):
     max_input_tokens: int = Field(default=8000, ge=1, le=200000)
     max_calls: int = Field(default=6, ge=1, le=100)
     max_total_tokens: int = Field(default=100000, ge=1, le=1000000)
-    max_tools: int = Field(default=20, ge=1, le=100)
+    max_tools: int = Field(default=20, ge=1, le=500)
     max_retrieved_bytes: int = Field(default=500000, ge=1, le=10000000)
     max_execution_seconds: int = Field(default=1800, ge=1, le=86400)
 

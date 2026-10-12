@@ -8,6 +8,13 @@ from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
+from app.agent.decision_runtime import (
+    adapt_minimal_decision,
+    claims_from_hypotheses,
+    classify_outcome,
+    facts_from_state,
+    minimal_output_contract,
+)
 from app.agent.model_schema import allowed_service_nodes, output_contract, validate_report
 from app.agent.verification import verify_hypothesis
 from app.context.budget import BudgetExceeded, ContextBudgetManager, estimate_model_input
@@ -74,6 +81,15 @@ class InvestigationState(TypedDict, total=False):
     previous_hypotheses: list[dict[str, Any]]
     hypothesis_history: list[dict[str, Any]]
     scope_requests: list[dict[str, Any]]
+    decision_audit: dict[str, Any]
+    decision_protocol: str
+    runtime_only: bool
+    runtime_decision: dict[str, Any]
+    runtime_decision_audit: dict[str, Any]
+    runtime_outcome: dict[str, Any]
+    scope_node_ids: list[str]
+    task_objective: dict[str, Any]
+    investigation_plan: dict[str, Any]
 
 
 def _offline_report(state: InvestigationState) -> dict[str, Any]:
@@ -149,10 +165,113 @@ def _compact_model_context(prompt, context, input_limit):
     return context
 
 
+def _minimal_runtime_only(state: InvestigationState, *, model_unavailable=False) -> dict[str, Any]:
+    """Re-evaluate existing hypotheses against new evidence without spending a model call."""
+    hypotheses = state.get("previous_hypotheses", [])[:3]
+    facts = facts_from_state(state)
+    claims, links = claims_from_hypotheses(hypotheses, facts)
+    for hypothesis, evidence_links in zip(hypotheses, links, strict=True):
+        hypothesis["evidence_links"] = evidence_links
+    message = ("模型未配置；保留已采集证据，未发起新的模型请求。" if model_unavailable
+               else "当前授权范围内没有新的合法只读动作候选。")
+    return {
+        "report": {"analysis_status": "offline" if model_unavailable else "model", "summary": message,
+                   "hypotheses": hypotheses, "next_action": message,
+                   "action": None, "scope_requests": []},
+        "runtime_decision": {"facts": facts, "claims": claims, "finish": False,
+                             "finish_reason": None, "action_selected": False,
+                             "fatal_error": "model_unavailable" if model_unavailable else None},
+        "runtime_decision_audit": {},
+    }
+
+
+def _minimal_planner(settings: Settings, state: InvestigationState, database, budget_id) -> dict[str, Any]:
+    from app.context.model import call_json
+
+    state = {**state, "available_actions": state.get("available_actions", [])[:12]}
+    model_nodes = list(allowed_service_nodes(state).values())
+    model_node_ids = {node["id"] for node in model_nodes}
+    evidence_facts = facts_from_state(state)
+    safe_evidence = [{"evidence_id": item.get("evidence_id"),
+                      "target_node_id": item.get("target_node_id"), "tool_id": item.get("tool_id"),
+                      "payload": {key: (str(value)[-700:] if key == "text" else value[:30] if isinstance(value, list) else value)
+                                  for key, value in item.get("payload", {}).items()}}
+                     for item in state.get("evidence", [])[-10:]]
+
+    def compact_hypothesis(item):
+        return {key: item.get(key) for key in
+                ("target_node_id", "failure_mode", "status", "rationale", "missing_evidence", "confidence")}
+
+    actions = [{key: action[key] for key in ("action_id", "tool_id", "service", "role") if key in action}
+               for action in state.get("available_actions", [])]
+    context = {
+        "symptom": state["incident"]["symptom"],
+        "task_objective": state.get("task_objective", {}),
+        "investigation_plan": {
+            "checks": [{key: check.get(key) for key in
+                        ("check_id", "target_node_id", "check_type", "required", "status")}
+                       for check in state.get("investigation_plan", {}).get("checks", [])[:20]],
+        },
+        "business_profile": state.get("business_profile", {}),
+        "allowed_hypothesis_targets": [
+            {"service": node.get("name"), "node_id": node["id"], "role": node.get("role")}
+            for node in model_nodes
+        ],
+        "graph_edges": [{key: edge.get(key) for key in ("from_node_id", "to_node_id", "relation", "certainty")}
+                        for edge in state.get("graph", {}).get("edges", [])
+                        if edge.get("from_node_id") in model_node_ids and edge.get("to_node_id") in model_node_ids][:40],
+        "current_evidence": safe_evidence,
+        "runtime_facts": evidence_facts,
+        "available_actions": actions,
+        "prior_action_outcomes": [{key: item.get(key) for key in
+                                   ("tool_id", "target_node_id", "status", "new_information")}
+                                  for item in state.get("action_history", [])[-4:]],
+        "previous_hypotheses": [compact_hypothesis(item) for item in state.get("previous_hypotheses", [])[:3]],
+        "hypothesis_history": [compact_hypothesis(item) for item in state.get("hypothesis_history", [])[-4:]],
+    }
+    system_prompt = (
+        "Return only the minimal JSON decision. Follow task_objective and investigation_plan; never infer or expand permissions. "
+        "Only choose a check that advances a pending task check or a current claim in the named target scope. "
+        "For root_cause_investigation, a direct fault is not a confirmed cause; only the Evidence Gate decides confirmation. "
+        "Hypotheses may only use exact service node IDs in "
+        "allowed_hypothesis_targets and a failure_mode in the schema. Do not output evidence_links, "
+        "verification_predictions, tool names as executable requests, target roles, action arguments, "
+        "SSH target IDs, container IDs, shell commands, or new identifiers. Select next_action_id only "
+        "by exact copy from available_actions; Runtime supplies the actual authorized tool and arguments. "
+        "A finish suggestion never confirms a cause. Explain uncertainty in missing_information; do not "
+        "invent observations. Evidence Gate independently determines support. Schema: "
+        + json.dumps(minimal_output_contract(state), separators=(",", ":"))
+    )
+    input_limit = ContextBudgetManager(database, settings).get(budget_id)["limits"]["max_input_tokens"]
+    result = call_json(
+        database, settings, budget_id, system_prompt,
+        _compact_model_context(system_prompt, context, input_limit),
+        validate=lambda value: adapt_minimal_decision(value, state),
+    )
+    report = result["report"]
+    return {
+        "report": report,
+        "runtime_decision": {"facts": result["facts"], "claims": result["claims"],
+                             "finish": result["finish"], "finish_reason": result["finish_reason"],
+                             "action_selected": report.get("action") is not None},
+        "runtime_decision_audit": result["audit"],
+    }
+
+
 def _planner(settings: Settings, state: InvestigationState, database=None, budget_id=None) -> dict[str, Any]:
+    if state.get("decision_protocol") == "minimal_v2" and state.get("runtime_only"):
+        return _minimal_runtime_only(state)
+    if state.get("decision_protocol") == "minimal_v2" and (
+        not settings.external_model_enabled or not settings.model_name or not settings.model_api_key.get_secret_value()
+    ):
+        return _minimal_runtime_only(state, model_unavailable=True)
     if not settings.external_model_enabled or not settings.model_name or not settings.model_api_key.get_secret_value():
         return {"report": _offline_report(state)}
     try:
+        if state.get("decision_protocol") == "minimal_v2":
+            if database is None or budget_id is None:
+                raise ValueError("Model requests require a persisted context budget")
+            return _minimal_planner(settings, state, database, budget_id)
         from app.context.model import call_json
         state = {**state, "available_actions": state.get("available_actions", [])[:12]}
         model_nodes = list(allowed_service_nodes(state).values())
@@ -192,6 +311,7 @@ def _planner(settings: Settings, state: InvestigationState, database=None, budge
         data = call_json(database, settings, budget_id, system_prompt,
             _compact_model_context(system_prompt, context, input_limit),
             validate=lambda value: validate_report(value, state))
+        decision_audit = data.pop("_decision_audit", {})
         if state.get("adaptive"):
             for hypothesis in data["hypotheses"][:3]:
                 if not isinstance(hypothesis, dict):
@@ -214,7 +334,7 @@ def _planner(settings: Settings, state: InvestigationState, database=None, budge
                                 "rationale": redact_text(str(action.get("rationale", "")))[:500]}
         else:
             report["action"] = None
-        return {"report": report}
+        return {"report": report, "decision_audit": decision_audit}
     except Exception as exc:
         if isinstance(exc, BudgetExceeded):
             error = ModelCallError({"code": "model_budget_exceeded", "exception_type": "BudgetExceeded",
@@ -240,6 +360,8 @@ def _reviewer(state: InvestigationState) -> dict[str, Any]:
     service_by_name = {node.get("name"): node for node in graph_nodes if node.get("kind") == "service"}
     edges = state.get("graph", {}).get("edges", [])
     conflicts = state.get("graph", {}).get("open_conflicts", [])
+    decision_audit = state.get("decision_audit", {})
+    rejected_hypotheses = set(decision_audit.get("rejected_hypothesis_indexes", []))
 
     evidence_targets: dict[str, set[str]] = {}
     signal_targets: dict[str, set[str]] = {}
@@ -344,7 +466,7 @@ def _reviewer(state: InvestigationState) -> dict[str, Any]:
                 links.append({"evidence_id": evidence_id, "relation": "refutes",
                               "explanation": "Current observation contradicts the hypothesis prediction or required failed state."})
                 refute_ids.add(evidence_id)
-        passed = (target_is_current and len(signatures) >= 2 and len(families) >= 2
+        passed = (index not in rejected_hypotheses and target_is_current and len(signatures) >= 2 and len(families) >= 2
                   and failure_signal and bool(prediction) and not conflicts and not refute_ids
                   and verification["passed"]
                   and isinstance(causal, list) and len(causal) >= 2
@@ -360,6 +482,8 @@ def _reviewer(state: InvestigationState) -> dict[str, Any]:
             confidence = float(item.get("confidence", 0.25))
         except (TypeError, ValueError):
             confidence = 0.25
+        if index in rejected_hypotheses:
+            confidence = min(confidence, 0.25)
         causal_chain = item.get("causal_chain", [])
         if not isinstance(causal_chain, list):
             causal_chain = []
@@ -375,10 +499,11 @@ def _reviewer(state: InvestigationState) -> dict[str, Any]:
     return {"gate": {"status": "supported" if supported_index is not None else "unresolved",
                      "supported_index": supported_index, "rationale": rationale,
                      "hypotheses": clean_hypotheses, "evidence_count": len(evidence_by_id),
-                     "open_conflict_count": len(conflicts)}}
+                     "open_conflict_count": len(conflicts),
+                     "decision_audit": decision_audit}}
 
 
-def build_workflow(settings: Settings, database=None, budget_id=None):
+def build_workflow(settings: Settings, database=None, budget_id=None, decision_protocol="legacy_v22"):
     def review(state):
         if database and state.get("graph", {}).get("snapshot_id"):
             conn = database.connect()
@@ -388,10 +513,28 @@ def build_workflow(settings: Settings, database=None, budget_id=None):
             finally:
                 conn.close()
         return _reviewer(state)
+
+    def runtime_decide(state):
+        if decision_protocol != "minimal_v2":
+            return {}
+        decision = state.get("runtime_decision", {})
+        facts = decision.get("facts") or facts_from_state(state)
+        decision = {**decision, "facts": facts}
+        if state.get("model_error"):
+            decision["fatal_error"] = state["model_error"].get("code", "model_failed")
+        return {"runtime_outcome": classify_outcome(
+            state, state.get("gate", {}), decision,
+        ), "runtime_decision": decision}
+
+    def plan(state):
+        return _planner(settings, {**state, "decision_protocol": decision_protocol}, database, budget_id)
+
     graph = StateGraph(InvestigationState)
-    graph.add_node("planner", lambda state: _planner(settings, state, database, budget_id))
+    graph.add_node("planner", plan)
     graph.add_node("reviewer", review)
+    graph.add_node("runtime", runtime_decide)
     graph.add_edge(START, "planner")
     graph.add_edge("planner", "reviewer")
-    graph.add_edge("reviewer", END)
+    graph.add_edge("reviewer", "runtime")
+    graph.add_edge("runtime", END)
     return graph.compile()

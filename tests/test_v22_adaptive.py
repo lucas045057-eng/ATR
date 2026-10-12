@@ -73,6 +73,9 @@ def model_stub(monkeypatch, reply):
 
 
 def investigate(client, profile, *, mode="normal", symptom="catalog-api unavailable"):
+    # These tests assert the legacy V2.2 adaptive planner contract; newer task-stop
+    # tests mutate the cached settings singleton to minimal_v2 within their cases.
+    get_settings().agent_decision_protocol = "legacy_v22"
     incident = client.post(
         "/api/v1/incidents", json={"system_id": profile["system_id"], "symptom": symptom, "mode": mode},
     )

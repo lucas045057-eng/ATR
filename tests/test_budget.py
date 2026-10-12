@@ -4,6 +4,7 @@ import pytest
 from app.context.budget import BudgetExceeded, BudgetLimits, ContextBudgetManager
 from app.settings import Settings
 from app.storage.database import Database
+from pydantic import ValidationError
 
 
 @pytest.fixture
@@ -51,3 +52,23 @@ def test_tool_and_retrieval_limits(manager):
     manager.retrieval(bid, 10)
     with pytest.raises(BudgetExceeded):
         manager.retrieval(bid, 1)
+
+
+def test_requested_investigation_limits_are_accepted_and_snapshotted(manager):
+    settings = Settings(
+        investigation_model_rounds=100,
+        investigation_tool_calls=500,
+        budget_total_tokens=1_000_000,
+    )
+    budget_manager = ContextBudgetManager(manager.db, settings)
+    budget_id = budget_manager.create("investigation")
+
+    limits = budget_manager.get(budget_id)["limits"]
+    assert limits["max_calls"] == 100
+    assert limits["max_tools"] == 500
+    assert limits["max_total_tokens"] == 1_000_000
+
+    with pytest.raises(ValidationError):
+        Settings(investigation_model_rounds=101)
+    with pytest.raises(ValidationError):
+        BudgetLimits(max_tools=501)

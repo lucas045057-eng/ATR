@@ -17,17 +17,17 @@ def test_only_one_scoped_regeneration_keeps_both_audits_and_strict_validation(fa
     state = {**graph_state(), "evidence": [
         {"evidence_id": "api-event", "target_node_id": API},
         {"evidence_id": "db-event", "target_node_id": DB},
-    ]}
+    ], "available_actions": [{"action_id": "status", "tool_id": "container.status", "target_node_id": API}]}
     context = {"allowed_hypothesis_targets": [{"node_id": API}, {"node_id": DB}],
-               "current_evidence": state["evidence"]}
+               "current_evidence": state["evidence"], "available_actions": state["available_actions"]}
     contexts = []
 
     def reply(data, number):
         contexts.append(data)
         output = decision(API)
-        output["hypotheses"][0]["evidence_links"] = [{
-            "evidence_id": "api-event" if number == 2 and fix else "db-event",
-            "relation": "refutes", "explanation": "Synthetic scope check only",
+        output["hypotheses"][0]["verification_predictions"] = [{
+            "target_node_id": API, "tool_id": "container.status", "field": "state", "operator": "eq",
+            "value": "exited" if number == 2 and fix else "unregistered-state",
         }]
         return output
 
@@ -38,7 +38,7 @@ def test_only_one_scoped_regeneration_keeps_both_audits_and_strict_validation(fa
     invoke = one_scoped_correction(call_json, audit)
     if fix:
         output = invoke(db, settings, bid, "bounded", context, validate=lambda x: validate_report(x, state))
-        assert output["hypotheses"][0]["evidence_links"][0]["evidence_id"] == "api-event"
+        assert output["hypotheses"][0]["verification_predictions"][0]["value"] == "exited"
     else:
         with pytest.raises(ModelCallError):
             invoke(db, settings, bid, "bounded", context, validate=lambda x: validate_report(x, state))
@@ -57,7 +57,11 @@ def test_correction_cannot_bypass_model_call_budget(fake_model):  # noqa: F811
     settings.model_timeout_seconds = 10
     state = {**graph_state(), "evidence": [{"evidence_id": "db-event", "target_node_id": DB}]}
     output = decision(API)
-    output["hypotheses"][0]["evidence_links"] = [{"evidence_id": "db-event", "relation": "refutes", "explanation": "Synthetic mismatch"}]
+    output["hypotheses"][0]["verification_predictions"] = [{
+        "target_node_id": API, "tool_id": "container.status", "field": "state", "operator": "eq",
+        "value": "unregistered-state",
+    }]
+    state["available_actions"] = [{"action_id": "status", "tool_id": "container.status", "target_node_id": API}]
     provider["reply"] = lambda *_: output
     manager = ContextBudgetManager(db, settings)
     bid = manager.create("investigation", limits=BudgetLimits(max_calls=1))

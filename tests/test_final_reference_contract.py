@@ -11,7 +11,8 @@ from app.connectors.credentials import CredentialUnavailable
 from app.connectors.mock import MockConnector
 from app.context.budget import estimate_model_input
 from app.context.model import model_messages
-from app.context.model_errors import ModelDecisionError, diagnostic
+from app.context.model_errors import ModelDecisionError
+from app.settings import get_settings
 from test_baseline import gate_state
 from test_target_reference_contract import API, DATASTORE, DB, decision, graph_state
 from test_v22_adaptive import (
@@ -198,29 +199,62 @@ def test_prompt_schema_binds_refutation_to_hypothesis_target(target, relation, e
     if expected:
         validate_report(data, state)
     else:
-        with pytest.raises(ModelDecisionError) as caught:
-            validate_report(data, state)
-        assert caught.value.error_type == "counterevidence_target_mismatch"
+        validated = validate_report(data, state)
+        assert validated["hypotheses"][0]["evidence_links"] == []
+        assert validated["_decision_audit"]["rejected_relation_count"] == 1
 
 
 def test_dependency_running_cannot_be_api_counterevidence():
-    state = {**graph_state(), "evidence": [{"evidence_id": "PRIVATE-DB-EVIDENCE", "target_node_id": DB}]}
+    state = {**graph_state(), "evidence": [
+        {"evidence_id": "api-state", "target_node_id": API},
+        {"evidence_id": "PRIVATE-DB-EVIDENCE", "target_node_id": DB},
+    ]}
     data = decision(API)
     data["hypotheses"][0]["evidence_links"] = [{
+        "evidence_id": "api-state", "relation": "supports", "explanation": "Relevant target evidence remains attached.",
+    }, {
         "evidence_id": "PRIVATE-DB-EVIDENCE", "relation": "refutes",
         "explanation": "The database is running; this does not contradict the application's endpoint fault.",
     }]
+    validated = validate_report(data, state)
+    assert [link["evidence_id"] for link in validated["hypotheses"][0]["evidence_links"]] == ["api-state"]
+    assert validated["_decision_audit"] == {
+        "rejected_relation_count": 1,
+        "rejected_hypothesis_indexes": [0],
+        "validation_errors": [{
+            "path": "hypotheses[0].evidence_links[1].relation",
+            "type": "counterevidence_target_mismatch", "stage": "validate",
+        }],
+    }
+    assert "PRIVATE-DB-EVIDENCE" not in json.dumps(validated["_decision_audit"])
+
+
+def test_locally_rejected_relation_keeps_hypothesis_candidate_even_if_gate_would_pass():
+    state = gate_state()
+    state["report"]["hypotheses"][0]["confidence"] = 0.99
+    state["decision_audit"] = {"rejected_hypothesis_indexes": [0], "rejected_relation_count": 1,
+                               "validation_errors": [{"path": "hypotheses[0].evidence_links[1].relation",
+                                                      "type": "counterevidence_target_mismatch", "stage": "validate"}]}
+    result = _reviewer(state)["gate"]
+    assert result["status"] == "unresolved"
+    assert result["hypotheses"][0]["status"] == "candidate"
+    assert result["hypotheses"][0]["confidence"] <= 0.25
+    assert result["decision_audit"]["rejected_relation_count"] == 1
+
+
+def test_unknown_action_is_still_rejected_as_a_whole_decision():
+    data = decision(API)
+    data["action"] = {"action_id": "not-in-the-current-action-pool", "rationale": "synthetic"}
+    state = {**graph_state(), "adaptive": True, "available_actions": [{"action_id": "allowed-action"}]}
     with pytest.raises(ModelDecisionError) as caught:
         validate_report(data, state)
-    error = diagnostic(caught.value, "validate")
-    assert error["validation_errors"] == [{
-        "path": "hypotheses[0].evidence_links[0].relation", "type": "counterevidence_target_mismatch", "stage": "validate",
-    }]
-    assert "PRIVATE-DB-EVIDENCE" not in json.dumps(error)
+    assert caught.value.path == ("action", "action_id")
+    assert caught.value.error_type == "action_not_allowed"
 
 
-def test_cross_target_counterevidence_stops_before_next_tool(client, monkeypatch):
+def test_cross_target_counterevidence_is_isolated_then_bounded_repeat_stops(client, monkeypatch):
     profile = prepared_profile(client, monkeypatch)
+    get_settings().investigation_input_tokens = 30000
 
     def reply(context, number):
         if number == 1:
@@ -229,16 +263,22 @@ def test_cross_target_counterevidence_stops_before_next_tool(client, monkeypatch
         db = next(e for e in context["current_evidence"] if e["target_node_id"] != invalid["target_node_id"])
         invalid["evidence_links"] = [{"evidence_id": db["evidence_id"], "relation": "refutes",
                                      "explanation": "Dependency state is not an application endpoint refutation."}]
-        return report([invalid], proposal(candidate(context, "config.list")))
+        action = proposal(candidate(context, "config.list")) if number == 2 else None
+        return report([invalid], action)
 
     contexts = model_stub(monkeypatch, reply)
     result = investigate(client, profile, mode="graph_adaptive")
-    assert len(contexts) == 2 and len(result["tool_calls"]) == 3
+    assert len(contexts) == 3 and len(result["tool_calls"]) == 4
     assert result["status"] == "unresolved"
-    error = result["summary"]["model_error"]
-    assert error["validation_errors"][0]["type"] == "counterevidence_target_mismatch"
-    assert all(t["tool_id"] != "config.list" for t in result["tool_calls"])
-    assert [u["status"] for u in result["context_budget"]["usage_records"]] == ["succeeded", "failed"]
+    assert result["summary"]["model_error"] is None
+    assert result["summary"]["decision_audit"]["rejected_relation_count"] == 2
+    assert result["summary"]["decision_audit"]["consecutive_error_rounds"] == 2
+    assert result["summary"]["stop_reason"] == "repeated_local_model_error"
+    assert [t["tool_id"] for t in result["tool_calls"]][-1] == "config.list"
+    assert result["summary"]["iterations"][1]["gate"]["hypotheses"][0]["status"] == "candidate"
+    assert result["summary"]["iterations"][1]["executed_action"]["tool_id"] == "config.list"
+    assert result["summary"]["iterations"][2]["policy_outcome"] == "repeated_local_model_error"
+    assert all(u["status"] == "succeeded" for u in result["context_budget"]["usage_records"])
 
 
 def test_verified_failure_with_declared_missing_cause_is_not_confirmed():

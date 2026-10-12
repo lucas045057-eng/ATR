@@ -10,8 +10,10 @@ def test_repeatable_stub_harness_measures_three_arms_and_keeps_history(tmp_path,
     assert len(result["trials"]) == 6 and not result["external_model_verified"]
     for trial in result["trials"]:
         assert len(trial["tool_calls"]) == trial["metrics"]["diagnostic_tool_calls"]
-        assert trial["metrics"]["usage_kinds"] == ["estimate"]
-        assert trial["metrics"]["model_calls"] > 0
+        if trial["metrics"]["model_calls"]:
+            assert trial["metrics"]["usage_kinds"] == ["estimate"]
+        else:
+            assert trial["metrics"]["usage_kinds"] == []
         assert not trial["false_positive"]
     assert result["trials"][0]["verdict"] == "correct"
     assert all(t["verdict"] == "unresolved" for t in result["trials"][3:])

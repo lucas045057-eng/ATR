@@ -14,6 +14,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("OPERATOR_TOKEN", "test-operator-" + "x" * 40)
     monkeypatch.setenv("COLLECTOR_TOKEN", "test-collector-" + "y" * 40)
     monkeypatch.setenv("EXTERNAL_MODEL_ENABLED", "false")
+    monkeypatch.setenv("AGENT_DECISION_PROTOCOL", "legacy_v22")
     monkeypatch.setenv("SSH_ENABLED", "false")
     monkeypatch.setenv("MODEL_NAME", "")
     monkeypatch.setenv("MODEL_API_KEY", "")

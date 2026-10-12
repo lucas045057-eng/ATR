@@ -192,7 +192,12 @@ def test_browser_schema_error_shows_safe_field_path(live_server, fake_model, inv
         task = api.post('/api/v1/incidents/' + incident['id'] + '/runs').json()
         job = wait_job(api, task['job_id'], timeout=20)
         result = api.get('/api/v1/runs/' + job['result']['id']).json()
-        assert result['summary']['model_error']['validation_kind'] == ('decision' if invalid_reference else 'format')
+        if invalid_reference == 'counter':
+            assert result['summary']['model_error'] is None
+            assert result['summary']['decision_audit']['rejected_relation_count'] == 1
+            assert result['summary']['gate']['status'] != 'supported'
+        else:
+            assert result['summary']['model_error']['validation_kind'] == ('decision' if invalid_reference else 'format')
         assert len(result['tool_calls']) == 2
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, channel=os.environ.get('ATR_BROWSER_CHANNEL') or None)
@@ -206,9 +211,10 @@ def test_browser_schema_error_shows_safe_field_path(live_server, fake_model, inv
         page.locator('.incident-list').get_by_text(symptom, exact=True).click()
         panel = page.get_by_test_id('model-error')
         if invalid_reference == 'counter':
-            expect(panel).to_contain_text('hypotheses[0].evidence_links[0].relation', timeout=10000)
-            expect(panel).to_contain_text('counterevidence_target_mismatch')
-            expect(panel).to_contain_text('反证必须属于该假设的目标节点')
+            warning = page.get_by_text('局部证据关系已隔离', exact=False)
+            expect(warning).to_be_visible(timeout=10000)
+            expect(warning).to_contain_text('hypotheses[0].evidence_links[0].relation')
+            expect(warning).to_contain_text('counterevidence_target_mismatch')
         elif invalid_reference == 'prediction':
             expect(panel).to_contain_text('hypotheses[0].verification_predictions[0].target_node_id', timeout=10000)
             expect(panel).to_contain_text('unknown_prediction_target')
