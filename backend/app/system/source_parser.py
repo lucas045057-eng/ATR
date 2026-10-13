@@ -11,8 +11,13 @@ ROUTES = re.compile(r"(?:app|router)\.(get|post|put|delete|patch)\s*\(\s*['\"`](
 ENV_REF = re.compile(r"(?:process\.env\.([A-Z0-9_]+)|os\.environ(?:\.get)?\s*\(?['\"]([A-Z0-9_]+))")
 
 
-def describe_source(relative: str, text: str) -> dict:
+def describe_source(relative: str, text: str, *, protocol='legacy') -> dict:
     """Shared V1/V2 parser. AST inspection is local and never imports uploaded modules."""
+    if protocol == 'ab_source_v1':
+        from app.business.languages import describe_language
+        return describe_language(relative, text)
+    if protocol != 'legacy':
+        raise ValueError('Unknown source parser protocol')
     info = {"imports": [], "routes": [], "symbols": [], "environment_keys": []}
     info["client_calls"] = []
     if relative.endswith(".py"):

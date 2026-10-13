@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from pathlib import PurePosixPath
 
+from app.business.flows import build_flows, source_ref
 from app.business.media import optional_image
 from app.business.models import BusinessProfile, Fact
 from app.common import digest, now
@@ -50,6 +51,9 @@ def build_static(business, files, previous):
         )
         if fact.id in prior:
             fact = prior[fact.id].model_copy(deep=True)
+        references = obj.get('source_refs', []) if isinstance(obj, dict) else []
+        fact.source_refs = [{**source_ref(row, reference, profile.profile_version), 'source_type': source_type}
+                            for reference in references or [{}]]
         profile.facts.append(fact)
         return fact.id
 
@@ -142,6 +146,8 @@ def build_static(business, files, previous):
             stacks.update(info.get("imports", [])[:50])
             for route in info.get("routes", []):
                 route_id = add(f"module:{module}", "exposes", route, row)
+                route = {**route, 'source_refs': [source_ref(row, reference, profile.profile_version)
+                                                 for reference in route.get('source_refs', [])]}
                 profile.interfaces.append(
                     {**route, "module": module, "file_id": row["id"], "fact_id": route_id}
                 )
@@ -219,17 +225,18 @@ def build_static(business, files, previous):
             )
             if match:
                 row = files_by_id[module["file_id"]]
-                fact_id = add(f"module:{module['name']}", "calls", f"module:{match}", row)
+                fact_id = add(f"module:{module['name']}", "imports", f"module:{match}", row)
                 profile.dependencies.append(
                     {
                         "from": f"module:{module['name']}",
                         "to": f"module:{match}",
-                        "relation": "calls",
+                        "relation": "imports",
                         "fact_id": fact_id,
                         "certainty": "static_import",
                     }
                 )
     profile.services = list(service_by_name.values())
+    profile.business_flow_graphs = build_flows(files, profile.profile_version)
     profile.technology_stack = sorted(stacks)[:200]
     active_digests = {r["content_digest"] for r in files}
     current_ids = {f.id for f in profile.facts}

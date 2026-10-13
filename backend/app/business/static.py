@@ -8,12 +8,13 @@ from pathlib import Path
 import yaml
 
 from app.business.ingestion import UnsafeArtifact
+from app.business.languages import LANGUAGES
 from app.business.media import parse_image, parse_pdf
 from app.system.graph import role_for
 from app.system.source_parser import describe_source
 from app.tools.registry import sanitize_payload
 
-CODE = {".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"}
+CODE = set(LANGUAGES)
 TEXT = CODE | {".yaml", ".yml", ".json", ".toml", ".md", ".txt", ".conf", ".cfg", ".ini", ".env"}
 IGNORED = {"node_modules", ".git", ".venv", "venv", "__pycache__", "dist", "build"}
 
@@ -33,13 +34,7 @@ def inspect_file(path: Path, relative: str, read_limit: int) -> dict:
         raw = stream.read(read_limit + 1)
     info = {
         "parse_state": "complete",
-        "language": {
-            ".py": "Python",
-            ".js": "JavaScript",
-            ".ts": "TypeScript",
-            ".tsx": "TypeScript",
-            ".jsx": "JavaScript",
-        }.get(suffix, ""),
+        "language": LANGUAGES.get(suffix, ''),
         "services": [],
         "keys": [],
         "datastores": [],
@@ -75,7 +70,7 @@ def inspect_file(path: Path, relative: str, read_limit: int) -> dict:
         return {**info, "parse_state": "unsupported_encoding"}
     try:
         if suffix in CODE:
-            info.update(describe_source(relative, text))
+            info.update(describe_source(relative, text, protocol='ab_source_v1'))
         elif suffix in {".yaml", ".yml", ".json", ".toml"}:
             obj = (
                 safe_yaml(text)

@@ -75,11 +75,12 @@ class SourceIndex:
             raise ValueError("源码版本摘要不匹配，请重新导入")
         start = request.start_line
         if request.symbol:
-            symbol = next(
-                (s for s in json.loads(row["symbols_json"]) if s["name"] == request.symbol), None
-            )
-            if not symbol:
+            matches = [s for s in json.loads(row['symbols_json']) if s['name'] == request.symbol]
+            if not matches:
                 raise KeyError("符号不在此文件索引中")
+            if len(matches) != 1:
+                raise ValueError('符号存在多个声明，请使用来源中的准确行号')
+            symbol = matches[0]
             start = symbol["start"]
         lines = raw.decode("utf-8-sig").splitlines()
         text = redact_text("\n".join(lines[start - 1 : start - 1 + request.max_lines]))

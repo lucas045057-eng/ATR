@@ -20,6 +20,7 @@ class Fact(StrictModel):
     source_type: Literal["Documented", "Static", "Runtime", "Inferred", "Human Verified"]
     source_locator: str = Field(max_length=500)
     source_digest: str
+    source_refs: list[dict] = Field(default_factory=list)
     observed_at: str
     confidence: float = Field(ge=0, le=1)
     verification_status: Literal["pending", "confirmed", "rejected", "stale"] = "pending"
@@ -39,6 +40,7 @@ class BusinessProfile(StrictModel):
     observability: list[dict] = Field(default_factory=list)
     technology_stack: list[str] = Field(default_factory=list)
     business_flows: list[str] = Field(default_factory=list)
+    business_flow_graphs: list[dict] = Field(default_factory=list)
     source_references: list[dict] = Field(default_factory=list)
     facts: list[Fact] = Field(default_factory=list)
     unknowns: list[str] = Field(default_factory=list)

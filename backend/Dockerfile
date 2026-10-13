@@ -11,6 +11,7 @@ RUN python -c "import ctypes; ctypes.CDLL('libseccomp.so.2')" \
         && apt-get -o Acquire::Retries=2 -o Acquire::https::Timeout=20 install --no-install-recommends -y libseccomp2 \
         && rm -rf /var/lib/apt/lists/*)
 COPY backend/app /app/app
+COPY third_party/licenses /app/third_party/licenses
 ENV PATH="/app/.venv/bin:${PATH}"
 USER 10001
 EXPOSE 8000

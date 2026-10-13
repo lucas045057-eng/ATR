@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from app.business.ingestion import unpack
+from app.business.languages import LANGUAGES, VERSION
 from app.business.static import inspect_file
 
 
@@ -18,6 +19,8 @@ def main():
     cache = json.loads(Path(cache_file).read_text(encoding="utf-8"))
     for row in rows:
         cached = cache.get(row["path"] + ":" + row["content_digest"])
+        if Path(row['path']).suffix.lower() in LANGUAGES and cached and cached.get('parser_version') != VERSION:
+            cached = None
         row["analysis"] = (
             cached
             if cached is not None
