@@ -85,6 +85,7 @@ def build_static(business, files, previous):
                       'ocr_parser_version':info.get('parser_version'),'ocr_regions':page.get('regions',[]),
                       'vision_model':page.get('vision_model'),'vision_configuration_digest':page.get('vision_configuration_digest'),
                       'vision_usage':page.get('vision_usage'),
+                      'vision_error':page.get('vision_error'),
                       'unknowns':page.get('visual',{}).get('unknowns', ['图形语义尚未核验'])+['运行部署身份尚未核验']}
             profile.documents.append(document)
             if document['text'] and not document['external_paused']:

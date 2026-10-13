@@ -34,14 +34,18 @@ def test_ambiguous_direction_never_becomes_an_edge_and_regions_are_validated():
     value=validate_visual_page(visual_result())
     assert len(value['relations'])==1 and value['relations'][0]['source']=='api'
     assert value['unknowns']
-    for mutation in ('unknown_id','nan_region','reversed_region'):
+    for mutation in ('unknown_id','nan_region','reversed_region','text_confidence','object_unknown'):
         value=visual_result()
         if mutation=='unknown_id':
             value['relations'][0]['target']='other'
         elif mutation=='nan_region':
             value['components'][0]['region'][0]=float('nan')
-        else:
+        elif mutation=='reversed_region':
             value['components'][0]['region']=[.7,.1,.2,.8]
+        elif mutation=='text_confidence':
+            value['relations'][0]['confidence']='high'
+        else:
+            value['unknowns']=[{'reason':'unclear'}]
         with pytest.raises(ValueError):
             validate_visual_page(value)
 
