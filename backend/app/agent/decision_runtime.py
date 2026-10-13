@@ -146,6 +146,9 @@ def facts_from_state(state: dict[str, Any]) -> list[dict[str, Any]]:
             "freshness": evidence.get("freshness_state", "current"),
             "independent_observation": bool(evidence.get("call_id")),
             "call_id": evidence.get("call_id"),
+            "observed_on": target_id,
+            "startup_cycle": evidence.get("startup_cycle") or evidence.get("payload", {}).get("startup_cycle")
+                             or evidence.get("payload", {}).get("started_at"),
         })
 
     for evidence in state.get("evidence", []):
@@ -169,6 +172,8 @@ def facts_from_state(state: dict[str, Any]) -> list[dict[str, Any]]:
                     add(evidence, service_ids[container["service"]], "service_state", state_value.casefold())
         if evidence.get("tool_id") in STATUS_TOOLS and direct in nodes and isinstance(payload.get("state"), str):
             add(evidence, direct, "service_state", payload["state"].casefold())
+        if evidence.get("tool_id") == "health.get" and direct in nodes and type(payload.get("status_code")) is int:
+            add(evidence, direct, "http_status", payload["status_code"])
         if evidence.get("tool_id") not in LOG_TOOLS:
             continue
         text = payload.get("text")
@@ -320,6 +325,19 @@ def adapt_minimal_decision(value: dict[str, Any], state: dict[str, Any]) -> dict
 
 def classify_outcome(state: dict[str, Any], gate: dict[str, Any], decision: dict[str, Any] | None = None):
     """Classify observations without upgrading direct symptoms into an unsupported RCA."""
+    if state.get("decision_protocol") == "ab_v1":
+        from app.agent.result_evaluator import evaluate_state
+        result = evaluate_state(state)
+        complete = result["completion_satisfied"]
+        actions = state.get("available_actions", [])
+        return {**result, "finding_level": {
+                    "root_cause_supported": "root_cause_confirmed", "partial": "direct_fault_cause_unknown",
+                    "unresolved": "evidence_insufficient", "no_fault_observed": "no_fault_observed_in_scope",
+                }[result["diagnosis_status"]],
+                "root_cause_confirmed": result["diagnosis_status"] == "root_cause_supported",
+                "should_stop": complete or not actions,
+                "stop_reason": "completion_satisfied" if complete else "no_new_actions" if not actions else None,
+                "runtime_action_id": actions[0].get("action_id") if actions and not complete else None}
     decision = decision or {}
     facts = facts_from_state(state)
     scope = set(state.get("scope_node_ids", []))

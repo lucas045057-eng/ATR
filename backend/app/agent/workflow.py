@@ -76,6 +76,7 @@ class InvestigationState(TypedDict, total=False):
     scope_node_ids: list[str]
     task_objective: dict[str, Any]
     investigation_plan: dict[str, Any]
+    diagnosis_result: dict[str, Any]
 
 
 def _offline_report(state: InvestigationState) -> dict[str, Any]:
@@ -336,6 +337,17 @@ def _planner(settings: Settings, state: InvestigationState, database=None, budge
 
 
 def _reviewer(state: InvestigationState) -> dict[str, Any]:
+    if state.get("decision_protocol") == "ab_v1":
+        from app.agent.result_evaluator import evaluate_state
+
+        result = evaluate_state(state)
+        supported = result["diagnosis_status"] == "root_cause_supported"
+        return {"diagnosis_result": result,
+                "gate": {"status": "supported" if supported else "unresolved", "supported_index": None,
+                         "hypotheses": [], "rationale": result["diagnosis_status"],
+                         "mechanism_assessments": result["verified_segments"],
+                         "required_gaps": result["required_gaps"], "model_unknowns": result["model_unknowns"],
+                         "evidence_count": len(state.get("evidence", []))}}
     if state.get("model_error"):
         return {"gate": {"status": "unresolved", "supported_index": None, "hypotheses": [],
                          "rationale": state["model_error"]["message"], "evidence_count": len(state.get("evidence", []))}}
@@ -498,7 +510,7 @@ def build_workflow(settings: Settings, database=None, budget_id=None, decision_p
                 state["graph"] = {**state["graph"], "snapshot_current": bool(row and row["status"] == "current")}
             finally:
                 conn.close()
-        return _reviewer(state)
+        return _reviewer({**state, "decision_protocol": decision_protocol})
 
     def runtime_decide(state):
         if decision_protocol != "minimal_v2":
