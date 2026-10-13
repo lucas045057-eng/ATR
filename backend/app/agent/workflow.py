@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, TypedDict
 
@@ -15,6 +14,7 @@ from app.agent.decision_runtime import (
     facts_from_state,
     minimal_output_contract,
 )
+from app.agent.log_events import LOG_TIMESTAMP, normalize_log_events, parse_log_time, parse_time
 from app.agent.model_schema import allowed_service_nodes, output_contract, validate_report
 from app.agent.verification import verify_hypothesis
 from app.context.budget import BudgetExceeded, ContextBudgetManager, estimate_model_input
@@ -22,29 +22,15 @@ from app.context.model_errors import ModelCallError, diagnostic
 from app.settings import Settings
 from app.tools.redaction import redact_text
 
-_LOG_TIMESTAMP = re.compile(
-    r"^(?P<base>\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)"
-    r"(?:\.(?P<fraction>\d+))?(?P<offset>Z|[+-]\d\d:\d\d)\s"
-)
+_LOG_TIMESTAMP = LOG_TIMESTAMP
 
 
 def _parse_timestamp(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+    return parse_time(value)
 
 
 def _parse_log_timestamp(line: str) -> datetime | None:
-    match = _LOG_TIMESTAMP.match(line)
-    if not match:
-        return None
-    fraction = (match.group("fraction") or "")[:6].ljust(6, "0")
-    offset = "+00:00" if match.group("offset") == "Z" else match.group("offset")
-    return _parse_timestamp(f"{match.group('base')}.{fraction}{offset}")
+    return parse_log_time(line)
 
 
 def _log_has_failure_in_window(text: str, window_start: datetime | None,
@@ -52,8 +38,8 @@ def _log_has_failure_in_window(text: str, window_start: datetime | None,
     if window_start is None:
         return False
     terms = ("error", "failed", "refused", "unavailable", "exception", "traceback")
-    for line in text.splitlines():
-        timestamp = _parse_log_timestamp(line)
+    for event in normalize_log_events(text, {}):
+        line, timestamp = event.raw_line, event.event_time_utc
         if timestamp is None or timestamp < window_start:
             continue
         if observed_at and timestamp > observed_at + timedelta(seconds=5):

@@ -6,6 +6,8 @@ import re
 from datetime import datetime, timedelta, timezone
 from itertools import combinations
 
+from app.agent.log_events import normalize_log_events
+
 FAILED = {"failed", "exited", "dead", "inactive", "restarting"}
 HEALTHY = {"active", "running", "healthy"}
 STATUS_TOOLS = {"service.status", "container.status", "compose.status"}
@@ -73,9 +75,9 @@ def verify_hypothesis(item, state, evidence_targets, allowed_targets, supports, 
 
     def lines(e):
         observed = parse_time(e.get("observed_at"))
-        return [line for line in str(e.get("payload", {}).get("text", "")).splitlines()
-                if (stamp := parse_log(line)) and window <= stamp <= observed + timedelta(seconds=5)
-                and not NON_EVENTS.search(line)]
+        return [event.raw_line for event in normalize_log_events(str(e.get("payload", {}).get("text", "")), e)
+                if (stamp := event.event_time_utc) and window <= stamp <= observed + timedelta(seconds=5)
+                and not NON_EVENTS.search(event.raw_line)]
 
     raw = item.get("verification_predictions")
     canonical = raw is None or raw == []

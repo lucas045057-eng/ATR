@@ -7,6 +7,8 @@ import uuid
 from copy import deepcopy
 from typing import Any
 
+from app.agent.log_events import LOG_TIMESTAMP, normalize_log_events, semantic_payload
+
 TASK_TYPES = {"health_check", "focused_diagnosis", "root_cause_investigation"}
 _DEFAULT_LIMITS = {
     "health_check": (3, 4),
@@ -14,10 +16,7 @@ _DEFAULT_LIMITS = {
     "root_cause_investigation": (12, 20),
 }
 _MAX_TASK_TARGETS = 20
-_TIMESTAMP_PREFIX = re.compile(
-    r"^\s*(?:\d{4}-\d\d-\d\d[T ][0-9:.+-]+Z?\s*|"
-    r"[A-Z][a-z]{2}\s+\d{1,2}\s+[0-9:]{8}\s*)"
-)
+_TIMESTAMP_PREFIX = LOG_TIMESTAMP
 _RESOLVED_CLAIMS = {"supported", "refuted", "corroborated_candidate", "rejected"}
 
 
@@ -294,16 +293,18 @@ def _fingerprint(evidence: dict[str, Any]) -> str:
         value = {"state": payload.get("state"), "containers": sorted(
             (item.get("service") or item.get("name"), item.get("state"))
             for item in payload.get("containers", []) if isinstance(item, dict))}
+        value.update({key: payload[key] for key in ("pid", "start_time", "started_at", "startup_cycle", "container_id")
+                      if key in payload})
     elif tool_id.endswith(".logs"):
         lines = []
-        for raw in str(payload.get("text", "")).splitlines():
-            normalized = _TIMESTAMP_PREFIX.sub("", raw).strip()
+        for event in normalize_log_events(str(payload.get("text", "")), evidence):
+            normalized = event.message.strip()
             if normalized:
                 lines.append(re.sub(r"\s+", " ", normalized))
         value = lines[-500:]
     else:
-        value = payload
-    encoded = json.dumps([evidence.get("target_node_id"), tool_id, value],
+        value = semantic_payload(payload)
+    encoded = json.dumps([evidence.get("target_node_id"), evidence.get("startup_cycle"), tool_id, value],
                          sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.sha256(encoded.encode()).hexdigest()
 

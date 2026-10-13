@@ -17,6 +17,7 @@ from pydantic import (
     field_validator,
 )
 
+from app.agent.log_events import normalize_log_events, parse_log_time, parse_time
 from app.agent.model_schema import allowed_service_nodes
 from app.agent.verification import FAILED, HEALTHY, LOG_TOOLS, MECHANISMS, NON_EVENTS, STATUS_TOOLS
 from app.context.model_errors import (
@@ -26,10 +27,6 @@ from app.context.model_errors import (
     safe_validation_errors,
 )
 
-_LOG_TIMESTAMP = re.compile(
-    r"^(?P<base>\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)"
-    r"(?:\.(?P<fraction>\d+))?(?P<offset>Z|[+-]\d\d:\d\d)\s"
-)
 _HYPOTHESIS_FIELDS = frozenset({
     "target_node_id", "failure_mode", "reasoning", "missing_information", "confidence",
 })
@@ -65,22 +62,11 @@ class _Hypothesis(_StrictModel):
 
 
 def _parse_time(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        return None
-    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+    return parse_time(value)
 
 
 def _parse_log_time(line: str) -> datetime | None:
-    match = _LOG_TIMESTAMP.match(line)
-    if not match:
-        return None
-    fraction = (match.group("fraction") or "")[:6].ljust(6, "0")
-    offset = "+00:00" if match.group("offset") == "Z" else match.group("offset")
-    return _parse_time(f"{match.group('base')}.{fraction}{offset}")
+    return parse_log_time(line)
 
 
 def _enum(values):
@@ -191,8 +177,8 @@ def facts_from_state(state: dict[str, Any]) -> list[dict[str, Any]]:
         for target_id in targets:
             mechanisms = set()
             failure_signal = False
-            for line in text.splitlines():
-                stamp = _parse_log_time(line)
+            for event in normalize_log_events(text, evidence):
+                line, stamp = event.raw_line, event.event_time_utc
                 if not stamp or stamp < window_start or stamp > observed + timedelta(seconds=5) or NON_EVENTS.search(line):
                     continue
                 lowered = line.casefold()
