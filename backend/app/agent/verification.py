@@ -7,18 +7,13 @@ from datetime import datetime, timedelta, timezone
 from itertools import combinations
 
 from app.agent.log_events import normalize_log_events
+from app.agent.mechanisms import MechanismRegistry
 
 FAILED = {"failed", "exited", "dead", "inactive", "restarting"}
 HEALTHY = {"active", "running", "healthy"}
 STATUS_TOOLS = {"service.status", "container.status", "compose.status"}
 LOG_TOOLS = {"service.logs", "container.logs"}
-MECHANISMS = {
-    "startup_failure": r"\bstartup\b.*\b(?:failed|abort\w*|exit\w*)|application exited because",
-    "permission_denied": r"permission denied|operation not permitted|access denied",
-    "bind_failure": r"address already in use|cannot bind|failed to bind|bind.*failed",
-    "database_unavailable": r"fatal.*(?:database|shutdown|startup)|database.*(?:failed|unavailable)|cannot.*(?:database|bind)",
-    "redis_unavailable": r"redis.*(?:failed|unavailable)|fatal.*(?:config|bind)|cannot.*bind",
-}
+MECHANISMS = MechanismRegistry.patterns()
 NON_EVENTS = re.compile(r"historical|example|test message|simulated example|not failed|no failure", re.I)
 GENERIC_LOG_SIGNALS = {"error", "failed", "exception", "unavailable", "timeout", "traceback"}
 PREDICTION_RULES = {

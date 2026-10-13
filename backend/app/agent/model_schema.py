@@ -153,6 +153,8 @@ class LegacyAction(StrictModel):
 def output_contract(adaptive, state=None):
     """The prompt uses the same schema and mode-specific action fields as validation."""
     schema = Report.model_json_schema()
+    if state is not None and state.get("decision_protocol") == "ab_v1":
+        schema["$defs"]["Hypothesis"]["properties"]["failure_mode"]["enum"] = list(MECHANISMS)
     schema["properties"]["action"] = {"anyOf": [
         (AdaptiveAction if adaptive else LegacyAction).model_json_schema(), {"type": "null"}]}
     if state is not None:
