@@ -33,7 +33,7 @@ class AdaptiveInvestigationPlanner:
         self.nodes = {n["id"]: n for n in graph["nodes"] if n.get("kind") == "service" and n.get("role") != "runtime"}
         self.hypotheses, self.hypothesis_history, self.scope_requests = [], [], []
 
-    def candidates(self, evidence, code_context, history):
+    def candidates(self, evidence, code_context, history, *, include_authorized_scope=False):
         active = {h["target_node_id"] for h in self.hypotheses if h["status"] != "refuted"}
         focus = {self.root_id} | active | {e.get("target_node_id") for e in evidence}
         related = set(focus)
@@ -45,6 +45,8 @@ class AdaptiveInvestigationPlanner:
                     related.add(edge["from_node_id"])
         fresh = [b for b in self.bindings if binding_is_current(b) and b["kind"] in {"service", "container"}]
         authorized_names = {b["service"] for b in fresh}
+        if include_authorized_scope:
+            related.update(node_id for node_id, node in self.nodes.items() if node['name'] in authorized_names)
         self.scope_requests = [{"service": self.nodes[node_id]["name"], "reason": "关联服务尚无当前已确认的运行绑定"}
                                for node_id in sorted(related & self.nodes.keys())
                                if self.nodes[node_id]["name"] not in authorized_names][:8]

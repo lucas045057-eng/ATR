@@ -311,7 +311,8 @@ class InvestigationBroker:
             return self.finish('no_progress')
         if not self.root:
             return self.discover()
-        actions = self.planner.candidates(self.evidence, [], self.history)
+        actions = self.planner.candidates(self.evidence, [], self.history,
+                                          include_authorized_scope=self.task_type == 'root_cause_investigation')
         scope = set(self.state()['scope_node_ids'])
         actions = [a for a in actions if a['target_node_id'] in scope]
         if self.task_type == 'health_check':
@@ -362,26 +363,27 @@ class InvestigationBroker:
             self.summary['model_error'] = getattr(exc, 'diagnostic', {'code': type(exc).__name__})
             self.persist()
             if self.error_rounds >= 2:
-                return self.finish('model_unavailable', 'failed')
+                return self.supplement_once(actions, self.manager.get(self.budget_id), 'model_unavailable', execution='failed')
             return {'continue': True}
         self.collect(action)
         if self.result['completion_satisfied']:
             return self.finish('complete_chain_verified')
         return {'continue': True}
 
-    def supplement_once(self, actions, budget, reason):
+    def supplement_once(self, actions, budget, reason, *, execution='completed'):
         candidate = self.gap_action(actions)
         if (not self.limits['supplement_enabled'] or self.supplement or not candidate
                 or budget['tool_calls'] >= self.limits['hard_tool_calls']
                 or budget['calls'] >= self.limits['hard_model_calls']):
-            return self.finish(reason)
+            return self.finish(reason, execution)
         gap, action = candidate
         self.supplement = {'gap_id': digest(gap), 'gap': gap, 'action_id': action['action_id'],
                            'reserved_tools': 1, 'reserved_models': 0, 'executed': False}
         self.persist()
         self.collect(action)
         self.supplement['executed'] = True
-        return self.finish('complete_chain_verified' if self.result['completion_satisfied'] else 'supplement_complete')
+        return self.finish(reason if execution == 'failed' else 'complete_chain_verified'
+                           if self.result['completion_satisfied'] else 'supplement_complete', execution)
 
     def discover(self):
         anchor = self.graph['nodes'][0]['id'] if self.graph['nodes'] else None

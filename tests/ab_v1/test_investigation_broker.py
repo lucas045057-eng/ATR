@@ -135,3 +135,23 @@ def test_model_cannot_make_an_uncited_chain_authoritative():
     result = adapt_minimal_decision({'summary': '根因已经定位', 'hypotheses': [], 'next_investigation': '',
                                     'next_action_id': None, 'finish': True, 'finish_reason': '完毕'}, state)
     assert result['finish'] and 'completion_satisfied' not in result
+
+
+def test_model_outage_can_fill_one_known_gap_without_masking_execution_failure(client, monkeypatch):
+    from app.context.model import ModelUnavailable
+    profile = onboard(client)
+    target = add_target(client, profile, 'Existing authorized object')
+    confirm_catalog(client, profile, target)
+    attempted = []
+    def unavailable(*args, **kwargs):
+        attempted.append(True)
+        raise ModelUnavailable('unavailable')
+    monkeypatch.setattr('app.agent.ab_investigation.call_json', unavailable)
+    _, begun = start(client, profile, target)
+    assert wait_job(client, begun['job_id'])['status'] == 'failed'
+    run = client.get('/api/v1/runs/'+begun['run_id']).json()
+    assert len(attempted) == 2
+    assert len(run['tool_calls']) == 1 and run['tool_calls'][0]['tool_id'] == 'service.status'
+    assert run['execution_status'] == 'failed' and run['summary']['stop_reason'] == 'model_unavailable'
+    assert run['summary']['supplement']['executed']
+    wait_reaped(run['id'])
