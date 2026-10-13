@@ -7,6 +7,7 @@ import json
 import re
 import shlex
 import subprocess
+import sys
 from pathlib import Path
 
 REMOTE = r'''
@@ -60,17 +61,18 @@ def probe(path):
  return results
 if r['mode']=='rollback':
  manifest=json.loads((backup/'manifest.json').read_text())
- assert sha(gateway)==manifest['after']['gateway'] and sha(policy)==manifest['after']['policy'], 'Administrator drift; rollback refused'
+ assert sha(gateway)==manifest['after']['gateway'] and sha(policy)==manifest['after']['policy'] and sha(helper)==manifest['after']['helper'], 'Administrator drift; rollback refused'
  before=services_snapshot()
- for path,name in ((gateway,'gateway'),(policy,'policy')):
+ restore=[(gateway,'gateway'),(policy,'policy')]+([(helper,'helper')] if 'helper' in manifest['before'] else [])
+ for path,name in restore:
   entry=manifest['before'][name]
   raw=(backup/(name+'.original')).read_bytes()
   assert hashlib.sha256(raw).hexdigest()==entry['sha256']
   replace(path,raw,entry['mode'],entry['gid'])
- # The root-owned helper is retained as an unused recoverable file; the old gateway does not import it.
+ # Pre-helper historical manifests restore the legacy gateway; its unused helper remains recoverable.
  after=services_snapshot()
  assert before==after
- print(json.dumps({'mode':'rollback','backup':str(backup),'gateway_sha256':sha(gateway),'policy_sha256':sha(policy),'business_services_unchanged':True,'containers':after}))
+ print(json.dumps({'mode':'rollback','backup':str(backup),'gateway_sha256':sha(gateway),'helper_sha256':sha(helper),'policy_sha256':sha(policy),'business_services_unchanged':True,'containers':after}))
  sys.exit(0)
 assert sha(gateway)==r['expected_gateway_sha'] and sha(policy)==r['expected_policy_sha'], 'Original deployment drift'
 payloads={name:content.encode() for name,content in r['files'].items()}
@@ -96,6 +98,7 @@ for path,name in ((gateway,'gateway'),(policy,'policy')):
  shutil.copyfile(path,backup/(name+'.original'))
 if helper.exists():
  assert stat.S_ISREG(helper.lstat().st_mode) and helper.stat().st_uid==0
+ info=helper.stat();original['helper']={'sha256':sha(helper),'mode':stat.S_IMODE(info.st_mode),'gid':info.st_gid}
  shutil.copyfile(helper,backup/'helper.original')
 manifest={'before':original,'after':{'gateway':r['hashes']['gateway'],'helper':r['hashes']['helper'],'policy':hashlib.sha256(policy_bytes).hexdigest()},'containers':before}
 (backup/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
@@ -108,7 +111,8 @@ try:
  assert before==after
  report.update(server_written=True,business_services_unchanged=True,probes=results,applied=manifest['after'])
 except BaseException as error:
- for path,name in ((gateway,'gateway'),(policy,'policy')):
+ restore=[(gateway,'gateway'),(policy,'policy')]+([(helper,'helper')] if 'helper' in original else [])
+ for path,name in restore:
   entry=original[name];replace(path,(backup/(name+'.original')).read_bytes(),entry['mode'],entry['gid'])
  print(json.dumps({'mode':'apply','status':'failed_rolled_back','error_type':type(error).__name__,'backup':str(backup),'business_services_unchanged':before==services_snapshot()}))
  sys.exit(1)
@@ -134,6 +138,7 @@ def main():
         if any(not re.fullmatch(r'[a-f0-9]{64}', request[key]) for key in ('expected_gateway_sha', 'expected_policy_sha')):
             parser.error('Exact current deployment hashes are required')
         root = Path(__file__).resolve().parents[1]
+        sys.path.insert(0, str(root/'backend'))
         request['files'] = {'gateway': (root/'scripts/ssh_gateway.py').read_text(encoding='utf-8'),
                             'helper': (root/'backend/app/connectors/remote_reads.py').read_text(encoding='utf-8')}
         request['hashes'] = {name: hashlib.sha256(content.encode()).hexdigest() for name, content in request['files'].items()}

@@ -78,6 +78,10 @@ def test_enriched_inventory_binds_selection_to_pid_and_start(monkeypatch):
     candidates,_=clarification_candidates([{'evidence_id':'discovery','payload':result}])
     assert candidates[0]['kind']=='process' and candidates[0]['runtime_id']=='7:'+START
     assert clarification_candidates([{'evidence_id':'old','payload':{'processes':[{'id':'7','pid':7,'name':'api'}]}}])[0]==[]
+    evidence=[{'evidence_id':'services','payload':{'services':[{'id':'other-'+str(i),'name':'other-'+str(i)} for i in range(60)]}},
+              {'evidence_id':'process','payload':{'processes':[{**ROW,'id':'7:'+START,'kind':'process'}]}}]
+    options,_=clarification_candidates(evidence,hints=['检查 api 当前状态'])
+    assert options[0]['kind']=='process'
 
 
 def test_forged_remote_process_identity_is_rejected():

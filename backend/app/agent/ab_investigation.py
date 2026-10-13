@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import threading
 from datetime import datetime, timedelta, timezone
@@ -59,7 +60,7 @@ def clarification_candidates(evidence, previous=(), hints=(), limit=20):
                                 'suggested_service': next((old.get('service') for old in previous
                                       if (old['kind'], old['runtime_id']) == key), None)}
     def rank(row):
-        relevant = any(h and h.casefold() in row['name'].casefold() for h in hints)
+        relevant = any(h and (h.casefold() in row['name'].casefold() or row['name'].casefold() in h.casefold()) for h in hints)
         return (not row['previously_mapped'], not relevant, row['kind'] != 'container', row['runtime_id'])
     ranked = sorted(choices.values(), key=rank)
     return ranked[:limit], max(0, len(ranked)-limit)
@@ -397,7 +398,8 @@ class InvestigationBroker:
                 continue
             if tool == 'container.list' and not self.target.get('docker_reads_enabled'):
                 continue
-            action = {'tool_id': tool, 'target_id': self.target_id, 'target_node_id': anchor, 'arguments': {}}
+            arguments = {'name_hints':list(dict.fromkeys(re.findall(r'[A-Za-z_][A-Za-z0-9_.-]{2,63}',self.symptom['text'])))[:8]} if tool=='process.list' else {}
+            action = {'tool_id': tool, 'target_id': self.target_id, 'target_node_id': anchor, 'arguments': arguments}
             action['action_id'] = digest(action)
             self.collect(action)
             return {'continue': True}
