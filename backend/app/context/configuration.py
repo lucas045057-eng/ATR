@@ -105,6 +105,7 @@ def public(settings):
 
 def save(database,settings,request):
     with CONFIGURATION_LOCK, database.transaction() as tx:
+        settings=load(settings)
         if tx.execute("SELECT 1 FROM jobs WHERE status IN ('queued','running','waiting_input') LIMIT 1").fetchone():
             raise ValueError('仍有进行中或等待确认的任务，请先结束任务再保存模型设置')
         key=request.api_key.get_secret_value()

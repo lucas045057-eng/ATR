@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { api, Row } from "./api";
 import { RuntimeInventory } from "./runtime-inventory";
 import { MediaReviewList } from "./media-review-list";
+import { EndpointMappings } from "./endpoint-mappings";
 
 const labels: Row = {
   Static: "静态解析",
@@ -411,6 +412,7 @@ export function BusinessPages({
                     {a.error && <p role="alert">{a.error}</p>}
                   </div>
                   {mark(a.status)}
+                  {a.status==='failed'&&<button className="btn small" disabled={busy} onClick={()=>void act(()=>api(base+`/artifacts/${a.id}/retry`,{method:'POST'}))}>从原资料断点恢复</button>}
                   <button
                     className="btn small"
                     disabled={busy || a.status === "removed"}
@@ -1149,6 +1151,9 @@ export function BusinessPages({
               )}
             </section>
           </div>
+          {target && (
+            <EndpointMappings key={selected+':'+chosenTarget} base={base} targetId={chosenTarget} profile={profile||{}} bindings={bindings} refreshKey={String(job?.ended_at||'')} onSaved={reload}/>
+          )}
           {target && (
             <section className="panel business-block">
               {confirmed.some(b=>b.kind==='process') && <form className="form" onSubmit={event=>{

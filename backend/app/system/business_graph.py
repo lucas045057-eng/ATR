@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 from app.common import digest, dumps, now, uid
 from app.system.graph import node
 
 
 def fuse_business_graph(database, profile):
+    from app.system.endpoint_mapping import configuration_path, latest_configuration
+    from app.system.scope import binding_is_current
     business_id = profile["business_id"]
     with database.transaction() as tx:
         business = tx.execute(
@@ -123,7 +126,6 @@ def fuse_business_graph(database, profile):
             (business_id,),
         ).fetchall()
         for binding in bindings:
-            from app.system.scope import binding_is_current
             if not binding_is_current(binding):
                 continue
             key = f"service:{binding['service']}"
@@ -134,11 +136,14 @@ def fuse_business_graph(database, profile):
                 add('service', binding['service'], source.get('role', 'unknown'),
                     {'provenance': source, 'business_semantics': 'unknown', 'runtime_scope_only': True})
             config = json.loads(binding["config_json"])
+            binding_refs=[{'schema_version':'observation-ref-1','observation_id':identifier,'source_type':'Runtime',
+                           'target_id':binding['target_id'],'binding_id':binding['id'],'graph_snapshot_id':sid}
+                          for identifier in json.loads(binding['evidence_ids_json'])]
             host = nodes.get(f"host:{binding['target_id']}") or add(
                 "host",
                 binding["target_id"],
                 "host",
-                {"address": config["host"], "source_type": "Human Verified"},
+                {"address": config["host"], "source_type": "Human Verified", "source_refs":binding_refs},
             )
             runtime_kind = {
                 "container": "container",
@@ -238,7 +243,32 @@ def fuse_business_graph(database, profile):
                     dumps(n["attributes"]),
                 ),
             )
+        binding_sources={binding['id']:[{'schema_version':'observation-ref-1','observation_id':identifier,
+                         'source_type':'Runtime','target_id':binding['target_id'],'binding_id':binding['id'],'graph_snapshot_id':sid}
+                         for identifier in json.loads(binding['evidence_ids_json'])] for binding in bindings}
+        current_bindings={binding['id']:binding for binding in bindings if binding_is_current(binding)}
+        endpoint_mappings={}
+        for fact in profile['facts']:
+            value=fact.get('object')
+            if fact['predicate']!='verified_endpoint' or fact['verification_status']!='confirmed' or not isinstance(value,dict):
+                continue
+            identifiers=value.get('binding_ids',[])
+            if len(identifiers)!=2 or any(identifier not in current_bindings or current_bindings[identifier]['target_id']!=value.get('target_id') for identifier in identifiers):
+                continue
+            observed=tx.execute("SELECT * FROM runtime_observations WHERE id=? AND target_id=? AND tool_id='config.read' AND status='succeeded'",(value.get('observation_id'),value.get('target_id'))).fetchone()
+            if not observed or observed['content_digest']!=fact['source_digest']:
+                continue
+            config_path=configuration_path(observed)
+            latest=latest_configuration(tx,observed['target_id'],config_path)
+            expires=datetime.fromisoformat(value['expires_at'])
+            if not latest or latest['id']!=observed['id'] or expires.tzinfo is None or expires<=datetime.now(timezone.utc):
+                continue
+            endpoint_mappings.setdefault(value['dependency_fact_id'],[]).append({
+                'endpoint_id':value['endpoint_id'],'target_id':value['target_id'],'binding_ids':identifiers,
+                'source_refs':fact['source_refs'],'expires_at':value['expires_at'],'mapping_fact_id':fact['id'],
+                'observation_id':value['observation_id'],'configuration_digest':fact['source_digest'],'configuration_path':config_path})
         for source, target, relation, certainty, fact_id in edges:
+            mappings=endpoint_mappings.get(fact_id,[])
             tx.execute(
                 "INSERT INTO graph_edges VALUES(?,?,?,?,?,?,?)",
                 (
@@ -252,6 +282,8 @@ def fuse_business_graph(database, profile):
                         {
                             "fact_id": fact_id,
                             "provenance": facts.get(fact_id),
+                            "source_refs":binding_sources.get(fact_id,[]) or facts.get(fact_id,{}).get('source_refs',[]),
+                            "endpoint_mappings":mappings,
                             "verification_status": facts.get(fact_id, {}).get(
                                 "verification_status", "confirmed"
                             ),

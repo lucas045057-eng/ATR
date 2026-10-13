@@ -183,3 +183,38 @@ def test_sensitive_sql_parameters_are_not_sent_as_static_model_context():
     operation=describe_language('store.py',source)['data_operations'][0]
     assert operation['sensitive'] and 'TEST_ONLY_SECRET' not in str(operation)
     assert operation['literal_parameters']==['[REDACTED_PARAMETERS]']
+
+
+@pytest.mark.parametrize('newline', ['', '\n'])
+def test_overloaded_handlers_keep_their_own_entry_and_data_operation(newline):
+    code=newline.join(['class Api {', '@GetMapping("/a") Object record(int id){return db.query("SELECT id FROM alpha");}',
+                       '@GetMapping("/b") Object record(String id){return db.query("SELECT id FROM beta");}', '}'])
+    flows=build_flows(source_files({'Api.java':code}),1)
+    assert len(flows)==2 and len({flow['flow_id'] for flow in flows})==2
+    assert {flow['entry']:[step['details']['tables'] for step in flow['steps'] if step['kind']=='data_operation']
+            for flow in flows}=={'GET /a':[['alpha']], 'GET /b':[['beta']]}
+
+
+def test_shadowed_express_router_parameter_is_not_a_route():
+    source='import express from "express"; const app=express(); function lookUp(app){app.get("/record", fallback);} function fallback(){return "value";} lookUp(new Map());'
+    parsed=describe_language('shadow.js',source)
+    assert parsed['routes']==[]
+    assert not build_flows(source_files({'shadow.js':source}),1)
+
+
+def test_hoisted_esm_import_binds_router_declared_before_import():
+    source='const app=express(); app.get("/record", handler); function handler(){return db.query("SELECT id FROM alpha");} import express from "express";'
+    flows=build_flows(source_files({'hoisted.js':source}),1)
+    assert len(flows)==1 and flows[0]['entry']=='GET /record'
+    assert [step['details']['tables'] for step in flows[0]['steps'] if step['kind']=='data_operation']==[['alpha']]
+
+
+@pytest.mark.parametrize('middle', [
+    'try { throw new Map(); } catch(app){ app.get("/record",handler); }',
+    'let handler=()=>db.query("SELECT id FROM alpha"); handler=()=>db.query("SELECT id FROM beta"); app.get("/record",handler);',
+])
+def test_shadowed_catch_and_reassigned_handler_cannot_invent_a_resolved_flow(middle):
+    source='import express from "express"; const app=express(); '+middle
+    if 'catch' in middle:
+        source+=' function handler(){return db.query("SELECT id FROM alpha");}'
+    assert not build_flows(source_files({'ambiguous.js':source}),1)

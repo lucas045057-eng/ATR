@@ -18,7 +18,7 @@ GRAMMARS = {'JavaScript': ('tree_sitter_javascript', 'language'),
             'Java': ('tree_sitter_java', 'language'), 'C': ('tree_sitter_c', 'language'),
             'C++': ('tree_sitter_cpp', 'language')}
 HTTP = {'get', 'post', 'put', 'patch', 'delete', 'head', 'options'}
-VERSION = 'ab-source-syntax-3'
+VERSION = 'ab-source-syntax-4'
 
 
 def sql_operation(text, ref):
@@ -140,6 +140,16 @@ def _python(content, relative, info, ref):
                 return functions[node]
         return None
 
+    def function_id(node):
+        return f'syntax:{node.lineno}:{node.col_offset}'
+
+    def owner_id(node):
+        while node in parents:
+            node = parents[node]
+            if node in functions:
+                return function_id(node)
+        return None
+
     for node in items:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             start = min([node.lineno, *[d.lineno for d in node.decorator_list]])
@@ -169,13 +179,13 @@ def _python(content, relative, info, ref):
                                        if isinstance(value, ast.Constant) and isinstance(value.value, str)
                                        and value.value.lower() in HTTP]
                     for method in methods:
-                        info['routes'].append({'method': method, 'path': redact_text(literal)[:240], 'symbol': name,
+                        info['routes'].append({'method': method, 'path': redact_text(literal)[:240], 'symbol': name, 'function_id':function_id(node),
                                               'line': decorator.lineno, 'source_refs': [ref(decorator.lineno)],
                                               'receiver_status':'bound' if receiver in routers else 'unverified_receiver'})
                         entries.append(method + ' ' + redact_text(literal)[:240])
             if node.name in startup_names:
                 entries.append('lifespan_startup_and_shutdown')
-            info['functions'].append({'name': name, 'qualified_name': name, 'start': start,
+            info['functions'].append({'name': name, 'qualified_name': name, 'function_id':function_id(node), 'start': start,
                                       'end': node.end_lineno, 'entries': entries,
                                       'source_refs': [ref(start, node.end_lineno)]})
         if isinstance(node, ast.Call):
@@ -183,7 +193,7 @@ def _python(content, relative, info, ref):
             source = ref(node.lineno, node.end_lineno)
             caller = owner(node)
             if callee:
-                info['calls'].append({'caller': caller, 'callee': callee, 'line': node.lineno,
+                info['calls'].append({'caller': caller, 'caller_id':owner_id(node), 'callee': callee, 'line': node.lineno,
                                       'dispatch': 'static_syntax', 'source_refs': [source]})
                 client, _, method = callee.rpartition('.')
                 if client in {'pymysql', 'psycopg', 'psycopg2', 'redis'} and method in {'connect', 'Redis', 'from_url'}:
@@ -192,7 +202,7 @@ def _python(content, relative, info, ref):
                     info['environment_keys'].append(node.args[0].value[:120])
                 for keyword in node.keywords:
                     if keyword.arg == 'status_code' and isinstance(keyword.value, ast.Constant) and type(keyword.value.value) is int:
-                        info['branches'].append({'function': caller, 'kind': 'http_status', 'status_code': keyword.value.value,
+                        info['branches'].append({'function': caller, 'function_id':owner_id(node), 'kind': 'http_status', 'status_code': keyword.value.value,
                                                  'line': node.lineno, 'source_refs': [source]})
             else:
                 info['unknowns'].append('动态调用位于第 '+str(node.lineno)+' 行，未推断实际目标')
@@ -207,7 +217,7 @@ def _python(content, relative, info, ref):
                             values=other.elts if isinstance(other,(ast.Tuple,ast.List)) else [other]
                             parameters += [redact_text(str(value.value))[:120] for value in values
                                            if isinstance(value,ast.Constant) and isinstance(value.value,(str,int,float,bool))]
-                        info['data_operations'].append({**operation, 'function': caller, 'line': node.lineno,
+                        info['data_operations'].append({**operation, 'function': caller, 'function_id':owner_id(node), 'line': node.lineno,
                                                         'literal_parameters':['[REDACTED_PARAMETERS]'] if operation['sensitive'] else parameters[:20]})
         elif isinstance(node, (ast.If, ast.IfExp, ast.Try, ast.Match)):
             arms = []
@@ -222,7 +232,7 @@ def _python(content, relative, info, ref):
                     body=[body]
                 if body:
                     arms.append({'label':label,'start_line':body[0].lineno,'end_line':body[-1].end_lineno})
-            info['branches'].append({'function': owner(node), 'kind': type(node).__name__, 'line': node.lineno,
+            info['branches'].append({'function': owner(node), 'function_id':owner_id(node), 'kind': type(node).__name__, 'line': node.lineno,
                                       'end_line': node.end_lineno, 'arms':arms,
                                       'condition':redact_condition(ast.unparse(node.test))[:200] if hasattr(node,'test') else None,
                                       'condition_source_refs':[ref(node.test.lineno,node.test.end_lineno)] if hasattr(node,'test') else [],
@@ -313,12 +323,75 @@ def _tree(raw, language, suffix, info, ref):
         return paths[:10]
 
     function_types = {'function_declaration', 'function_definition', 'method_definition', 'method_declaration', 'arrow_function', 'function_expression'}
-    routers = set()
-    # Receiver identity is a static binding, not a method-name heuristic.
+    syntax_nodes=[]
     pre_scan = [tree.root_node]
     while pre_scan:
         node = pre_scan.pop()
+        syntax_nodes.append(node)
         imports(node)
+        pre_scan.extend(reversed(node.named_children))
+
+    scopes={'program','statement_block','for_statement','for_in_statement','catch_clause'} | function_types
+    declarations={}
+    routers=set()
+
+    def scope(node, function_only=False):
+        parent=node.parent
+        while parent and (parent.type not in scopes or function_only and parent.type not in function_types | {'program'}):
+            parent=parent.parent
+        return parent or tree.root_node
+
+    def declare(node, name, owner=None):
+        if name:
+            owner=owner or scope(node)
+            declarations.setdefault((owner.start_byte,owner.end_byte,name),[]).append(node)
+
+    def binding(node,name):
+        parent=node
+        while parent:
+            if parent.type in scopes:
+                values=declarations.get((parent.start_byte,parent.end_byte,name),[])
+                if values:
+                    return values[0] if len(values)==1 else None
+            parent=parent.parent
+        return None
+
+    for node in syntax_nodes:
+        if node.type=='import_statement':
+            # ES imports are hoisted; collect them before resolving any constructor.
+            clause=next((c for c in node.named_children if c.type=='import_clause'),None)
+            for child in clause.named_children if clause else []:
+                if child.type=='identifier':
+                    declare(node,text(child),tree.root_node)
+                elif child.type=='namespace_import':
+                    declare(node,next((text(c) for c in child.named_children if c.type=='identifier'),None),tree.root_node)
+                elif child.type=='named_imports':
+                    for item in child.named_children:
+                        declare(node,text(item.child_by_field_name('alias') or item.child_by_field_name('name')),tree.root_node)
+        if node.type=='variable_declarator':
+            owner=scope(node,function_only=bool(node.parent and node.parent.type=='variable_declaration'))
+            declare(node,dotted(node.child_by_field_name('name')),owner)
+            value=node.child_by_field_name('value')
+            if value and value.type=='call_expression' and dotted(value.child_by_field_name('function'))=='require':
+                args=value.child_by_field_name('arguments')
+                module=literal(args.named_children[0]) if args and args.named_children else None
+                local=dotted(node.child_by_field_name('name'))
+                if module and local:
+                    info['imports'].append(module)
+                    info['import_bindings'].append({'local':local,'module':module,'symbol':None,'source_refs':[ref(node.start_point.row+1)]})
+        if node.type=='function_declaration':
+            declare(node,dotted(node.child_by_field_name('name')))
+        if node.type in function_types | {'catch_clause'}:
+            parameters=node.child_by_field_name('parameters') or node.child_by_field_name('parameter')
+            pending=[parameters] if parameters else []
+            while pending:
+                parameter=pending.pop()
+                if parameter.type=='identifier':
+                    declare(parameter,text(parameter),node)
+                elif parameter.type not in {'type_annotation','type_identifier'}:
+                    pending.extend(parameter.named_children)
+
+    for node in syntax_nodes:
         if node.type=='package_declaration':
             info['package']=text(node).removeprefix('package ').rstrip(';').strip()
         if node.type in {'field_declaration','local_variable_declaration','formal_parameter'} and language=='Java':
@@ -334,26 +407,33 @@ def _tree(raw, language, suffix, info, ref):
                 bindings=info['import_bindings']
                 express_names={b['local'] for b in bindings if b['module']=='express' and b['symbol'] in {'default',None}}
                 router_names={b['local'] for b in bindings if b['module']=='express' and b['symbol']=='Router'}
-                if target in express_names | router_names | {name+'.Router' for name in express_names}:
+                constructor_binding=binding(node,target.split('.')[0]) if target else None
+                imported=False
+                if constructor_binding and constructor_binding.type=='import_statement':
+                    imported=literal(constructor_binding.child_by_field_name('source'))=='express'
+                elif constructor_binding and constructor_binding.type=='variable_declarator':
+                    required=constructor_binding.child_by_field_name('value')
+                    required_args=required.child_by_field_name('arguments') if required else None
+                    imported=bool(required and dotted(required.child_by_field_name('function'))=='require'
+                                  and required_args and required_args.named_children
+                                  and literal(required_args.named_children[0])=='express' and binding(required,'require') is None)
+                if imported and target in express_names | router_names | {name+'.Router' for name in express_names}:
                     name = dotted(node.child_by_field_name('name'))
                     if name:
-                        routers.add(name)
-                args=value.child_by_field_name('arguments')
-                first=args.named_children[0] if args and args.named_children else None
-                module=literal(first)
-                if target=='require' and module:
-                    local=dotted(node.child_by_field_name('name'))
-                    if local:
-                        info['imports'].append(module)
-                        info['import_bindings'].append({'local':local,'module':module,'symbol':None,'source_refs':[ref(node.start_point.row+1)]})
-                        if module=='express':
-                            # require binding is traversed before later constructor declarations.
-                            express_names.add(local)
-        pre_scan.extend(reversed(node.named_children))
+                        routers.add(node.start_byte)
+    # Reassigned bindings have no stable receiver identity, even when their spelling matches.
+    reassigned=set()
+    for node in syntax_nodes:
+        if node.type in {'assignment_expression','augmented_assignment_expression','update_expression'}:
+            left=node.child_by_field_name('left') or node.child_by_field_name('argument')
+            assigned=binding(node,dotted(left))
+            if assigned:
+                routers.discard(assigned.start_byte)
+                reassigned.add(assigned.start_byte)
     node_count = 0
-    stack = [(tree.root_node, None)]
+    stack = [(tree.root_node, None, None)]
     while stack:
-        node, caller = stack.pop()
+        node, caller, caller_id = stack.pop()
         node_count += 1
         if node_count > 100000:
             raise ValueError('Grammar syntax node limit')
@@ -380,8 +460,9 @@ def _tree(raw, language, suffix, info, ref):
             if prefix:
                 name = '.'.join([*prefix,name])
             caller = name
+            caller_id = f'syntax:{node.start_byte}'
             info['symbols'].append({'name': name, 'start': line, 'end': end})
-            info['functions'].append({'name': name, 'qualified_name': name, 'start': line, 'end': end,
+            info['functions'].append({'name': name, 'qualified_name': name, 'function_id':caller_id, 'start': line, 'end': end,
                                       'entries': [], 'source_refs': [source],
                                       'default_export': bool(node.parent and node.parent.type=='export_statement'
                                                              and any(c.type=='default' for c in node.parent.children))})
@@ -416,7 +497,7 @@ def _tree(raw, language, suffix, info, ref):
                     for prefix in prefixes:
                         for path in paths:
                             full=prefix.rstrip('/')+'/'+path.lstrip('/')
-                            info['routes'].append({'method': method, 'path': redact_text(full)[:240], 'symbol': name,
+                            info['routes'].append({'method': method, 'path': redact_text(full)[:240], 'symbol': name, 'function_id':caller_id,
                                                    'line': annotation.start_point.row+1, 'source_refs': [ref(annotation.start_point.row+1)]})
                             info['functions'][-1]['entries'].append(method+' '+full)
         if node.type in {'call_expression','method_invocation'}:
@@ -428,23 +509,33 @@ def _tree(raw, language, suffix, info, ref):
             args = node.child_by_field_name('arguments')
             arguments = list(args.named_children) if args else []
             if callee:
-                info['calls'].append({'caller': caller, 'callee': callee, 'line': line,
+                info['calls'].append({'caller': caller, 'caller_id':caller_id, 'callee': callee, 'line': line,
                                       'dispatch': 'static_syntax', 'source_refs': [source]})
                 method = callee.rsplit('.',1)[-1].lower()
                 route_path = literal(arguments[0]) if arguments else None
+                receiver=binding(node,callee.rsplit('.',1)[0])
                 if (language in {'JavaScript','TypeScript'} and method in HTTP and route_path is not None
-                        and callee.rsplit('.',1)[0] in routers):
+                        and receiver and receiver.start_byte in routers):
                     callback = next((a for a in arguments[1:] if a.type in function_types), None)
+                    if not callback and len(arguments)>1:
+                        declared=binding(node,dotted(arguments[1]))
+                        if declared and declared.start_byte not in reassigned:
+                            callback=declared if declared.type in function_types else declared.child_by_field_name('value')
+                            if callback and callback.type not in function_types:
+                                callback=None
                     name = '@callback:'+str(callback.start_point.row+1)+':'+str(callback.start_point.column) if callback else dotted(arguments[1]) if len(arguments)>1 else None
-                    if name:
+                    if callback:
+                        name=dotted(callback.child_by_field_name('name')) or (dotted(callback.parent.child_by_field_name('name')) if callback.parent and callback.parent.type=='variable_declarator' else None) or name
                         info['routes'].append({'method': method.upper(), 'path': redact_text(route_path)[:240],
-                                               'symbol': name, 'line': line, 'source_refs': [source]})
+                                               'symbol': name, 'function_id':f'syntax:{callback.start_byte}', 'line': line, 'source_refs': [source]})
+                    else:
+                        info['unknowns'].append('请求处理器位于第 '+str(line)+' 行，绑定未知，未推断入口')
                 if callee in {'getenv','System.getenv'} and route_path:
                     info['environment_keys'].append(route_path[:120])
                 if method in {'status','senderror'} and arguments and arguments[0].type in {'number','decimal_integer_literal'}:
                     value = text(arguments[0])
                     if value.isdecimal():
-                        info['branches'].append({'function': caller, 'kind':'http_status','status_code':int(value),
+                        info['branches'].append({'function': caller, 'function_id':caller_id, 'kind':'http_status','status_code':int(value),
                                                  'line':line,'source_refs':[source]})
             else:
                 info['unknowns'].append('动态调用位于第 '+str(line)+' 行，未推断实际目标')
@@ -458,7 +549,7 @@ def _tree(raw, language, suffix, info, ref):
                             continue
                         values=other.named_children if other.type in {'array','array_initializer'} else [other]
                         parameters += [redact_text(v)[:120] for child in values if (v:=literal(child)) is not None]
-                    info['data_operations'].append({**operation,'function':caller,'line':line,
+                    info['data_operations'].append({**operation,'function':caller,'function_id':caller_id,'line':line,
                                                    'literal_parameters':['[REDACTED_PARAMETERS]'] if operation['sensitive'] else parameters[:20]})
         if node.type in {'if_statement','conditional_expression','try_statement','switch_statement'}:
             arms=[]
@@ -470,19 +561,19 @@ def _tree(raw, language, suffix, info, ref):
                 if child.type in {'catch_clause','finally_clause'}:
                     arms.append({'label':child.type,'start_line':child.start_point.row+1,'end_line':child.end_point.row+1})
             condition=node.child_by_field_name('condition')
-            info['branches'].append({'function':caller,'kind':node.type,'line':line,'end_line':end,
+            info['branches'].append({'function':caller,'function_id':caller_id,'kind':node.type,'line':line,'end_line':end,
                                     'arms':arms,'condition':redact_condition(text(condition))[:200] if condition else None,
                                     'condition_source_refs':[ref(condition.start_point.row+1,condition.end_point.row+1)] if condition else [],'source_refs':[source]})
         if node.type == 'member_expression':
             value = dotted(node)
             if value and re.fullmatch(r'process\.env\.[A-Z0-9_]+',value):
                 info['environment_keys'].append(value.rsplit('.',1)[-1])
-        stack.extend((child,caller) for child in reversed(node.named_children))
+        stack.extend((child,caller,caller_id) for child in reversed(node.named_children))
     for function in info['functions']:
         if function['name'] == 'main':
             function['entries'].append('process_entry')
-    routes = {route['symbol']: [] for route in info['routes']}
+    routes = {route['function_id']: [] for route in info['routes']}
     for route in info['routes']:
-        routes[route['symbol']].append(route['method']+' '+route['path'])
+        routes[route['function_id']].append(route['method']+' '+route['path'])
     for function in info['functions']:
-        function['entries'] = list(dict.fromkeys(function['entries']+routes.get(function['name'],[])))
+        function['entries'] = list(dict.fromkeys(function['entries']+routes.get(function['function_id'],[])))

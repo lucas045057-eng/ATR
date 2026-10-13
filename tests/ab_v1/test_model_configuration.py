@@ -90,3 +90,13 @@ def test_captured_settings_cannot_send_after_authorization_or_configuration_chan
     with pytest.raises(ValueError,match='模型设置已变化|外部分析已关闭'):
         call_json(database,settings,budget_id,'source',{'private_business_material':'synthetic'})
     assert state['requests']==0
+
+
+def test_serialized_saves_cannot_restore_a_captured_old_key(fake_model):  # noqa: F811
+    database,settings,_,_=fake_model
+    owner(settings,database)
+    captured=settings.model_copy(deep=True)
+    rotated=request(settings,api_key=SecretStr('rotated-synthetic-key'))
+    save(database,settings,rotated)
+    save(database,captured,request(captured,model='another-model'))
+    assert load(settings).model_api_key.get_secret_value()=='rotated-synthetic-key'

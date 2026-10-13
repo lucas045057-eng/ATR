@@ -129,6 +129,13 @@ class ProcessLogSelection(StrictModel):
     log_files: list[ProcessLogSource] = Field(max_length=20)
 
 
+class EndpointMappingReview(StrictModel):
+    expected_version: int = Field(ge=1)
+    dependency_fact_id: str = Field(min_length=1,max_length=80)
+    candidate_id: str = Field(pattern=r'^[a-f0-9]{64}$')
+    reason: str = Field(min_length=5,max_length=1000)
+
+
 class SSHPassword(StrictModel):
     model_config = {"extra": "forbid", "str_strip_whitespace": False, "hide_input_in_errors": True}
     password: SecretStr = Field(min_length=1, max_length=1024)

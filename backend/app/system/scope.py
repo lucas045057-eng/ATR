@@ -367,7 +367,7 @@ class ScopeResolver:
     def reconcile(self, business_id, observation):
         if "payload" not in observation:
             return
-        if observation["payload"].get("execution_mode") == "standard_ssh_readonly":
+        if observation["payload"].get("execution_mode") == "standard_ssh_readonly" or observation.get('tool_id')=='config.read':
             from app.system.business_graph import fuse_business_graph
             fuse_business_graph(self.db, self.business.get(business_id))
         text = observation["payload"].get("text", "")

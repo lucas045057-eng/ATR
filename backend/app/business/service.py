@@ -230,6 +230,11 @@ class BusinessService:
             "read_bytes": self.settings.artifact_read_bytes,
         }
         try:
+            if (directory/'upload').stat().st_size!=artifact['bytes']:
+                raise ValueError('原始上传文件大小已变化，恢复已停止')
+            with (directory/'upload').open('rb') as original:
+                if hashlib.file_digest(original,'sha256').hexdigest()!=artifact['content_digest']:
+                    raise ValueError('原始上传文件摘要已变化，恢复已停止')
             with self.db.connect() as tx:
                 budget_id=tx.execute("SELECT id FROM context_budgets WHERE business_id=? AND phase='initial' ORDER BY created_at DESC LIMIT 1",
                                      (artifact['business_id'],)).fetchone()[0]
@@ -249,7 +254,16 @@ class BusinessService:
                 conn.close()
             (directory / "reuse.json").write_text(dumps(cached), encoding="utf-8")
             from app.runtime.processes import run_bounded
-            result = run_bounded(
+            manifest=directory/'manifest.json'
+            if not manifest.is_file():
+                files=directory/'files'
+                if files.exists():
+                    if files.is_symlink() or not files.resolve().is_relative_to(directory.resolve()):
+                        raise ValueError('中断的解包目录不属于原资料')
+                    if len(list(directory.glob('incomplete-extraction-*')))>=3:
+                        raise ValueError('该资料连续解包中断已达恢复上限，原件和中断目录已保留')
+                    files.rename(directory/('incomplete-extraction-'+uid()))
+                result = run_bounded(
                 [
                     sys.executable,
                     "-m",
@@ -262,26 +276,40 @@ class BusinessService:
                     str(directory / "reuse.json"),
                 ],
                 b'{}', timeout=min(self.settings.extraction_timeout_seconds + 10,initial_deadline-time.monotonic()),
-            )
-            if result['returncode']:
-                raise ValueError('资料解析进程失败，原始资料和已有知识已保留')
-            rows = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+                )
+                if result['returncode']:
+                    raise ValueError('资料解析进程失败，原始资料和已有知识已保留')
+            rows = json.loads(manifest.read_text(encoding="utf-8"))
+            if not isinstance(rows,list) or len(rows)>self.settings.artifact_max_files:
+                raise ValueError('资料恢复清单超限或格式无效')
+            from app.business.ingestion import safe_name
+            from app.business.languages import LANGUAGES, VERSION
+            from app.business.static import inspect_file
             for row in rows:
+                path=directory/'files'/safe_name(row['path'])
+                if path.is_symlink() or not path.resolve().is_relative_to((directory/'files').resolve()) or path.stat().st_size!=row['bytes']:
+                    raise ValueError('资料恢复文件边界或大小已变化')
+                with path.open('rb') as original:
+                    if hashlib.file_digest(original,'sha256').hexdigest()!=row['content_digest']:
+                        raise ValueError('资料恢复文件摘要已变化')
+                if path.suffix.lower() in LANGUAGES and row['analysis'].get('parser_version')!=VERSION:
+                    row['analysis']=inspect_file(path,row['path'],self.settings.artifact_read_bytes,defer_media=True)
                 if row['analysis'].get('parse_state')=='pending_media_local':
                     row['analysis']=self.process_local_media(directory,row,initial_deadline)
                     row['analysis']=self.process_media_vision(directory,row,row['analysis'],budget_id,initial_deadline)
             with self.db.transaction() as tx:
+                registered={row['path']:dict(row) for row in tx.execute('SELECT * FROM artifact_files WHERE artifact_id=?',(artifact_id,))}
                 old_files = [
                     dict(r)
                     for r in tx.execute(
-                        "SELECT f.*,a.slot FROM artifact_files f JOIN uploaded_artifacts a ON a.id=f.artifact_id WHERE f.business_id=? AND f.active=1",
-                        (artifact["business_id"],),
+                        "SELECT f.*,a.slot FROM artifact_files f JOIN uploaded_artifacts a ON a.id=f.artifact_id WHERE f.business_id=? AND f.active=1 AND f.artifact_id!=?",
+                        (artifact["business_id"],artifact_id),
                     )
                 ]
                 if artifact["mode"] == "replace":
                     tx.execute(
-                        "UPDATE artifact_files SET active=0 WHERE artifact_id IN (SELECT id FROM uploaded_artifacts WHERE business_id=? AND slot=?)",
-                        (artifact["business_id"], artifact["slot"]),
+                        "UPDATE artifact_files SET active=0 WHERE artifact_id IN (SELECT id FROM uploaded_artifacts WHERE business_id=? AND slot=? AND id!=?)",
+                        (artifact["business_id"], artifact["slot"],artifact_id),
                     )
                 replaced = [
                     f
@@ -308,8 +336,14 @@ class BusinessService:
                     )
                     analysis = row["analysis"]
                     reused += bool(previous and json.loads(previous['parse_json']) == analysis)
-                    file_id = uid()
-                    tx.execute(
+                    existing=registered.get(row['path'])
+                    if existing and existing['content_digest']!=row['content_digest']:
+                        raise ValueError('已有资料记录与恢复清单不一致')
+                    file_id = existing['id'] if existing else uid()
+                    if existing:
+                        tx.execute('UPDATE artifact_files SET parse_json=?,active=1 WHERE id=?',(dumps(analysis),file_id))
+                    else:
+                        tx.execute(
                         "INSERT INTO artifact_files VALUES(?,?,?,?,?,?,?,?,1,?)",
                         (
                             file_id,
@@ -322,7 +356,7 @@ class BusinessService:
                             dumps(analysis),
                             now(),
                         ),
-                    )
+                        )
                     if analysis["media_type"] == "code":
                         search = " ".join(
                             [
@@ -337,6 +371,9 @@ class BusinessService:
                             .replace("\\", ".")
                             .replace("/", ".")
                         )
+                        if existing:
+                            tx.execute('DELETE FROM source_index WHERE file_id=?',(file_id,))
+                            tx.execute('DELETE FROM source_search WHERE file_id=?',(file_id,))
                         tx.execute(
                             "INSERT INTO source_index VALUES(?,?,?,?,?)",
                             (

@@ -224,7 +224,7 @@ function App() {
         {notice && <div className="alert success"><span>✓</span>{notice}<button onClick={() => setNotice('')}>×</button></div>}
         {(page==='onboarding'||page==='business'||page==='scope')&&<BusinessPages page={page} onSystemSelected={setSelectedSystem}/>}
         {page==='business'&&<details className="business-block"><summary>旧版系统与审核详情</summary><p>原有系统、历史图版本和审核记录继续保留。</p><button className="btn" onClick={() => setPage('systems')}>查看旧版系统详情</button></details>}
-        {page==='structure'&&<><select aria-label="选择图的业务" value={selectedSystem} onChange={event=>setSelectedSystem(event.target.value)}>{businesses.filter(item=>item.system_id).map(item=><option key={item.id} value={item.system_id}>{item.name}</option>)}</select>{currentBusiness&&<StructureView businessId={currentBusiness.id} theme={theme}/>}</>}
+        {page==='structure'&&<><select aria-label="选择图的业务" value={selectedSystem} onChange={event=>setSelectedSystem(event.target.value)}>{businesses.filter(item=>item.system_id).map(item=><option key={item.id} value={item.system_id}>{item.name}</option>)}</select>{currentBusiness&&<StructureView key={currentBusiness.id} businessId={currentBusiness.id} theme={theme}/>}</>}
 
         {page === 'systems' && <>
           <div className="page-heading"><div><div className="eyebrow">UNDERSTAND BEFORE ACTION</div><h1>旧版系统详情</h1><p>从代码、部署和运行观察建立带来源的系统认知。</p></div><div className="heading-meta"><span className="sync"><i /> 本地数据已同步</span><button className="btn ghost" onClick={() => refresh().catch(e => setError(e.message))}>↻　刷新视图</button></div></div>
@@ -253,7 +253,7 @@ function App() {
               {!run ? <div className="run-empty"><div className="empty-orbit"><span>⌁</span><i/><i/><i/></div><h3>等待调查运行</h3><p>运行会先读取服务状态和近期日志，所有调用都会进入审计时间线。</p><div className="run-steps"><span><b>01</b> 定位当前图版本</span><span><b>02</b> 采集状态与日志</span><span><b>03</b> 核验当前证据</span></div></div> : <RunView run={run} onScope={() => setPage('scope')} onResume={(answer = {}) => void act(async () => {
                 const result = await api(`/runs/${run.id}/resume`, {method: 'POST', body: JSON.stringify(run.clarification?.question_id ? {question_id:run.clarification.question_id,version:run.clarification.version,...answer} : null)});
                 setRunJob(result.job_id); setNotice('在原调查预算内继续，后台会再次核验范围授权。');
-              })} onRepair={recordRepair} onMatchOutcome={recordMatchOutcome} verificationDefault={currentSystem?.compose_project === 'atr-system-b' ? 'http://ingress_proxy/health' : 'http://edge_proxy/health'}/>}
+              })} onCancel={()=>void act(async()=>{await api(`/runs/${run.id}/cancel`,{method:'POST',body:'{}'});setRun(await api(`/runs/${run.id}`));await refresh();})} onRepair={recordRepair} onMatchOutcome={recordMatchOutcome} verificationDefault={currentSystem?.compose_project === 'atr-system-b' ? 'http://ingress_proxy/health' : 'http://edge_proxy/health'}/>}
             </section>
           </div>
         </>}
@@ -318,8 +318,7 @@ function RuntimeQuestion({question, onResume, onScope}: {question: Row; onResume
     <button className="btn" type="button" onClick={()=>onResume()}>已在服务器与服务确认，继续</button>
   </form>
 }
-function RunView({ run, onRepair, onMatchOutcome, verificationDefault, onResume, onScope }: {run: Row; onResume: (answer?: Row) => void; onScope: () => void; onRepair: (e: React.FormEvent<HTMLFormElement>) => void; onMatchOutcome: (id: string, payload: Row) => void; verificationDefault: string}) {
-  const [cancelError, setCancelError] = useState('')
+function RunView({ run, onRepair, onMatchOutcome, verificationDefault, onResume, onScope, onCancel }: {run: Row; onResume: (answer?: Row) => void; onScope: () => void; onCancel: () => void; onRepair: (e: React.FormEvent<HTMLFormElement>) => void; onMatchOutcome: (id: string, payload: Row) => void; verificationDefault: string}) {
   const summary = run.summary || {}
   const gate = summary.gate || {}
   const budget = run.context_budget
@@ -333,8 +332,7 @@ function RunView({ run, onRepair, onMatchOutcome, verificationDefault, onResume,
   return <div className="run-view"><div className="run-status-line"><div><span className={`status-pulse ${run.status}`}/><strong>{runStatusLabel}</strong><small>运行 {run.id.slice(0,8)} · 图版本 {run.graph_snapshot_id?.slice(0,8)}</small></div>{badge(run.status)}</div>
     {run.execution_status && <section className="business-block" aria-live="polite"><strong>执行状态：{({queued:'排队中',running:'调查中',waiting_input:'等待确认',completed:'已结束',cancelled:'已取消',timed_out:'已超时',interrupted:'执行中断',failed:'因错误停止'} as Record<string,string>)[run.execution_status] || run.execution_status}</strong><p>诊断结果：{({root_cause_supported:'✓ 根因已定位',partial:'△ 已发现部分异常，完整根因未解决',unresolved:'？证据不足，根因未解决',no_fault_observed:'✓ 已执行的授权检查中未观察到故障'} as Record<string,string>)[run.diagnosis_status] || '尚未判定'}</p>
       <small>调查编号 {run.id} · 任务结束不等于根因确认。</small>
-      {['queued','running'].includes(run.execution_status) && <button className="btn" onClick={() => void api(`/runs/${run.id}/cancel`,{method:'POST',body:'{}'}).catch(e=>setCancelError(e.message))}>取消本次调查</button>}
-      {cancelError && <p className="alert error">{cancelError}</p>}
+      {['queued','running','waiting_input'].includes(run.execution_status) && <button className="btn" onClick={onCancel}>取消本次调查</button>}
       {run.diagnosis_result?.required_gaps?.length > 0 && <details open><summary>必须补齐的证据（{run.diagnosis_result.required_gaps.length} 项）</summary>{run.diagnosis_result.required_gaps.map((g:Row,i:number)=><p key={i}>{g.requirement_id} · {g.rule_id}</p>)}</details>}
       {run.diagnosis_result?.model_unknowns?.length > 0 && <details><summary>模型提出的未知项</summary>{run.diagnosis_result.model_unknowns.map((s:string,i:number)=><p key={i}>{s}</p>)}</details>}
       {run.clarification?.question_id && run.execution_status==='waiting_input' && <RuntimeQuestion key={run.clarification.question_id+':'+run.clarification.version} question={run.clarification} onResume={onResume} onScope={onScope}/>}

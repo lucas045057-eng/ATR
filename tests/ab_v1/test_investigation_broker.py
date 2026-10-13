@@ -26,6 +26,26 @@ def test_actual_limits_do_not_hide_missing_supplement_room():
     assert (limits['soft_model_calls'], limits['soft_tool_calls'], limits['hard_model_calls'], limits['hard_tool_calls']) == (6, 16, 8, 20)
 
 
+def test_preparation_failure_cannot_leave_an_orphan_queued_run(client,monkeypatch):
+    from app.agent.ab_investigation import prepare_run
+    from app.jobs import reserve_investigation
+    profile=onboard(client)
+    target=add_target(client,profile,'Preparation target')
+    event=incident(client,profile)
+    database=Database(get_settings().database_path)
+    job,_,_=reserve_investigation(database,event,profile['business_id'],target['id'])
+    coordinator=get_coordinator(database)
+    def fail(tx,run_id,kind,payload):
+        raise RuntimeError('synthetic durable-registration failure')
+    monkeypatch.setattr(coordinator,'_event',fail)
+    with pytest.raises(RuntimeError,match='durable-registration'):
+        prepare_run(database,get_settings(),event,profile['business_id'],target['id'],job,'test-operator')
+    with database.connect() as tx:
+        assert tx.execute('SELECT COUNT(*) FROM diagnosis_runs WHERE incident_id=?',(event,)).fetchone()[0]==0
+        assert tx.execute('SELECT COUNT(*) FROM context_budgets WHERE run_id IS NOT NULL').fetchone()[0]==0
+        assert tx.execute('SELECT COUNT(*) FROM run_executions').fetchone()[0]==0
+
+
 def test_clarification_keeps_actual_previous_container_in_large_service_inventory():
     evidence = [{'evidence_id': 'service-list', 'payload': {'services': [
         {'name': 'noise-' + str(i), 'id': 'noise-' + str(i)} for i in range(60)]}},

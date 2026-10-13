@@ -56,7 +56,11 @@ def probe(path):
   p=subprocess.run(['/usr/sbin/runuser','-u','atr-read-v1','--','/usr/bin/python3',str(path),'--policy',str(policy)],input=json.dumps({'tool_id':tool,'arguments':args,'protocol':'atr-read-ab-v1'}).encode(),capture_output=True,env={'PATH':'/usr/bin:/bin','SSH_ORIGINAL_COMMAND':'atr-read-v1'},timeout=10,check=True)
   row=json.loads(p.stdout)
   assert row.get('protocol')=='atr-read-ab-v1' if tool not in {'capabilities'} else row.get('schema_version')==1
-  if tool=='health.get': assert row['status_code']==200 and row['observation_location']=='remote_ssh'
+  if tool=='health.get':
+   endpoint=next(v for v in config['health_endpoints'] if v['endpoint_id']==args['endpoint_id'])
+   assert type(row.get('status_code')) is int and 100<=row['status_code']<=599
+   assert row.get('observation_location')=='remote_ssh' and row.get('tool_version')==1
+   assert row.get('endpoint_id')==endpoint['endpoint_id'] and row.get('url')==endpoint['url']
   results.append({'tool_id':tool,'state':row.get('state'),'status_code':row.get('status_code'),'protocol':row.get('protocol'),'startup_cycle':row.get('startup_cycle')})
  return results
 if r['mode']=='rollback':

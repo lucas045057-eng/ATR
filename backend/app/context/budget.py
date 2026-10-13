@@ -62,7 +62,7 @@ class ContextBudgetManager:
     def __init__(self, database, settings):
         self.db, self.settings = database, settings
 
-    def create(self, phase, business_id=None, run_id=None, limits=None):
+    def create(self, phase, business_id=None, run_id=None, limits=None, *, transaction=None):
         initial = phase == "initial"
         limits = limits or BudgetLimits(
             max_input_tokens=self.settings.initial_input_tokens
@@ -76,11 +76,16 @@ class ContextBudgetManager:
             max_execution_seconds=self.settings.initial_timeout_seconds if initial else 1800,
         )
         budget_id = uid()
-        with self.db.transaction() as tx:
+        def insert(tx):
             tx.execute(
                 "INSERT INTO context_budgets(id,business_id,run_id,phase,limits_json,created_at) VALUES(?,?,?,?,?,?)",
                 (budget_id, business_id, run_id, phase, limits.model_dump_json(), now()),
             )
+        if transaction is not None:
+            insert(transaction)
+        else:
+            with self.db.transaction() as tx:
+                insert(tx)
         return budget_id
 
     def get(self, budget_id):

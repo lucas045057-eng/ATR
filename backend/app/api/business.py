@@ -24,11 +24,12 @@ from app.business.models import (
 )
 from app.business.service import BusinessService
 from app.business.source_index import SourceIndex
-from app.common import digest, now, uid
+from app.common import digest, dumps, now, uid
 from app.connectors.credentials import SSH_SESSIONS
 from app.connectors.models import (
     BindingReview,
     DockerReaderSelection,
+    EndpointMappingReview,
     HealthEndpointSelection,
     ProcessLogSelection,
     RuntimeTargetCreate,
@@ -193,6 +194,29 @@ def remove_artifact(business_id: str, artifact_id: str):
     return service().remove(business_id, artifact_id)
 
 
+@router.post('/businesses/{business_id}/artifacts/{artifact_id}/retry',status_code=202)
+def retry_artifact(business_id: str,artifact_id: str):
+    ensure_idle(business_id)
+    s=service()
+    with s.db.connect() as tx:
+        artifact=tx.execute('SELECT * FROM uploaded_artifacts WHERE id=? AND business_id=?',(artifact_id,business_id)).fetchone()
+    if not artifact:
+        raise KeyError('资料不属于当前业务')
+    if artifact['status']!='failed':
+        raise ValueError('仅可恢复处理失败或中断的原资料')
+    job_id=reserve(s.db,'ingest',business_id)
+    try:
+        with s.db.transaction() as tx:
+            ContextBudgetManager(s.db,s.settings).create('initial',business_id,transaction=tx)
+            tx.execute("UPDATE uploaded_artifacts SET status='queued',error=NULL WHERE id=?",(artifact_id,))
+            tx.execute('UPDATE jobs SET result_json=? WHERE id=?',(dumps({'artifact_id':artifact_id}),job_id))
+        submit(s.db,job_id,lambda:s.process_artifact(artifact_id))
+    except BaseException as error:
+        finish(s.db,job_id,error=type(error).__name__)
+        raise
+    return {'job_id':job_id,'artifact_id':artifact_id,'status':'queued'}
+
+
 @router.post("/businesses/{business_id}/analyze", status_code=202)
 def analyze(business_id: str):
     s = service()
@@ -349,6 +373,7 @@ def probe_model_text():
 @router.get('/businesses/{business_id}/visualization')
 def business_visualization(business_id: str,view: Literal['structure','flow']='structure',
                            profile_version: int|None=None,flow_id: str|None=None,
+                           graph_snapshot_id: str|None=None,
                            theme: Literal['light','dark']='dark'):
     import time
 
@@ -359,9 +384,18 @@ def business_visualization(business_id: str,view: Literal['structure','flow']='s
     s=service()
     profile=s.get(business_id,profile_version)
     with s.db.connect() as tx:
-        graph=tx.execute('''SELECT * FROM graph_snapshots WHERE system_id=?
-            AND json_extract(coverage_json,'$.profile_version')=? ORDER BY version DESC LIMIT 1''',
-                         (profile['system_id'],profile['profile_version'])).fetchone()
+        if graph_snapshot_id is not None and graph_snapshot_id!='none':
+            if len(graph_snapshot_id)>80:
+                raise ValueError('图版本标识超限')
+            graph=tx.execute("SELECT * FROM graph_snapshots WHERE id=? AND system_id=? AND json_extract(coverage_json,'$.profile_version')=?",(graph_snapshot_id,profile['system_id'],profile['profile_version'])).fetchone()
+            if not graph:
+                raise KeyError('此图版本不属于所选业务和资料版本')
+        elif graph_snapshot_id=='none':
+            graph=None
+        else:
+            graph=tx.execute('''SELECT * FROM graph_snapshots WHERE system_id=?
+                AND json_extract(coverage_json,'$.profile_version')=? ORDER BY version DESC LIMIT 1''',
+                             (profile['system_id'],profile['profile_version'])).fetchone()
         nodes=[]
         edges=[]
         if graph:
@@ -371,7 +405,7 @@ def business_visualization(business_id: str,view: Literal['structure','flow']='s
     projected=project_snapshot({'profile':profile,'graph':{'nodes':nodes,'edges':edges},'snapshot_id':identity,'flow_id':flow_id},view)
     rendered=render_snapshot(projected,time.monotonic()+30,s.settings.database_path.parent/'visualizations',theme=theme)
     nonce=uid()
-    return {**projected,**rendered,'nonce':nonce,'html':embed_bridge(rendered['html'],identity,nonce,theme=theme),
+    return {**projected,**rendered,'graph_snapshot_id':graph['id'] if graph else 'none','nonce':nonce,'html':embed_bridge(rendered['html'],identity,nonce,theme=theme),
             'flows':[{'flow_id':flow['flow_id'],'entry':flow['entry'],'kind':flow['kind']} for flow in profile['business_flow_graphs']]}
 
 
@@ -498,6 +532,23 @@ def select_log_files(business_id: str, target_id: str, request: ProcessLogSelect
     ensure_idle(business_id)
     s=service()
     return RuntimeService(s.db,s.settings).select_log_files(business_id,target_id,request)
+
+
+@router.get('/businesses/{business_id}/targets/{target_id}/endpoint-mapping-candidates')
+def endpoint_mapping_candidates(business_id: str,target_id: str):
+    from app.system.endpoint_mapping import candidates
+    s=service()
+    RuntimeService(s.db,s.settings).get(business_id,target_id)
+    return candidates(s.db,business_id,target_id)
+
+
+@router.post('/businesses/{business_id}/targets/{target_id}/endpoint-mappings')
+def confirm_endpoint_mapping(business_id: str,target_id: str,request: EndpointMappingReview,
+                             actor: str=Depends(require_operator)):
+    from app.system.endpoint_mapping import confirm
+    ensure_idle(business_id)
+    s=service()
+    return confirm(s.db,s.settings,business_id,target_id,request,actor)
 
 
 @router.post("/businesses/{business_id}/targets/{target_id}/discover", status_code=202)

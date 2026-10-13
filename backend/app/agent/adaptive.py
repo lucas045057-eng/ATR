@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from pathlib import PurePosixPath
 
 from app.common import digest
@@ -19,11 +20,38 @@ def public_action(action):
     return {k: action[k] for k in ("action_id", "tool_id", "target_node_id", "service", "role", "arguments", "scheduling") if k in action}
 
 
-def current_graph(graph, bindings):
+def current_graph(graph, bindings, *, database=None):
+    if database is not None:
+        with database.connect() as tx:
+            bindings=[dict(row) for binding in bindings for row in tx.execute('SELECT * FROM service_bindings WHERE id=?',(binding['id'],))]
     current_ids = {b["id"] for b in bindings if binding_is_current(b)}
     nodes = [n for n in graph["nodes"] if n.get("role") != "runtime" or n.get("attributes", {}).get("binding_id") in current_ids]
     ids = {n["id"] for n in nodes}
-    return {**graph, "nodes": nodes, "edges": [e for e in graph["edges"] if e["from_node_id"] in ids and e["to_node_id"] in ids]}
+    target_ids={binding['target_id'] for binding in bindings if binding_is_current(binding)}
+    edges=[]
+    for edge in graph['edges']:
+        if edge['from_node_id'] not in ids or edge['to_node_id'] not in ids:
+            continue
+        attributes=edge.get('attributes',{})
+        if 'endpoint_mappings' in attributes:
+            mappings=[]
+            for mapping in attributes['endpoint_mappings']:
+                expires=datetime.fromisoformat(mapping['expires_at'])
+                if database is not None:
+                    from app.system.endpoint_mapping import latest_configuration
+                    with database.connect() as tx:
+                        latest=latest_configuration(tx,mapping['target_id'],mapping['configuration_path'])
+                    if not latest or latest['content_digest']!=mapping['configuration_digest']:
+                        continue
+                if mapping['target_id'] in target_ids and set(mapping['binding_ids'])<=current_ids and expires.tzinfo and expires>datetime.now(timezone.utc):
+                    mappings.append(mapping)
+            attributes={key:value for key,value in attributes.items() if key not in {'endpoint_id','verified_endpoint_ids'}}
+            if len(mappings)==1:
+                attributes={**attributes,'endpoint_id':mappings[0]['endpoint_id'],
+                            'source_refs':mappings[0]['source_refs'],'endpoint_mapping_fact_id':mappings[0]['mapping_fact_id'],
+                            'verification_status':'confirmed'}
+        edges.append({**edge,'attributes':attributes})
+    return {**graph, "nodes": nodes, "edges": edges}
 
 
 class AdaptiveInvestigationPlanner:

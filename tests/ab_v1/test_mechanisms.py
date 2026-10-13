@@ -1,5 +1,6 @@
 import importlib.util
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from app.agent.model_schema import output_contract
@@ -88,3 +89,28 @@ def test_legacy_single_target_gate_cannot_approve_new_cross_target_mode():
     stamp = state["evidence"][0]["observed_at"]
     state["evidence"][0]["payload"]["text"] = stamp + " startup database connection refused"
     assert _reviewer(state)["gate"]["status"] != "supported"
+
+
+@pytest.mark.parametrize('rule,lines,edge_index', [
+    ('dependency_unavailable_at_startup',['startup database connect failed other-db:3306',
+                                         'background health check connection refused mysql:3306'],0),
+    ('upstream_unavailable',['upstream connection refused other-app:8000',
+                            'background health check connection refused app:8000'],1),
+])
+def test_unrelated_log_lines_cannot_supply_endpoint_for_another_mechanism(rule,lines,edge_index):
+    from app.agent.decision_runtime import facts_from_state
+    facts,relations,scope=inputs()
+    observed=datetime.now(timezone.utc)
+    stamp=(observed-timedelta(seconds=1)).isoformat()
+    target=relations[edge_index]['from_node_id']
+    state={'decision_protocol':'ab_v1','graph':{'nodes':[{'id':key,'kind':'service','name':key} for key in scope['target_node_ids']]},
+           'incident':{'window_start':(observed-timedelta(minutes=2)).isoformat()},
+           'evidence':[{'evidence_id':'actual-lines','call_id':'separate-call','tool_id':'container.logs',
+                        'observed_at':observed.isoformat(),'target_node_id':target,'startup_cycle':'boot-2',
+                        'payload':{'text':'\n'.join(stamp+' '+line for line in lines)}}]}
+    derived=facts_from_state(state)
+    assert derived
+    combined=[fact for fact in facts if fact['kind']!='log_observation']+derived
+    assert registry().verify(rule,combined,relations,scope)['status']=='unresolved'
+    state['evidence'][0]['payload']['text']=stamp+' '+lines[0].replace('other-db','mysql').replace('other-app','app')
+    assert registry().verify(rule,[fact for fact in facts if fact['kind']!='log_observation']+facts_from_state(state),relations,scope)['status']=='supported'

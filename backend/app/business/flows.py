@@ -28,8 +28,16 @@ def build_flows(files, version):
             symbols[function['name']].append((row, function))
 
     def unique(items):
-        candidates = {(row['id'], fn['name'], fn['start']): (row, fn) for row, fn in items}
+        candidates = {(row['id'], fn.get('function_id') or (fn['name'], fn['start'], fn['end'])): (row, fn) for row, fn in items}
         return next(iter(candidates.values())) if len(candidates) == 1 else None
+
+    def owns(current, fn, item, kind):
+        identifier=fn.get('function_id')
+        if identifier:
+            return item.get('caller_id' if kind=='call' else 'function_id')==identifier
+        # Older analysis cannot distinguish overloaded declarations; do not merge their events.
+        return (sum(other['name']==fn['name'] for other in current['analysis']['functions'])==1
+                and item.get('caller' if kind=='call' else 'function')==fn['name'])
 
     def resolve(row, caller, callee):
         normalized = callee.replace('::', '.')
@@ -94,7 +102,7 @@ def build_flows(files, version):
                     regions = []
                     if kind != 'function':
                         for branch in current['analysis'].get('branches', []):
-                            if branch.get('function') != fn['name']:
+                            if not owns(current,fn,branch,'branch'):
                                 continue
                             for arm in branch.get('arms', []):
                                 if arm['start_line'] <= item['line'] <= arm['end_line']:
@@ -110,7 +118,7 @@ def build_flows(files, version):
                     return identifier
 
                 def walk(current, fn, parent=None, depth=0, ancestors=frozenset()):
-                    identity = (current['id'], fn['name'], fn['start'])
+                    identity = (current['id'], fn.get('function_id') or (fn['name'],fn['start'],fn['end']))
                     if identity in ancestors or depth > 8 or len(steps) >= 80:
                         unknowns.append('递归、超过8层或80步的路径未展开')
                         return
@@ -121,7 +129,7 @@ def build_flows(files, version):
                     events = []
                     for kind, key in [('branch', 'branches'), ('call', 'calls'), ('data_operation', 'data_operations')]:
                         for item in current['analysis'].get(key, []):
-                            if item.get('caller' if kind == 'call' else 'function') == fn['name']:
+                            if owns(current,fn,item,kind):
                                 events.append((item['line'], kind, item))
                     for _, kind, item in sorted(events, key=lambda event: (event[0], event[1])):
                         site = append(current, fn, kind, item, item.get('callee') or item.get('query') or item.get('kind'),
@@ -138,7 +146,7 @@ def build_flows(files, version):
                 walk(row, function)
                 role = 'startup' if 'startup' in entry else 'process' if entry == 'process_entry' else 'request'
                 flows.append({'schema_version': 'business-flow-1',
-                              'flow_id': digest([row['id'], function['name'], entry, version])[:24],
+                              'flow_id': digest([row['id'], function.get('function_id') or [function['name'],function['start'],function['end']], entry, version])[:24],
                               'profile_version': version, 'entry': entry, 'kind': role, 'steps': steps, 'edges': edges,
                               'source_refs': steps[0]['source_refs'], 'unknowns': list(dict.fromkeys(unknowns))[:30],
                               'verification_status': 'static', 'control_flow_verified': False,

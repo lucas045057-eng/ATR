@@ -41,6 +41,43 @@ def source(path,output):
             'derived_dir':str(output),'max_pages':50}
 
 
+def test_failed_initial_ingestion_resumes_original_artifact_checkpoints(client,monkeypatch):
+    from app.business.service import BusinessService
+    from app.settings import get_settings
+    from app.storage.database import Database
+    original=BusinessService.process_media_vision
+    stage={}
+    def interrupt(self,directory,row,parsed,budget_id,deadline):
+        result=original(self,directory,row,parsed,budget_id,deadline)
+        if not stage:
+            output=directory/result['derived_path']
+            stage['frames']={str(path):path.stat().st_mtime_ns for path in output.glob('*.png')}
+            assert stage['frames']
+            raise RuntimeError('synthetic restart after durable page checkpoint')
+        return result
+    monkeypatch.setattr(BusinessService,'process_media_vision',interrupt)
+    business=client.post('/api/v1/businesses',json={'name':'Resume original media'}).json()
+    base=f"/api/v1/businesses/{business['business_id']}"
+    raw=io.BytesIO()
+    Image.new('RGB',(256,256),'white').save(raw,format='PNG')
+    uploaded=client.post(base+'/artifacts?filename=architecture.png',content=raw.getvalue()).json()
+    first=wait_job(client,uploaded['job_id'],timeout=40)
+    assert first['status']=='failed'
+    database=Database(get_settings().database_path)
+    with database.connect() as tx:
+        assert tx.execute('SELECT COUNT(*) FROM artifact_files WHERE artifact_id=?',(uploaded['artifact_id'],)).fetchone()[0]==0
+    response=client.post(base+f"/artifacts/{uploaded['artifact_id']}/retry")
+    assert response.status_code==202,response.text
+    resumed=wait_job(client,response.json()['job_id'],timeout=40)
+    assert resumed['status']=='completed',resumed
+    assert resumed['result']['artifact_id']==uploaded['artifact_id']
+    assert stage['frames']=={path:Path(path).stat().st_mtime_ns for path in stage['frames']}
+    with database.connect() as tx:
+        assert tx.execute('SELECT COUNT(*) FROM artifact_files WHERE artifact_id=?',(uploaded['artifact_id'],)).fetchone()[0]==1
+        assert tx.execute('SELECT COUNT(*) FROM uploaded_artifacts WHERE business_id=?',(business['business_id'],)).fetchone()[0]==1
+        assert tx.execute('SELECT COUNT(*) FROM model_usage_records').fetchone()[0]==0
+
+
 @pytest.mark.parametrize('suffix,format',[('.png','PNG'),('.jpg','JPEG'),('.webp','WEBP')])
 def test_full_media_path_does_not_apply_text_read_limit(tmp_path,monkeypatch,suffix,format):
     path=tmp_path/('architecture'+suffix)

@@ -28,7 +28,9 @@ def main():
             if cached is not None
             else inspect_file(Path(dest) / row["path"], row["path"], limits["read_bytes"],defer_media=True)
         )
-    Path(manifest).write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+    temporary=Path(manifest).with_suffix('.tmp')
+    temporary.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+    temporary.replace(manifest)
 
 
 if __name__ == "__main__":

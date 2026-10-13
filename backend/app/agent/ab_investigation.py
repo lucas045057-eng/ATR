@@ -91,6 +91,7 @@ def prepare_run(database, settings, incident_id, business_id, target_id, job_id,
     task = json.loads(incident['symptom_json'])
     configuration['task_type'] = (task.get('task_type', 'root_cause_investigation')
                                   if task.get('task_type_explicit', True) else 'root_cause_investigation')
+    manager = ContextBudgetManager(database, settings)
     with database.transaction() as tx:
         if not tx.execute('SELECT 1 FROM graph_nodes WHERE snapshot_id=?', (graph['id'],)).fetchone():
             previous = dict(tx.execute('SELECT * FROM graph_snapshots WHERE id=?', (graph['id'],)).fetchone())
@@ -108,15 +109,13 @@ def prepare_run(database, settings, incident_id, business_id, target_id, job_id,
                            'task_type': configuration['task_type'],
                            'profile_version': profile['profile_version'], 'profile_review_status': profile['review_status']}),
                     target_id, dumps(frozen)))
-    manager = ContextBudgetManager(database, settings)
-    budget_id = manager.create('investigation', business_id, run_id, BudgetLimits(
-        max_input_tokens=settings.investigation_input_tokens, max_calls=limits['hard_model_calls'],
-        max_tools=limits['hard_tool_calls'], max_total_tokens=settings.budget_total_tokens, max_execution_seconds=600))
-    with database.transaction() as tx:
+        budget_id = manager.create('investigation', business_id, run_id, BudgetLimits(
+            max_input_tokens=settings.investigation_input_tokens, max_calls=limits['hard_model_calls'],
+            max_tools=limits['hard_tool_calls'], max_total_tokens=settings.budget_total_tokens, max_execution_seconds=600),transaction=tx)
         row = tx.execute('SELECT summary_json FROM diagnosis_runs WHERE id=?', (run_id,)).fetchone()
         tx.execute('UPDATE diagnosis_runs SET summary_json=? WHERE id=?',
                    (dumps({**json.loads(row[0]), 'budget_id': budget_id}), run_id))
-    get_coordinator(database).register(run_id, job_id)
+        get_coordinator(database).register_in_transaction(tx,run_id,job_id)
     return run_id
 
 
@@ -159,7 +158,7 @@ class InvestigationBroker:
         if authorization_digest(self.target) != json.loads(run['target_snapshot_json'])['authorization_digest']:
             raise PermissionError('原调查授权已变化')
         RuntimeService(database, settings).require_credentials(self.business_id, self.target_id)
-        self.graph = current_graph({'nodes': nodes, 'edges': edges}, bindings)
+        self.graph = current_graph({'nodes': nodes, 'edges': edges}, bindings,database=database)
         self.bindings = bindings
         self.symptom = json.loads(self.incident['symptom_json'])
         self.task_type = self.summary.get('task_type', self.symptom.get('task_type', 'root_cause_investigation'))
@@ -194,6 +193,7 @@ class InvestigationBroker:
             raise InterruptedError('调查租约已失效')
 
     def state(self, actions=None):
+        self.graph=current_graph(self.graph,self.bindings,database=self.db)
         names = {b['service'] for b in self.bindings}
         scope = [node['id'] for node in self.graph['nodes'] if node['kind'] == 'service'
                  and node['role'] != 'runtime' and node['name'] in names][:20]

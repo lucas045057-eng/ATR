@@ -13,16 +13,19 @@ export function StructureView({businessId,theme}:{businessId:string;theme:Theme}
   const [image,setImage]=useState('');
   const [previewRef,setPreviewRef]=useState<Row|null>(null);
   const [exportFile,setExportFile]=useState<Row|null>(null);
+  const [refreshVersion,setRefreshVersion]=useState(0);
+  const profileVersion=useRef<number|null>(null);
+  const graphSnapshot=useRef<string|null>(null);
   const frame=useRef<HTMLIFrameElement>(null);
   const sourceController=useRef<AbortController|null>(null);
   useEffect(()=>{
     let active=true;const controller=new AbortController();setLoading(true);setError('');setDiagram(null);setSelected([]);setExportFile(null);
     sourceController.current?.abort();setCode(null);setImage('');setPreviewRef(null);
-    api(`/businesses/${businessId}/visualization?view=${view}&theme=${theme}${flow?'&flow_id='+encodeURIComponent(flow):''}`,{signal:controller.signal})
-      .then(value=>{if(active)setDiagram(value);}).catch(reason=>{if(active)setError(reason.message);})
+    api(`/businesses/${businessId}/visualization?view=${view}&theme=${theme}${profileVersion.current?'&profile_version='+profileVersion.current:''}${graphSnapshot.current?'&graph_snapshot_id='+encodeURIComponent(graphSnapshot.current):''}${view==='flow'&&flow?'&flow_id='+encodeURIComponent(flow):''}`,{signal:controller.signal})
+      .then(value=>{if(active){profileVersion.current=value.profile_version;graphSnapshot.current=value.graph_snapshot_id;setDiagram(value);}}).catch(reason=>{if(active)setError(reason.message);})
       .finally(()=>{if(active)setLoading(false);});
     return()=>{active=false;controller.abort();sourceController.current?.abort();};
-  },[businessId,view,flow,theme]);
+  },[businessId,view,flow,theme,refreshVersion]);
   useEffect(()=>{
     let active=true;
     const receive=async(event:MessageEvent)=>{
@@ -75,6 +78,7 @@ export function StructureView({businessId,theme}:{businessId:string;theme:Theme}
   return <section className="panel structure-panel">
     <h2>业务结构图</h2><p>查看组件与关系，点击图中的节点或箭头追溯来源。资料描述和静态路径仍需运行证据核验。</p>
     <div className="row"><button className="btn" onClick={()=>{setView('structure');setFlow('');}}>业务结构</button><button className="btn" onClick={()=>setView('flow')}>源码流程</button>
+      <button className="btn" disabled={loading} onClick={()=>{profileVersion.current=null;graphSnapshot.current=null;setFlow('');setRefreshVersion(value=>value+1);}}>更新到最新资料版本</button>
       {view==='flow'&&(diagram?.flows?.length||0)>0&&<select aria-label="选择源码流程" value={flow} onChange={event=>setFlow(event.target.value)}><option value="">全部源码入口</option>{(diagram?.flows||[]).map((item:Row)=><option key={item.flow_id} value={item.flow_id}>{item.kind==='startup'?'启动':'请求或后台'} · {item.entry}</option>)}</select>}</div>
     {loading&&<p role="status">正在生成同一资料版本的图形，最多等待 30 秒…</p>}
     {error&&<p role="alert" className="alert error">{error}</p>}

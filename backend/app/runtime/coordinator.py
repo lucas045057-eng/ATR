@@ -60,20 +60,23 @@ class RunCoordinator:
                    (uid(), run['system_id'], run_id, sequence, 'run', run_id, kind, 'runtime', dumps(payload), now()))
 
     def register(self, run_id, job_id, *, max_seconds=600):
+        with self._lock, self.db.transaction() as tx:
+            self.register_in_transaction(tx,run_id,job_id,max_seconds=max_seconds)
+        return self.public(run_id)
+
+    def register_in_transaction(self, tx, run_id, job_id, *, max_seconds=600):
         if not 0 < max_seconds <= 600:
             raise ValueError('调查总时间上限必须在 0 到 600 秒之间')
-        with self._lock, self.db.transaction() as tx:
-            old = tx.execute('SELECT 1 FROM run_executions WHERE run_id=?', (run_id,)).fetchone()
-            if not old:
-                run = tx.execute('SELECT model_config_json FROM diagnosis_runs WHERE id=?', (run_id,)).fetchone()
-                if not run or json.loads(run['model_config_json']).get('decision_protocol') != 'ab_v1':
-                    raise ValueError('协调器仅接受已冻结的 ab_v1 调查')
-                tx.execute("INSERT INTO run_executions(run_id,job_id,execution_status,queued_since,max_seconds,result_json) VALUES(?,?,'queued',?,?,?)",
-                           (run_id, job_id, self.clock(), max_seconds, dumps(unresolved_result())))
-                tx.execute("UPDATE diagnosis_runs SET status='queued' WHERE id=?", (run_id,))
-                tx.execute("UPDATE jobs SET status='queued',result_json=? WHERE id=?", (dumps({'run_id': run_id}), job_id))
-                self._event(tx, run_id, 'run_queued', {'queue_timeout_seconds': 30, 'max_seconds': max_seconds})
-        return self.public(run_id)
+        old = tx.execute('SELECT 1 FROM run_executions WHERE run_id=?', (run_id,)).fetchone()
+        if not old:
+            run = tx.execute('SELECT model_config_json FROM diagnosis_runs WHERE id=?', (run_id,)).fetchone()
+            if not run or json.loads(run['model_config_json']).get('decision_protocol') != 'ab_v1':
+                raise ValueError('协调器仅接受已冻结的 ab_v1 调查')
+            tx.execute("INSERT INTO run_executions(run_id,job_id,execution_status,queued_since,max_seconds,result_json) VALUES(?,?,'queued',?,?,?)",
+                       (run_id, job_id, self.clock(), max_seconds, dumps(unresolved_result())))
+            tx.execute("UPDATE diagnosis_runs SET status='queued' WHERE id=?", (run_id,))
+            tx.execute("UPDATE jobs SET status='queued',result_json=? WHERE id=?", (dumps({'run_id': run_id}), job_id))
+            self._event(tx, run_id, 'run_queued', {'queue_timeout_seconds': 30, 'max_seconds': max_seconds})
 
     def claim(self, run_id):
         with self._lock, self.db.transaction() as tx:

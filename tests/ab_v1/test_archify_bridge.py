@@ -55,3 +55,50 @@ def test_vendored_renderer_runs_without_skill_paths_or_npm_and_cache_is_frozen(t
     assert 'const theme="light"' in embedded and 'attributeFilter' in embedded
     with pytest.raises(ValueError):
         embed_bridge(light['html'],light['snapshot_id'],'fresh',theme='untrusted')
+
+
+def test_rejected_media_relation_is_not_drawn_and_approved_component_is_labeled():
+    data=snapshot()
+    prefix='document:owned-file:page:1:'
+    data['profile']['facts']=[{'id':'approved-api','subject':prefix+'api','predicate':'depicts_component',
+                              'verification_status':'confirmed','object':{}},
+                             {'id':'rejected-arrow','subject':prefix+'api','predicate':'flow',
+                              'verification_status':'rejected','object':{'target':prefix+'db'}}]
+    result=project_snapshot(data,'structure')
+    assert result['node_count']==2 and result['edge_count']==0
+    assert '已审核' in next(node for node in result['candidate']['components'] if node['label']=='API')['sublabel']
+    assert any('审核' in item for item in result['unknowns'])
+
+
+def test_runtime_host_and_binding_relations_keep_their_own_observation_sources():
+    data=snapshot()
+    data['profile']['documents']=[]
+    data['graph']={'nodes':[{'id':'host','canonical_key':'host:target','name':'target','kind':'host',
+                            'attributes':{'source_type':'Runtime','observation_id':'host-observation'}},
+                           {'id':'process','canonical_key':'process:runtime','name':'runtime','kind':'process',
+                            'attributes':{'source_type':'Runtime','evidence_ids':['binding-observation']}}],
+                   'edges':[{'from_node_id':'process','to_node_id':'host','relation':'runs_on',
+                             'attributes':{'source_refs':[{'schema_version':'observation-ref-1','observation_id':'binding-observation','source_type':'Runtime'}]}}]}
+    result=project_snapshot(data,'structure')
+    host=next(node for node in result['candidate']['components'] if node['label']=='target')
+    relation=result['candidate']['connections'][0]
+    assert result['sources'][host['id']][0]['observation_id']=='host-observation'
+    assert result['sources'][relation['id']][0]['observation_id']=='binding-observation'
+
+
+def test_api_can_keep_exact_graph_snapshot_across_runtime_discovery_and_theme(client):
+    from test_business import onboard
+    from test_runtime import discover, target
+    profile=onboard(client)
+    base=f"/api/v1/businesses/{profile['business_id']}"
+    first=client.get(base+'/visualization?theme=dark').json()
+    assert first.get('graph_snapshot_id') and first['node_count']>0
+    runtime=target(client,profile)
+    discover(client,profile,runtime)
+    current=client.get(base+'/visualization?theme=light').json()
+    assert current['graph_snapshot_id']!=first['graph_snapshot_id']
+    frozen=client.get(base+f"/visualization?theme=light&profile_version={first['profile_version']}&graph_snapshot_id={first['graph_snapshot_id']}").json()
+    assert frozen['snapshot_id']==first['snapshot_id'] and frozen['graph_snapshot_id']==first['graph_snapshot_id']
+    assert frozen['node_count']==first['node_count'] and frozen['edge_count']==first['edge_count']
+    other=client.post('/api/v1/businesses',json={'name':'Another business'}).json()
+    assert client.get(f"/api/v1/businesses/{other['business_id']}/visualization?graph_snapshot_id={first['graph_snapshot_id']}").status_code==404

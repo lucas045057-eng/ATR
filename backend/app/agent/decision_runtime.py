@@ -17,7 +17,7 @@ from pydantic import (
     field_validator,
 )
 
-from app.agent.log_events import normalize_log_events, parse_log_time, parse_time
+from app.agent.log_events import event_fingerprint, normalize_log_events, parse_log_time, parse_time
 from app.agent.mechanisms import connection_endpoints
 from app.agent.model_schema import allowed_service_nodes
 from app.agent.verification import FAILED, HEALTHY, LOG_TOOLS, MECHANISMS, NON_EVENTS, STATUS_TOOLS
@@ -186,24 +186,21 @@ def facts_from_state(state: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(text, str):
             continue
         for target_id in targets:
-            mechanisms = set()
-            endpoints = set()
-            failure_signal = False
             for event in normalize_log_events(text, {**payload, **evidence}):
                 line, stamp = event.raw_line, event.event_time_utc
                 started = _parse_time(payload.get('started_at')) if state.get('decision_protocol') == 'ab_v1' else None
                 if not stamp or stamp < window_start or started and stamp < started or stamp > observed + timedelta(seconds=5) or NON_EVENTS.search(line):
                     continue
                 lowered = line.casefold()
-                failure_signal = failure_signal or any(
+                failure_signal = any(
                     marker in lowered for marker in ("error", "failed", "refused", "unavailable", "exception", "traceback")
                 )
-                mechanisms.update(mode for mode, pattern in MECHANISMS.items()
-                                  if re.search(pattern, line, re.I))
-                endpoints.update(connection_endpoints(line))
-            if failure_signal or mechanisms:
-                add(evidence, target_id, "log_observation",
-                    {"failure_signal": failure_signal, "mechanisms": sorted(mechanisms), "endpoint_ids": sorted(endpoints)})
+                mechanisms = [mode for mode, pattern in MECHANISMS.items() if re.search(pattern, line, re.I)]
+                if failure_signal or mechanisms:
+                    add(evidence, target_id, "log_observation",
+                        {"failure_signal": failure_signal, "mechanisms": sorted(mechanisms),
+                         "endpoint_ids": connection_endpoints(line), "event_id": event_fingerprint(event),
+                         "event_time_utc": stamp.isoformat()})
     return facts
 
 
