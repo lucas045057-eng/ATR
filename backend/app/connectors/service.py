@@ -126,6 +126,18 @@ class RuntimeService:
         if config["connector"] == "ssh" and config.get("auth_mode") == "password":
             SSH_SESSIONS.resolve(config, self.settings.operator_id)
 
+    def select_log_files(self, business_id, target_id, request):
+        config = self.get(business_id, target_id)
+        validated = RuntimeTargetCreate(name='process-log-location', host=config['host'],
+                    allowed_paths=config['allowed_paths'], log_files=request.log_files).model_dump()['log_files']
+        with self.db.transaction() as tx:
+            stored=json.loads(tx.execute('SELECT config_json FROM runtime_targets WHERE id=? AND business_id=?',
+                                        (target_id,business_id)).fetchone()[0])
+            stored['log_files']=validated
+            tx.execute('UPDATE runtime_targets SET config_json=? WHERE id=? AND business_id=?',
+                       (dumps(stored),target_id,business_id))
+        return self.get(business_id,target_id)
+
     def get(self, business_id, target_id):
         conn = self.db.connect()
         try:

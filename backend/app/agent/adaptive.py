@@ -27,9 +27,10 @@ def current_graph(graph, bindings):
 
 
 class AdaptiveInvestigationPlanner:
-    def __init__(self, graph, bindings, targets, symptom, root_id, settings):
+    def __init__(self, graph, bindings, targets, symptom, root_id, settings, *, include_processes=False):
         self.graph, self.bindings, self.targets = graph, bindings, targets
         self.symptom, self.root_id, self.settings = symptom, root_id, settings
+        self.include_processes=include_processes
         self.nodes = {n["id"]: n for n in graph["nodes"] if n.get("kind") == "service" and n.get("role") != "runtime"}
         self.hypotheses, self.hypothesis_history, self.scope_requests = [], [], []
 
@@ -43,7 +44,8 @@ class AdaptiveInvestigationPlanner:
                     related.add(edge["to_node_id"])
                 if edge["to_node_id"] in focus:
                     related.add(edge["from_node_id"])
-        fresh = [b for b in self.bindings if binding_is_current(b) and b["kind"] in {"service", "container"}]
+        kinds={'service','container','process'} if self.include_processes else {'service','container'}
+        fresh = [b for b in self.bindings if binding_is_current(b) and b["kind"] in kinds]
         authorized_names = {b["service"] for b in fresh}
         if include_authorized_scope:
             related.update(node_id for node_id, node in self.nodes.items() if node['name'] in authorized_names)
@@ -94,8 +96,15 @@ class AdaptiveInvestigationPlanner:
             for binding in fresh:
                 if binding["service"] != name:
                     continue
-                args = {"name": binding["runtime_id"]} if binding["kind"] == "service" else {"container_id": binding["runtime_id"]}
-                for suffix in ("status", "logs"):
+                if binding['kind']=='process':
+                    pid, start = binding['runtime_id'].split(':',1)
+                    args={'pid':int(pid),'start_time':start}
+                    for source in self.targets.get(binding['target_id'],{}).get('log_files',[]):
+                        if source['service']==name and source['pid']==int(pid) and source['start_time']==start:
+                            add('log.tail',node_id,{'file_id':source['file_id']},binding['target_id'],binding['id'])
+                else:
+                    args = {"name": binding["runtime_id"]} if binding["kind"] == "service" else {"container_id": binding["runtime_id"]}
+                for suffix in ('status',) if binding['kind']=='process' else ("status", "logs"):
                     add(f"{binding['kind']}.{suffix}", node_id, args, binding["target_id"], binding["id"])
                 for endpoint in self.targets.get(binding['target_id'], {}).get('health_endpoints', []):
                     if endpoint['service'] == name:

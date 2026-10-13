@@ -269,7 +269,7 @@ def execute(policy, tool, args, *, protocol=None):
             raise ValueError('Unsupported read protocol')
         legacy_tools = ('host.info', 'host.memory', 'host.disk', 'process.list', 'network.listeners',
                         'service.list', 'container.list', 'config.list', 'config.read')
-        if tool in legacy_tools:
+        if tool in legacy_tools and tool != 'process.list':
             return execute(policy, tool, args)
         return enhanced_read({**policy, 'legacy_tools': legacy_tools}, tool, args, secure_open=secure_open)
     allowed_keys = {

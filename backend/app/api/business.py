@@ -28,6 +28,7 @@ from app.connectors.models import (
     BindingReview,
     DockerReaderSelection,
     HealthEndpointSelection,
+    ProcessLogSelection,
     RuntimeTargetCreate,
     SSHPassword,
     ToolRequest,
@@ -372,6 +373,13 @@ def clear_ssh_password(business_id: str, target_id: str):
     config = runtime.get(business_id, target_id)
     SSH_SESSIONS.clear_target(config, s.settings.operator_id)
     return runtime.public(config)
+
+
+@router.patch('/businesses/{business_id}/targets/{target_id}/log-files')
+def select_log_files(business_id: str, target_id: str, request: ProcessLogSelection):
+    ensure_idle(business_id)
+    s=service()
+    return RuntimeService(s.db,s.settings).select_log_files(business_id,target_id,request)
 
 
 @router.post("/businesses/{business_id}/targets/{target_id}/discover", status_code=202)

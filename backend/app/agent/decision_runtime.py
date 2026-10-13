@@ -191,7 +191,8 @@ def facts_from_state(state: dict[str, Any]) -> list[dict[str, Any]]:
             failure_signal = False
             for event in normalize_log_events(text, {**payload, **evidence}):
                 line, stamp = event.raw_line, event.event_time_utc
-                if not stamp or stamp < window_start or stamp > observed + timedelta(seconds=5) or NON_EVENTS.search(line):
+                started = _parse_time(payload.get('started_at')) if state.get('decision_protocol') == 'ab_v1' else None
+                if not stamp or stamp < window_start or started and stamp < started or stamp > observed + timedelta(seconds=5) or NON_EVENTS.search(line):
                     continue
                 lowered = line.casefold()
                 failure_signal = failure_signal or any(

@@ -58,9 +58,9 @@ class BusinessToolRegistry:
         if action.get("binding_id"):
             if not binding or binding["status"] != "confirmed" or not binding_is_current(binding):
                 raise PermissionError("工具映射不属于 Run 的已确认有效 SSH 目标")
-            if binding["kind"] not in {"service", "container"}:
+            if binding["kind"] not in {"service", "container","process"}:
                 raise PermissionError("工具映射类型不允许用于本次调查")
-            if not tool.startswith(binding["kind"] + ".") and not tool.startswith("config.") and tool != 'health.get':
+            if not tool.startswith(binding["kind"] + ".") and not tool.startswith("config.") and tool not in {'health.get','log.tail'}:
                 raise PermissionError("工具类型与已确认映射不一致")
             if tool == 'health.get' and not any(endpoint['service'] == binding['service']
                     and endpoint['endpoint_id'] == action.get('arguments', {}).get('endpoint_id')
@@ -70,6 +70,14 @@ class BusinessToolRegistry:
                 raise PermissionError("服务参数与已确认映射不一致")
             if binding["kind"] == "container" and tool.startswith("container.") and action.get("arguments", {}).get("container_id") != binding["runtime_id"]:
                 raise PermissionError("容器参数与已确认映射不一致")
+            if binding['kind']=='process':
+                pid,start=binding['runtime_id'].split(':',1)
+                if tool=='process.status' and action.get('arguments')!={'pid':int(pid),'start_time':start}:
+                    raise PermissionError('进程参数与已确认启动身份不一致')
+                if tool=='log.tail' and not any(source['service']==binding['service'] and source['pid']==int(pid)
+                        and source['start_time']==start and source['file_id']==action.get('arguments',{}).get('file_id')
+                        for source in current.get('log_files',[])):
+                    raise PermissionError('固定日志不属于当前确认的业务进程')
 
     def execute(self, action):
         call_id = uid()
@@ -103,7 +111,7 @@ class BusinessToolRegistry:
                 with self.db.connect() as c:
                     binding = c.execute("SELECT * FROM service_bindings WHERE id=? AND business_id=? AND target_id=?",
                         (action.get("binding_id"), self.business_id, action.get("target_id"))).fetchone()
-                if not binding or not binding_is_current(binding) or binding["kind"] not in {"service", "container"}:
+                if not binding or not binding_is_current(binding) or binding["kind"] not in {"service", "container","process"}:
                     raise PermissionError("Agent 配置读取需要当前已确认的业务映射")
             if tool == "code.search":
                 payload = {

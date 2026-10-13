@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 from app.connectors.diagnostics import CapabilityUnavailable, ToolParseError
 from app.connectors.remote_reads import PROTOCOL, TOOLS
@@ -81,5 +82,24 @@ def validate_payload(tool, args, row, config):
         endpoint = next((e for e in config.get('health_endpoints', []) if e['endpoint_id'] == args['endpoint_id']), None)
         if (not endpoint or row.get('endpoint_id') != endpoint['endpoint_id'] or row.get('url') != endpoint['url']
                 or type(row.get('status_code')) is not int or not 100 <= row['status_code'] <= 599):
+            raise ToolParseError()
+    if tool == 'process.list':
+        rows=row.get('processes')
+        if not isinstance(rows,list) or len(rows)>100:
+            raise ToolParseError()
+        for item in rows:
+            if (not isinstance(item,dict) or type(item.get('pid')) is not int or not 1<=item['pid']<=4194304
+                    or not re.fullmatch(r'[a-f0-9-]{36}:[0-9]{1,20}',str(item.get('start_time','')))
+                    or item.get('id')!=str(item['pid'])+':'+item['start_time'] or item.get('kind')!='process'
+                    or not isinstance(item.get('name'),str) or not 1<=len(item['name'])<=128):
+                raise ToolParseError()
+    if tool == 'process.status' and (row.get('pid')!=args['pid'] or row.get('start_time')!=args['start_time']
+            or row.get('startup_cycle')!=args['start_time'] or row.get('state') not in {'running','exited'}):
+        raise ToolParseError()
+    if tool == 'log.tail':
+        source=next((item for item in config.get('log_files',[]) if item['file_id']==args['file_id']),None)
+        if (not source or row.get('file_id')!=source['file_id'] or row.get('pid')!=source['pid']
+                or row.get('start_time')!=source['start_time'] or row.get('startup_cycle')!=source['start_time']
+                or not isinstance(row.get('text'),str) or not row.get('partial') and row.get('cycle_verified') is not True):
             raise ToolParseError()
     return row

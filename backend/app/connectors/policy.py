@@ -64,8 +64,10 @@ def check(config, tool, arguments, approved=()):
         raise PermissionError('HTTP 端点未在当前目标的精确授权清单内')
     if tool == 'process.status' and ('process', str(args['pid']) + ':' + args['start_time']) not in approved:
         raise PermissionError('进程 PID 与启动时间尚未确认')
-    if tool == 'log.tail' and not any(row['file_id'] == args['file_id'] for row in config.get('log_files', [])):
-        raise PermissionError('日志文件标识尚未授权')
+    if tool == 'log.tail':
+        source = next((row for row in config.get('log_files', []) if row['file_id'] == args['file_id']), None)
+        if not source or ('process', str(source['pid']) + ':' + source['start_time']) not in approved:
+            raise PermissionError('日志文件标识或对应进程身份尚未授权')
     if tool.startswith("container.") and not config["docker_reads_enabled"]:
         raise PermissionError("没有授权 Docker 元数据读取；不访问 Docker socket")
     if tool.startswith("config."):

@@ -47,10 +47,10 @@ def clarification_candidates(evidence, previous=(), hints=(), limit=20):
     known = {(row['kind'], row['runtime_id']) for row in previous}
     choices = {}
     for item in evidence:
-        for field, kind in (('services', 'service'), ('containers', 'container')):
+        for field, kind in (('services', 'service'), ('containers', 'container'), ('processes','process')):
             for row in item['payload'].get(field, []):
                 key = (kind, row.get('id', ''))
-                if not key[1]:
+                if not key[1] or kind=='process' and key[1]!=str(row.get('pid'))+':'+str(row.get('start_time')):
                     continue
                 choices[key] = {'name': row.get('name', ''), 'runtime_id': key[1], 'kind': kind,
                                 'evidence_id': item['evidence_id'], 'previously_mapped': key in known,
@@ -150,12 +150,12 @@ class InvestigationBroker:
         self.symptom = json.loads(self.incident['symptom_json'])
         self.task_type = self.summary.get('task_type', self.symptom.get('task_type', 'root_cause_investigation'))
         service_nodes = {n['name']: n for n in self.graph['nodes'] if n['kind'] == 'service' and n['role'] != 'runtime'}
-        usable = [b for b in bindings if b['kind'] in {'service', 'container'} and b['service'] in service_nodes]
+        usable = [b for b in bindings if b['kind'] in {'service', 'container','process'} and b['service'] in service_nodes]
         usable.sort(key=lambda b: (b['service'].casefold() not in self.symptom['text'].casefold(),
                                   service_nodes[b['service']]['role'] != 'application', b['service']))
         self.root = service_nodes[usable[0]['service']]['id'] if usable else None
         self.planner = AdaptiveInvestigationPlanner(self.graph, bindings, {self.target_id: self.target},
-                                                   self.symptom['text'], self.root, settings)
+                                                   self.symptom['text'], self.root, settings, include_processes=True)
         self.manager = ContextBudgetManager(database, settings)
         self.budget_id = self.summary['budget_id']
         self.supervision = {'cancelled': self.cancelled, 'on_spawn': self.attach, 'authorize': self.authorize}
@@ -196,6 +196,9 @@ class InvestigationBroker:
                                   'requirement_id': h.get('error_code') or 'runtime_read_failed'}
                                  for h in self.history if h['status'] != 'succeeded'],
                 'scope_omission_count': max(0, len(names) - 20)}
+        if state['scope_omission_count']:
+            state['runtime_gaps'].append({'rule_id': 'runtime_read', 'target_ids': [],
+                                          'requirement_id': 'scope_capacity_omissions'})
         facts = facts_from_state(state)
         has_faults = any(f['kind'] == 'service_state' and f['value'] not in {'active', 'running', 'healthy'}
                          or f['kind'] == 'log_observation'
@@ -208,7 +211,7 @@ class InvestigationBroker:
                      for e in self.target.get('health_endpoints', []) if e['service'] in service_ids]
         for e in self.evidence:
             node = e['target_node_id']
-            kind = e['tool_id'].rsplit('.', 1)[-1]
+            kind = 'logs' if e['tool_id']=='log.tail' else e['tool_id'].rsplit('.', 1)[-1]
             payload = e['payload']
             if node not in scope or kind not in {'status', 'logs', 'get'} or any(payload.get(k) for k in ('partial', 'truncated', 'timeout')):
                 continue
@@ -272,7 +275,7 @@ class InvestigationBroker:
         outcome = self.registry.execute(action)
         if outcome.get('evidence_id'):
             payload = semantic_payload(outcome['payload'])
-            if action['tool_id'].endswith('.logs') and isinstance(payload.get('text'), str):
+            if (action['tool_id'].endswith('.logs') or action['tool_id']=='log.tail') and isinstance(payload.get('text'), str):
                 payload = {**payload, 'text': [e.message for e in normalize_log_events(payload['text'], outcome)]}
             fingerprint = digest({'target': action['target_node_id'], 'tool': action['tool_id'], 'payload': payload})
             changed = fingerprint not in self.seen
@@ -295,7 +298,7 @@ class InvestigationBroker:
                       else 'config.read' if 'endpoint' in requirement else None)
             if suffix:
                 for action in actions:
-                    if action['target_node_id'] in gap['target_ids'] and action['tool_id'].endswith(suffix):
+                    if action['target_node_id'] in gap['target_ids'] and (action['tool_id'].endswith(suffix) or suffix=='logs' and action['tool_id']=='log.tail'):
                         return gap, action
         return None
 
@@ -316,7 +319,7 @@ class InvestigationBroker:
         scope = set(self.state()['scope_node_ids'])
         actions = [a for a in actions if a['target_node_id'] in scope]
         if self.task_type == 'health_check':
-            actions = [a for a in actions if a['tool_id'].endswith(('.status', '.logs')) or a['tool_id'] == 'health.get']
+            actions = [a for a in actions if a['tool_id'].endswith(('.status', '.logs')) or a['tool_id'] in {'health.get','log.tail'}]
         if not actions:
             return self.finish('no_authorized_actions')
         if self.supplement and self.supplement.get('executed'):
@@ -389,7 +392,7 @@ class InvestigationBroker:
         anchor = self.graph['nodes'][0]['id'] if self.graph['nodes'] else None
         if not anchor:
             return self.finish('scope_identity_missing')
-        for tool in ('host.info', 'service.list', 'container.list'):
+        for tool in ('host.info', 'service.list', 'container.list','process.list'):
             if any(h['tool_id'] == tool for h in self.history):
                 continue
             if tool == 'container.list' and not self.target.get('docker_reads_enabled'):
@@ -496,7 +499,7 @@ def confirm_runtime_options(database, settings, run_id, business_id, target_id, 
             stamp = parse_time(observed['observed_at'])
             if not stamp or not stamp <= datetime.now(timezone.utc) < stamp + timedelta(seconds=BINDING_TTL_SECONDS):
                 raise ValueError('原发现观测已过期，需要重新采集，不能用答案刷新证据时间')
-            field = 'services' if option['kind'] == 'service' else 'containers'
+            field = {'service':'services','container':'containers','process':'processes'}[option['kind']]
             candidate = next((row for row in json.loads(observed['payload_redacted_json']).get(field, [])
                              if row.get('id') == option['runtime_id'] and row.get('kind') == option['kind']), None)
             if candidate is None:
@@ -536,7 +539,7 @@ def resume_run(database, settings, run_id, answer, *, actor='operator'):
             summary = json.loads(run['summary_json'])
             business_id, target_id = summary['business_id'], run['target_id']
             bindings = [dict(row) for row in tx.execute('SELECT * FROM service_bindings WHERE business_id=? AND target_id=?',
-                        (business_id, target_id)) if binding_is_current(row) and row['kind'] in {'service', 'container'}]
+                        (business_id, target_id)) if binding_is_current(row) and row['kind'] in {'service', 'container','process'}]
             current_graph_row = tx.execute('SELECT id FROM graph_snapshots WHERE system_id=(SELECT system_id FROM incidents WHERE id=?) ORDER BY version DESC LIMIT 1',
                                            (run['incident_id'],)).fetchone()
         target = RuntimeService(database, settings).get(business_id, target_id)

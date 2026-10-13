@@ -11,8 +11,8 @@ from app.agent.mechanisms import MechanismRegistry
 
 FAILED = {"failed", "exited", "dead", "inactive", "restarting"}
 HEALTHY = {"active", "running", "healthy"}
-STATUS_TOOLS = {"service.status", "container.status", "compose.status"}
-LOG_TOOLS = {"service.logs", "container.logs"}
+STATUS_TOOLS = {"service.status", "container.status", "compose.status", "process.status"}
+LOG_TOOLS = {"service.logs", "container.logs", "log.tail"}
 MECHANISMS = MechanismRegistry.patterns()
 NON_EVENTS = re.compile(r"historical|example|test message|simulated example|not failed|no failure", re.I)
 GENERIC_LOG_SIGNALS = {"error", "failed", "exception", "unavailable", "timeout", "traceback"}

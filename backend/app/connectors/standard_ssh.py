@@ -225,7 +225,7 @@ class StandardSSHConnector(SSHConnector):
         restricted = self.config.get("docker_reader") == "restricted_list" and tool == "container.list"
         enhanced = self.config.get('_read_protocol') == 'ab_v1' and tool in {
             'capabilities', 'health.get', 'container.status', 'container.logs', 'service.status',
-            'service.logs', 'process.status', 'log.tail'}
+            'service.logs', 'process.list', 'process.status', 'log.tail'}
         command = DOCKER_LIST_COMMAND if restricted else '' if enhanced else command_for(tool, args)
         deadline, budget = time.monotonic() + self.config["timeout_seconds"], [0]
         with self.connection() as client:
@@ -247,7 +247,7 @@ class StandardSSHConnector(SSHConnector):
             stdin = None
             if self.config.get('_read_protocol') == 'ab_v1' and tool in {
                 'capabilities', 'health.get', 'container.status', 'container.logs', 'service.status',
-                'service.logs', 'process.status', 'log.tail',
+                'service.logs', 'process.list', 'process.status', 'log.tail',
             }:
                 from app.connectors.capabilities import (
                     decode,
@@ -263,7 +263,9 @@ class StandardSSHConnector(SSHConnector):
                           'docker_reads_enabled': self.config['docker_reads_enabled'],
                           'health_endpoints': self.config.get('health_endpoints', []),
                           'allowed_paths': self.config['allowed_paths'],
-                          'processes': self.config.get('processes', []), 'log_files': self.config.get('log_files', [])}
+                          'processes': [{'pid':int(v.split(':',1)[0]),'start_time':v.split(':',1)[1]}
+                                        for k,v in approved if k=='process'],
+                          'log_files': self.config.get('log_files', [])}
 
                 def read_remote(identifier, arguments):
                     request = json.dumps({'policy': policy, 'tool_id': identifier, 'arguments': arguments}).encode()

@@ -1054,7 +1054,7 @@ export function BusinessPages({
               </p>
               {bindings
                 .filter(
-                  (b) => b.target_id === chosenTarget && b.status !== "stale" && b.kind !== "process",
+                  (b) => b.target_id === chosenTarget && b.status !== "stale" && (b.kind !== "process" || /^\d+:[a-f0-9-]{36}:\d+$/.test(b.runtime_id)),
                 )
                 .map((b) => (
                   <div key={b.id} className="business-row">
@@ -1135,6 +1135,20 @@ export function BusinessPages({
           </div>
           {target && (
             <section className="panel business-block">
+              {confirmed.some(b=>b.kind==='process') && <form className="form" onSubmit={event=>{
+                event.preventDefault();const form=new FormData(event.currentTarget);
+                const binding=confirmed.find(b=>b.id===form.get('process_binding') && b.kind==='process');
+                if(!binding)return;
+                const [pid,...start]=binding.runtime_id.split(':');
+                const source={file_id:String(form.get('log_id')),path:String(form.get('log_path')),service:binding.service,pid:Number(pid),start_time:start.join(':')};
+                void act(()=>api(base+`/targets/${chosenTarget}/log-files`,{method:'PATCH',body:JSON.stringify({log_files:[...(target?.log_files||[]).filter((row:Row)=>row.file_id!==source.file_id),source]})}));
+              }}>
+                <h2>普通进程的固定日志</h2><p>选择已确认的启动身份，并填写授权业务目录内的日志文件。进程重启后需要重新确认。</p>
+                <label>已确认的普通进程<select name="process_binding" required>{confirmed.filter(b=>b.kind==='process').map(b=><option key={b.id} value={b.id}>{b.service} · {b.runtime_id}</option>)}</select></label>
+                <label>日志标识<input name="log_id" required maxLength={80} pattern="[A-Za-z0-9][A-Za-z0-9_.-]*" /></label>
+                <label>固定日志路径<input name="log_path" required maxLength={240} placeholder="授权业务目录内的完整路径" /></label>
+                <button className="btn" disabled={busy}>保存固定日志</button>
+              </form>}
               <h2>授权范围内追加读取</h2>
               <form
                 className="business-actions"
@@ -1149,11 +1163,14 @@ export function BusinessPages({
                       ? { name: b?.runtime_id }
                       : ["container.status", "container.logs"].includes(tool)
                         ? { container_id: b?.runtime_id }
-                        : {};
+                        : tool === 'process.status' && b?.kind === 'process'
+                          ? {pid:Number(b.runtime_id.split(':')[0]),start_time:b.runtime_id.split(':').slice(1).join(':')}
+                          : tool === 'log.tail' ? {file_id:f.get('log_file')}
+                          : tool === 'health.get' ? {endpoint_id:f.get('health_endpoint')} : {};
                   void act(() =>
                     api(base + `/targets/${chosenTarget}/tools`, {
                       method: "POST",
-                      body: JSON.stringify({ tool_id: tool, arguments: args }),
+                      body: JSON.stringify({ tool_id: tool, arguments: args, read_protocol:'ab_v1' }),
                     }),
                   );
                 }}
@@ -1164,6 +1181,9 @@ export function BusinessPages({
                     "host.memory",
                     "host.disk",
                     "process.list",
+                    "process.status",
+                    "log.tail",
+                    "health.get",
                     "network.listeners",
                     "service.list",
                     "container.list",
@@ -1177,6 +1197,8 @@ export function BusinessPages({
                     <option key={t}>{t}</option>
                   ))}
                 </select>
+                <select name="log_file" aria-label="固定日志标识"><option value="">选择固定日志</option>{(target?.log_files||[]).map((row:Row)=><option key={row.file_id} value={row.file_id}>{row.service} · {row.file_id}</option>)}</select>
+                <select name="health_endpoint" aria-label="已授权健康端点"><option value="">选择健康端点</option>{(target?.health_endpoints||[]).map((row:Row)=><option key={row.endpoint_id} value={row.endpoint_id}>{row.service} · {row.endpoint_id}</option>)}</select>
                 <select name="binding" aria-label="已确认服务">
                   <option value="">已确认服务</option>
                   {confirmed.map((b) => (

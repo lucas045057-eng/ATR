@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 PROTOCOL = 'atr-read-ab-v1'
 SCHEMA_VERSION = 1
 TOOLS = {'capabilities': 1, 'health.get': 1, 'container.status': 2, 'container.logs': 2,
-         'service.status': 2, 'service.logs': 2, 'process.status': 1, 'log.tail': 1}
+         'service.status': 2, 'service.logs': 2, 'process.list': 2, 'process.status': 2, 'log.tail': 2}
 CAP = 48000
 NAME = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,254}$')
 CID = re.compile(r'^[a-f0-9]{12,64}$')
@@ -146,11 +146,36 @@ def process_identity(pid):
     fields = text[close+2:].split()
     if len(fields) < 20:
         raise ValueError('Incomplete process identity')
-    with open('/proc/sys/kernel/random/boot_id', encoding='ascii') as stream:
-        boot_id = stream.read(80).strip()
+    boot_id,boot,ticks = kernel_process_clock()
+    if not re.fullmatch(r'[a-f0-9-]{36}', boot_id) or not fields[19].isdigit():
+        raise ValueError('Invalid kernel start identity')
     return {'pid': pid, 'name': text[text.find('(')+1:close], 'state': 'exited' if fields[0] in {'Z', 'X'} else 'running',
             'process_state': fields[0],
+            'started_at': datetime.fromtimestamp(boot + int(fields[19])/ticks, timezone.utc).isoformat(),
             'start_time': boot_id + ':' + fields[19]}
+
+
+def kernel_process_clock():
+    with open('/proc/sys/kernel/random/boot_id', encoding='ascii') as stream:
+        boot_id=stream.read(80).strip()
+    with open('/proc/stat', encoding='ascii') as stream:
+        boot=next(int(line.split()[1]) for line in stream if line.startswith('btime '))
+    return boot_id,boot,os.sysconf('SC_CLK_TCK')
+
+
+def confirmed_process_status(pid,start):
+    try:
+        result=process_identity(pid)
+    except FileNotFoundError:
+        boot,epoch,ticks=kernel_process_clock()
+        expected,_,tick_value=start.partition(':')
+        if boot!=expected or not tick_value.isdigit():
+            raise PermissionError('Process start identity predates current boot') from None
+        result={'pid':pid,'start_time':start,'state':'exited',
+                'started_at':datetime.fromtimestamp(epoch+int(tick_value)/ticks,timezone.utc).isoformat()}
+    if result['start_time']!=start:
+        raise PermissionError('Process identity was reused')
+    return result
 
 
 def secure_file(path, roots):
@@ -175,7 +200,8 @@ def secure_file(path, roots):
 def execute(policy, tool, args, *, secure_open=None):
     keys = {'capabilities': set(), 'health.get': {'endpoint_id'}, 'container.status': {'container_id'},
             'container.logs': {'container_id', 'tail'}, 'service.status': {'name'},
-            'service.logs': {'name', 'tail'}, 'process.status': {'pid', 'start_time'}, 'log.tail': {'file_id', 'tail'}}
+            'service.logs': {'name', 'tail'}, 'process.list': {'limit','name_hints','cursor'},
+            'process.status': {'pid', 'start_time'}, 'log.tail': {'file_id', 'tail'}}
     if tool not in keys or type(args) is not dict or set(args) - keys[tool]:
         raise PermissionError('Unknown remote tool or arguments')
     tail = args.get('tail', 80)
@@ -184,7 +210,39 @@ def execute(policy, tool, args, *, secure_open=None):
     deadline = time.monotonic() + 8
     if tool == 'capabilities':
         return capabilities(policy.get('legacy_tools', ()))
-    if tool == 'health.get':
+    if tool == 'process.list':
+        limit=args.get('limit',60)
+        hints=args.get('name_hints',[])
+        cursor=args.get('cursor','')
+        if (type(limit) is not int or not 1<=limit<=100 or not isinstance(hints,list) or len(hints)>8
+                or any(not isinstance(h,str) or not NAME.fullmatch(h) for h in hints)
+                or not isinstance(cursor,str) or cursor and not re.fullmatch(r'0:[0-9]{1,7}',cursor)):
+            raise ValueError('Invalid process inventory bounds')
+        after=int(cursor[2:]) if cursor else 0
+        rows=[]
+        invalid=0
+        candidates=sorted(int(name) for name in os.listdir('/proc') if name.isdecimal() and int(name)>after)
+        last=after
+        for pid in candidates:
+            if time.monotonic()>deadline:
+                break
+            last=pid
+            try:
+                item=process_identity(pid)
+                if not item['name'] or len(item['name'])>128 or any(ord(c)<32 for c in item['name']):
+                    raise ValueError('Invalid process name')
+            except (FileNotFoundError,ProcessLookupError,PermissionError,ValueError,StopIteration):
+                invalid+=1
+                continue
+            if hints and not any(h.casefold() in item['name'].casefold() for h in hints):
+                continue
+            rows.append({**item,'id':str(pid)+':'+item['start_time'],'kind':'process'})
+            if len(rows)>=limit:
+                break
+        more=bool(candidates and last<candidates[-1])
+        result={'processes':rows,'partial':more or bool(invalid),'invalid_records':invalid,
+                'truncated':more,'next_cursor':'0:'+str(last) if more else None}
+    elif tool == 'health.get':
         endpoint = next((row for row in policy.get('health_endpoints', [])
                          if row['endpoint_id'] == args.get('endpoint_id')), None)
         if endpoint is None:
@@ -240,18 +298,17 @@ def execute(policy, tool, args, *, secure_open=None):
         allowed = any(row.get('pid') == pid and row.get('start_time') == start for row in policy.get('processes', []))
         if not allowed:
             raise PermissionError('Process outside server policy')
-        try:
-            result = process_identity(pid)
-        except FileNotFoundError:
-            result = {'pid': pid, 'start_time': start, 'state': 'exited'}
-        if result['start_time'] != start:
-            raise PermissionError('Process identity was reused')
+        result = confirmed_process_status(pid,start)
         result['startup_cycle'] = start
         result['text'] = result['state']
     else:
         source = next((row for row in policy.get('log_files', []) if row.get('file_id') == args.get('file_id')), None)
         if source is None or secure_open is None:
             raise PermissionError('Log source outside server policy')
+        pid,start=source.get('pid'),source.get('start_time')
+        if type(pid) is not int or not any(p.get('pid')==pid and p.get('start_time')==start for p in policy.get('processes',[])):
+            raise PermissionError('Log process identity outside server policy')
+        before=confirmed_process_status(pid,start)
         fd = secure_open(source['path'], policy.get('allowed_paths', []))
         import stat
         try:
@@ -264,8 +321,11 @@ def execute(policy, tool, args, *, secure_open=None):
             if offset:
                 raw = raw.partition(b'\n')[2]
             text = '\n'.join(raw.decode('utf-8', errors='strict').splitlines()[-tail:])
-            result = {'file_id': source['file_id'], 'text': text, 'startup_cycle': source.get('startup_cycle'),
-                      'partial': bool(offset), 'truncated': bool(offset), 'file_identity': [info.st_dev, info.st_ino]}
+            after=confirmed_process_status(pid,start)
+            stable=before['start_time']==after['start_time'] and os.fstat(fd).st_size>=info.st_size
+            result = {'file_id': source['file_id'], 'text': text, 'startup_cycle': start,
+                      'started_at':before['started_at'], 'pid':pid, 'start_time':start, 'cycle_verified':stable,
+                      'partial': bool(offset) or not stable, 'truncated': bool(offset), 'file_identity': [info.st_dev, info.st_ino]}
         finally:
             os.close(fd)
     result.update(protocol=PROTOCOL, tool_version=TOOLS[tool], observed_host=socket.gethostname(),

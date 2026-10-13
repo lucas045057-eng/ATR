@@ -72,7 +72,7 @@ def test_empty_pending_profile_discovers_and_releases_process(client):
     assert not run['completion_satisfied']
     assert run['clarification']['question_id']
     assert run['summary']['task_type'] == 'root_cause_investigation'
-    assert {c['tool_id'] for c in run['tool_calls']} == {'host.info', 'service.list', 'container.list'}
+    assert {c['tool_id'] for c in run['tool_calls']} == {'host.info', 'service.list', 'container.list','process.list'}
     assert all(c['status'] == 'succeeded' for c in run['tool_calls'])
     assert client.get(f"/api/v1/businesses/{profile['business_id']}").json()['review_status'] == 'pending'
     assert json.loads(run['budget_json'])['max_seconds'] == 600

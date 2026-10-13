@@ -23,6 +23,19 @@ class HealthEndpoint(StrictModel):
         return validate_url(value)
 
 
+class ProcessLogSource(StrictModel):
+    file_id: str = Field(pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$')
+    path: str = Field(min_length=1, max_length=240)
+    service: str = Field(min_length=1, max_length=255)
+    pid: int = Field(ge=1, le=4194304, strict=True)
+    start_time: str = Field(pattern=r'^[a-f0-9-]{36}:[0-9]{1,20}$')
+
+    @field_validator('path')
+    @classmethod
+    def exact_path(cls, value):
+        return authorized_path(value)
+
+
 def authorized_path(value):
     path = PurePosixPath(value)
     if (
@@ -50,6 +63,7 @@ class RuntimeTargetCreate(StrictModel):
     host_public_key: str = Field(default="", max_length=2048)
     allowed_paths: list[str] = Field(default_factory=list, max_length=20)
     health_endpoints: list[HealthEndpoint] = Field(default_factory=list, max_length=20)
+    log_files: list[ProcessLogSource] = Field(default_factory=list, max_length=20)
     max_calls: int = Field(default=100, ge=1, le=1000)
     timeout_seconds: int = Field(default=10, ge=1, le=60)
     max_output_bytes: int = Field(default=48000, ge=1024, le=64000)
@@ -71,6 +85,11 @@ class RuntimeTargetCreate(StrictModel):
         for row in self.health_endpoints:
             if urlsplit(row.url).hostname not in {self.host.lower(), '127.0.0.1', 'localhost', '::1'}:
                 raise ValueError('健康端点只能观察当前 SSH 目标或该目标的 loopback')
+        if len({row.file_id for row in self.log_files}) != len(self.log_files):
+            raise ValueError('固定日志标识不能重复')
+        for row in self.log_files:
+            if not any(PurePosixPath(row.path).is_relative_to(PurePosixPath(root)) for root in self.allowed_paths):
+                raise ValueError('固定日志路径必须位于当前明确授权的业务目录')
         return self
 
     @field_validator("allowed_paths")
@@ -104,6 +123,10 @@ class ToolRequest(StrictModel):
 
 class HealthEndpointSelection(StrictModel):
     health_endpoints: list[HealthEndpoint] = Field(max_length=20)
+
+
+class ProcessLogSelection(StrictModel):
+    log_files: list[ProcessLogSource] = Field(max_length=20)
 
 
 class SSHPassword(StrictModel):

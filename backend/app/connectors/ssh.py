@@ -181,7 +181,7 @@ class SSHConnector:
                 require_tool(caps, tool)
                 payload = receive({'tool_id': tool, 'arguments': args, 'protocol': PROTOCOL})
                 if tool in {'health.get', 'container.status', 'container.logs', 'service.status', 'service.logs',
-                            'process.status', 'log.tail'}:
+                              'process.list', 'process.status', 'log.tail'}:
                     validate_payload(tool, args, payload, self.config)
                 payload.update(capabilities=caps, connector='ssh')
                 return payload
