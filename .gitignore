@@ -18,3 +18,4 @@ Thumbs.db
 *.egg-info/
 test-results/
 .local/
+!third_party/licenses/**
