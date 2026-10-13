@@ -10,6 +10,7 @@ from app.business.models import BusinessCreate, BusinessProfile, BusinessReview
 from app.business.profile import build_static, claim
 from app.common import digest, dumps, now, uid
 from app.context.budget import BudgetExceeded, ContextBudgetManager
+from app.context.capabilities import vision_ready
 from app.context.model import ModelUnavailable, call_json
 from app.context.model_errors import ModelCallError, diagnostic
 from app.tools.redaction import redact_text
@@ -403,7 +404,7 @@ class BusinessService:
             parsed.update(parse_state='partial_media',reason='媒体处理未完成；已完成页面已保存，可从原游标继续')
         return {**row['analysis'],**parsed,'derived_path':str(output.relative_to(directory)),
                 'media_elapsed_ms':round((time.monotonic()-stage_started)*1000,3),
-                'vision_available':self.settings.model_vision_supported,
+                'vision_available':vision_ready(self.settings),
                 'reason':parsed.get('reason') or '本地文字和页图已处理；图形含义仍需真实视觉能力核验'}
 
     def process_media_vision(self,directory,row,parsed,budget_id,deadline):
@@ -417,7 +418,7 @@ class BusinessService:
             if page.get('external_paused'):
                 page['vision_state']='paused_sensitive_or_local_failure'
                 continue
-            if not self.settings.model_vision_supported:
+            if not vision_ready(self.settings):
                 page['vision_state']='vision_unavailable'
                 continue
             if page.get('vision_state')=='completed' and page.get('vision_configuration_digest')==config:

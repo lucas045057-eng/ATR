@@ -350,7 +350,8 @@ export function BusinessPages({
               <p className="muted">
                 模型：{model.model || "未配置"} · 外部分析：
                 {model.external_analysis_enabled ? "已启用" : "未启用"} ·
-                初次分析只发送摘要和索引。
+                视觉：{model.vision_verified?'真实检测通过':model.vision_declared?'已声明，尚未检测':'尚未检测'} ·
+                模型理解会使用资料摘要和安全页图，可疑秘密所在素材暂停外发。
               </p>
               <button
                 className="btn"
@@ -361,6 +362,8 @@ export function BusinessPages({
               >
                 按预算进行模型理解
               </button>{" "}
+              <button className="btn" disabled={busy||!model.configured||!model.external_analysis_enabled} onClick={()=>act(()=>api('/model/probe-vision',{method:'POST'}))}>检测当前模型的视觉能力</button>
+              <p>沿用当前模型服务发送一张生成的测试卡，最多等待 45 秒。检测通过后自动用于资料图片理解；密钥不进入资料内容。</p>
               <button
                 className="btn primary"
                 disabled={busy}

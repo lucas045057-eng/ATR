@@ -90,12 +90,17 @@ def _completion(**request):
 
 
 def capabilities(settings):
+    from app.context.capabilities import verified_vision, vision_ready
+    proof=verified_vision(settings)
     return {
         "configured": bool(settings.model_name and settings.model_api_key.get_secret_value()),
         "external_analysis_enabled": settings.external_model_enabled,
         "text": True,
         "structured_json": settings.model_json_supported,
         "vision_declared": settings.model_vision_supported,
+        "vision_verified":proof is not None,
+        "vision_available":vision_ready(settings),
+        "vision_checked_at":proof.get('checked_at') if proof else None,
         "vision_adapter": "chat_completions_and_native_responses",
         "context_window": settings.model_context_window,
         "usage": "provider_actual_or_explicit_estimate",
@@ -135,7 +140,8 @@ def call_json(database, settings, budget_id, system_prompt, context, validate=No
         raise ModelUnavailable("模型未配置或外部分析尚未启用")
     if not settings.model_json_supported:
         raise ModelUnavailable("模型未声明 JSON 结构化输出支持")
-    if images and not settings.model_vision_supported:
+    from app.context.capabilities import vision_ready
+    if images and not vision_ready(settings):
         raise ModelUnavailable('模型未声明视觉能力')
     messages = model_messages(system_prompt, context, images)
     if supervision is not None:

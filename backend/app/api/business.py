@@ -320,6 +320,15 @@ def model_capabilities():
     return capabilities(get_settings())
 
 
+@router.post('/model/probe-vision',status_code=202)
+def probe_model_vision():
+    from app.context.capabilities import probe_vision
+    s=service()
+    job_id=reserve(s.db,'model_vision_probe')
+    submit(s.db,job_id,lambda:probe_vision(s.db,s.settings))
+    return {'job_id':job_id,'status':'queued'}
+
+
 @router.get("/jobs/{job_id}")
 def get_job(job_id: str):
     conn = service().db.connect()
