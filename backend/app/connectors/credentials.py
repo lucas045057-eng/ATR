@@ -73,6 +73,12 @@ class SessionCredentials:
                 return {"state": "required", "expires_at": None}
             return {"state": "ready", "expires_at": self._entries[config["credential_ref"]].expires_at}
 
+    def grant(self, config, owner):
+        with self._lock:
+            password = self.resolve(config, owner)
+            entry = self._entries[config["credential_ref"]]
+            return {"password": password.get_secret_value(), "ttl": entry.deadline - time.monotonic()}
+
     def revoke(self, config, owner):
         with self._lock:
             entry = self._entries.get(config.get("credential_ref", ""))
