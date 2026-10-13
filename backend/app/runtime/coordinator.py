@@ -15,7 +15,7 @@ from app.context.budget import interrupt_usage
 from app.tools.registry import sanitize_payload
 
 ACTIVE = {'queued', 'running', 'waiting_input'}
-TERMINAL = {'completed', 'cancelled', 'timed_out', 'interrupted'}
+TERMINAL = {'completed', 'failed', 'cancelled', 'timed_out', 'interrupted'}
 DIAGNOSES = {'root_cause_supported', 'partial', 'unresolved', 'no_fault_observed'}
 
 

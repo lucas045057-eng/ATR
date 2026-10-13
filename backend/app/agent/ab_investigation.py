@@ -207,9 +207,9 @@ class InvestigationBroker:
             tx.execute('UPDATE diagnosis_runs SET summary_json=? WHERE id=?', (dumps(sanitize_payload(self.summary)), self.run_id))
             tx.execute('UPDATE run_executions SET result_json=? WHERE run_id=?', (dumps(self.result), self.run_id))
 
-    def finish(self, reason):
+    def finish(self, reason, execution='completed'):
         self.persist()
-        self.coordinator.finalize(self.run_id, 'completed', self.result,
+        self.coordinator.finalize(self.run_id, execution, self.result,
                                   lease_token=self.lease['lease_token'], reason=reason)
         return {'continue': False}
 
@@ -307,7 +307,7 @@ class InvestigationBroker:
             self.summary['model_error'] = getattr(exc, 'diagnostic', {'code': type(exc).__name__})
             self.persist()
             if self.error_rounds >= 2:
-                return self.finish('model_unavailable')
+                return self.finish('model_unavailable', 'failed')
             return {'continue': True}
         self.collect(action)
         if self.result['completion_satisfied']:
@@ -374,7 +374,7 @@ class InvestigationBroker:
         except InterruptedError:
             pass
         except Exception as exc:
-            self.coordinator.finalize(self.run_id, 'timed_out' if isinstance(exc, TimeoutError) else 'interrupted',
+            self.coordinator.finalize(self.run_id, 'timed_out' if isinstance(exc, TimeoutError) else 'failed',
                                       self.result, lease_token=self.lease['lease_token'], reason=type(exc).__name__)
             if str(exc) == 'Process broker cleanup pending':
                 return

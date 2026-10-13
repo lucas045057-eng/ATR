@@ -623,7 +623,7 @@ def start_run(incident_id: str, request: InvestigationRunRequest | None = None,
     finally:
         conn.close()
     protocol = request.decision_protocol if request and request.decision_protocol else settings.agent_decision_protocol
-    if business and protocol == 'ab_v1':
+    if business and protocol == 'ab_v1' and decode(incident['symptom_json']).get('mode', 'normal') in {'normal', 'graph_adaptive'}:
         from app.agent.ab_investigation import dispatch_ready, prepare_run
         run_id = None
         if created:
