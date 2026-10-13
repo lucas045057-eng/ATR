@@ -19,6 +19,7 @@ from app.business.models import (
     CodeSearch,
     ManualMediaReview,
     MediaBatchReview,
+    MediaContinuation,
 )
 from app.business.service import BusinessService
 from app.business.source_index import SourceIndex
@@ -198,6 +199,17 @@ def analyze(business_id: str):
     job_id = reserve(s.db, "analyze", business_id)
     submit(s.db, job_id, lambda: s.analyze(business_id))
     return {"job_id": job_id, "status": "queued"}
+
+
+@router.post('/businesses/{business_id}/files/{file_id}/media-continue',status_code=202)
+def continue_media(business_id: str,file_id: str,request: MediaContinuation):
+    ensure_idle(business_id)
+    s=service()
+    if s.get(business_id)['profile_version']!=request.expected_version:
+        raise ValueError('媒体来源版本已变化，请重新加载')
+    job_id=reserve(s.db,'media',business_id)
+    submit(s.db,job_id,lambda:s.continue_media(business_id,file_id,request.expected_version))
+    return {'job_id':job_id,'status':'queued'}
 
 
 @router.post("/businesses/{business_id}/review")

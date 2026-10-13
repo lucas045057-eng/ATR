@@ -42,6 +42,24 @@ def responses_text(body):
     return ''.join(parts)
 
 
+def responses_input(messages):
+    converted=[]
+    for message in messages:
+        if isinstance(message['content'],str):
+            converted.append(message)
+            continue
+        parts=[]
+        for part in message['content']:
+            if part['type']=='text':
+                parts.append({'type':'input_text','text':part['text']})
+            elif part['type']=='image_url':
+                parts.append({'type':'input_image','image_url':part['image_url']['url'],'detail':part['image_url']['detail']})
+            else:
+                raise ValueError('Unsupported Responses input')
+        converted.append({'role':message['role'],'content':parts})
+    return converted
+
+
 def main():
     output = os.fdopen(os.dup(sys.stdout.fileno()), "w", encoding="utf-8")
     os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
@@ -108,7 +126,7 @@ def main():
                     if not urlsplit(base).path:
                         base += '/v1'
                     response_options = dict(model=request['model'], api_base=base, api_key=request['api_key'],
-                                            input=request['messages'], timeout=request['timeout'], num_retries=0,
+                                            input=responses_input(request['messages']), timeout=request['timeout'], num_retries=0,
                                             max_output_tokens=request['max_tokens'], store=False, stream=False,
                                             text={'format': request['response_format']}, client=HTTPHandler(client=http_client))
                     if effort:

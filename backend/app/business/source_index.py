@@ -83,6 +83,11 @@ class SourceIndex:
             symbol = matches[0]
             start = symbol["start"]
         lines = raw.decode("utf-8-sig").splitlines()
+        for operation in json.loads(row['parse_json']).get('data_operations',[]):
+            if operation.get('sensitive'):
+                for reference in operation.get('source_refs',[]):
+                    for line in range(reference['start_line']-1,min(len(lines),reference['end_line'])):
+                        lines[line]='[已隐藏涉及凭据的数据操作，原行号保留]'
         text = redact_text("\n".join(lines[start - 1 : start - 1 + request.max_lines]))
         if budget_id:
             ContextBudgetManager(self.db, self.settings).retrieval(budget_id, len(text.encode()))

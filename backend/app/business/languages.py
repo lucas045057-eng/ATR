@@ -18,7 +18,7 @@ GRAMMARS = {'JavaScript': ('tree_sitter_javascript', 'language'),
             'Java': ('tree_sitter_java', 'language'), 'C': ('tree_sitter_c', 'language'),
             'C++': ('tree_sitter_cpp', 'language')}
 HTTP = {'get', 'post', 'put', 'patch', 'delete', 'head', 'options'}
-VERSION = 'ab-source-syntax-1'
+VERSION = 'ab-source-syntax-2'
 
 
 def sql_operation(text, ref):
@@ -27,10 +27,12 @@ def sql_operation(text, ref):
     if not match:
         return None
     keyword = match[1].upper()
+    sensitive=bool(re.search(r'(?i)\b(?:password|passwd|api_key|secret|access_token|refresh_token|private_key)\b',stripped))
     tables = re.findall(r'(?i)\b(?:FROM|INTO|UPDATE|JOIN|TABLE)\s+["`]?([A-Za-z_][A-Za-z0-9_.]*)', stripped)
     return {'operation': 'read' if keyword == 'SELECT' else 'write', 'sql_verb': keyword,
             'tables': list(dict.fromkeys(tables))[:8], 'probe': bool(re.fullmatch(r'(?is)SELECT\s+1\s*;?', stripped)),
-            'query': redact_text(stripped)[:600], 'source_refs': [ref]}
+            'query': keyword+' [REDACTED_SENSITIVE_SQL]' if sensitive else redact_text(stripped)[:600],
+            'sensitive':sensitive, 'source_refs': [ref]}
 
 
 def describe_language(path: Path | str, content: str) -> dict:
@@ -198,7 +200,15 @@ def _python(content, relative, info, ref):
                 if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
                     operation = sql_operation(argument.value, source)
                     if operation:
-                        info['data_operations'].append({**operation, 'function': caller, 'line': node.lineno})
+                        parameters=[]
+                        for other in node.args:
+                            if other is argument:
+                                continue
+                            values=other.elts if isinstance(other,(ast.Tuple,ast.List)) else [other]
+                            parameters += [redact_text(str(value.value))[:120] for value in values
+                                           if isinstance(value,ast.Constant) and isinstance(value.value,(str,int,float,bool))]
+                        info['data_operations'].append({**operation, 'function': caller, 'line': node.lineno,
+                                                        'literal_parameters':['[REDACTED_PARAMETERS]'] if operation['sensitive'] else parameters[:20]})
         elif isinstance(node, (ast.If, ast.IfExp, ast.Try, ast.Match)):
             arms = []
             groups = [('true', getattr(node,'body',[])), ('false',getattr(node,'orelse',[])),
@@ -441,7 +451,14 @@ def _tree(raw, language, suffix, info, ref):
                 value = literal(argument)
                 operation = sql_operation(value, source) if value else None
                 if operation:
-                    info['data_operations'].append({**operation,'function':caller,'line':line})
+                    parameters=[]
+                    for other in arguments:
+                        if other==argument:
+                            continue
+                        values=other.named_children if other.type in {'array','array_initializer'} else [other]
+                        parameters += [redact_text(v)[:120] for child in values if (v:=literal(child)) is not None]
+                    info['data_operations'].append({**operation,'function':caller,'line':line,
+                                                   'literal_parameters':['[REDACTED_PARAMETERS]'] if operation['sensitive'] else parameters[:20]})
         if node.type in {'if_statement','conditional_expression','try_statement','switch_statement'}:
             arms=[]
             for label, field in [('true','consequence'),('false','alternative'),('try','body')]:

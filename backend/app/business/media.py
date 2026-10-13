@@ -2,8 +2,62 @@
 
 import re
 from pathlib import PurePosixPath
+from typing import Literal
+
+from pydantic import Field, field_validator
 
 from app.business.ingestion import UnsafeArtifact
+from app.domain import StrictModel
+
+
+class VisualRegion(StrictModel):
+    region: list[float] = Field(min_length=4,max_length=4)
+
+    @field_validator('region',mode='before')
+    @classmethod
+    def bounded_region(cls,value):
+        if (not isinstance(value,list) or len(value)!=4 or any(type(x) not in {int,float} or not 0<=x<=1 for x in value)
+                or not value[0]<value[2] or not value[1]<value[3]):
+            raise ValueError('Region must be a normalized nonempty bounding box')
+        return value
+
+
+class VisualComponent(VisualRegion):
+    id: str = Field(pattern=r'^[A-Za-z0-9_-]{1,40}$')
+    name: str = Field(min_length=1,max_length=120)
+    kind: Literal['component','datastore','interface','worker','proxy','unknown']
+
+
+class VisualRelation(VisualRegion):
+    source: str = Field(pattern=r'^[A-Za-z0-9_-]{1,40}$')
+    target: str = Field(pattern=r'^[A-Za-z0-9_-]{1,40}$')
+    relation: Literal['calls','reads','writes','depends_on','forwards','flow']
+    direction: Literal['forward','unknown']
+    certainty: Literal['explicit','uncertain']
+    confidence: float = Field(ge=0,le=1,strict=True)
+
+
+class VisualPage(StrictModel):
+    summary: str = Field(max_length=1000)
+    components: list[VisualComponent] = Field(max_length=30)
+    relations: list[VisualRelation] = Field(max_length=50)
+    unknowns: list[str] = Field(max_length=20)
+
+
+def validate_visual_page(value):
+    parsed=VisualPage.model_validate(value).model_dump()
+    ids={component['id'] for component in parsed['components']}
+    if len(ids)!=len(parsed['components']) or any(relation['source'] not in ids or relation['target'] not in ids for relation in parsed['relations']):
+        raise ValueError('Visual references must identify supplied components')
+    known=[]
+    for relation in parsed['relations']:
+        if relation['direction']=='forward' and relation['certainty']=='explicit' and relation['confidence']>=.8:
+            known.append(relation)
+        else:
+            parsed['unknowns'].append(f"{relation['source']} → {relation['target']}：方向或含义不清楚，未生成关系事实")
+    parsed['relations']=known
+    parsed['unknowns']=[entry[:300] for entry in parsed['unknowns'][:30]]
+    return parsed
 
 
 def optional_image(path):

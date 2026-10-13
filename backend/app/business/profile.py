@@ -61,15 +61,49 @@ def build_static(business, files, previous):
         info = row["analysis"]
         ref = {key: row[key] for key in ("id", "path", "content_digest", "bytes", "media_type")}
         ref["parse_state"] = info.get("parse_state")
+        if row['media_type'] in {'image','pdf'}:
+            ref.update(pages_processed=info.get('next_page',0),total_pages=info.get('total_pages'),
+                       omitted_pages=info.get('omitted_pages',[]),
+                       omitted_page_count=info.get('omitted_page_count',0),
+                       vision_states=sorted({page.get('vision_state','unknown') for page in info.get('pages',[])}),
+                       ocr_states=sorted({page.get('ocr_state','unknown') for page in info.get('pages',[])}),
+                       vision_available=info.get('vision_available',False))
         if row["media_type"] == "image":
             ref.update(media_role=info.get("media_role"), optional_suggested=optional_image(row["path"]),
                        can_restore=info.get("parse_state") == "optional_static_attachment" and bool(info.get("optional_previous")))
         profile.source_references.append(ref)
         if info.get("manual_text"):
             add(f"document:{row['path']}", "describes", info["manual_text"], row, "Documented")
+        for page in info.get('pages',[]):
+            refs=[{**source_ref(row,reference,profile.profile_version),'source_type':'Documented'}
+                  for reference in page.get('source_refs',[])]
+            document={'file_id':row['id'],'page_number':page['page_number'],'text':page.get('text',''),
+                      'source_refs':refs,'ocr_state':page.get('ocr_state'),'vision_state':page.get('vision_state'),
+                      'external_paused':page.get('external_paused',False),
+                      'visual':page.get('visual'),
+                      'ocr_parser_version':info.get('parser_version'),'ocr_regions':page.get('regions',[]),
+                      'vision_model':page.get('vision_model'),'vision_configuration_digest':page.get('vision_configuration_digest'),
+                      'vision_usage':page.get('vision_usage'),
+                      'unknowns':page.get('visual',{}).get('unknowns', ['图形语义尚未核验'])+['运行部署身份尚未核验']}
+            profile.documents.append(document)
+            if document['text'] and not document['external_paused']:
+                add(f"document:{row['path']}:page:{page['page_number']}", 'describes',
+                    {'text':document['text'],'source_refs':page.get('source_refs',[])},row,'Documented')
+            if page.get('vision_state')=='completed' and not document['external_paused']:
+                prefix=f"document:{row['id']}:page:{page['page_number']}:"
+                for component in page.get('visual',{}).get('components',[]):
+                    reference={**page['source_refs'][0],'region':component['region']}
+                    add(prefix+component['id'],'depicts_component',
+                        {**component,'source_refs':[reference]},row,'Documented')
+                for relation in page.get('visual',{}).get('relations',[]):
+                    reference={**page['source_refs'][0],'region':relation['region']}
+                    fact_id=add(prefix+relation['source'],relation['relation'],
+                                {'target':prefix+relation['target'],'source_refs':[reference]},row,'Documented')
+                    profile.dependencies.append({'from':prefix+relation['source'],'to':prefix+relation['target'],
+                                                 'relation':relation['relation'],'fact_id':fact_id,'certainty':'documented'})
         if info.get("language"):
             stacks.add(info["language"])
-        if info.get("parse_state") not in {"complete", "partial_parser_error"}:
+        if info.get("parse_state") not in {"complete", "partial_parser_error", "complete_for_scope"}:
             if info.get("parse_state") not in {"excluded_irrelevant", "unsupported", "optional_static_attachment"}:
                 profile.unknowns.append(f"资料 {row['path']}：{info.get('parse_state')}")
             continue
@@ -304,10 +338,10 @@ def build_static(business, files, previous):
         "files": len(files),
         "types": dict(Counter(r["media_type"] for r in files)),
         "tree_summary": [r["path"] for r in files[:100]],
-        "static_parsed": sum(r["analysis"].get("parse_state") == "complete" for r in files),
+        "static_parsed": sum(r["analysis"].get("parse_state") in {"complete","complete_for_scope"} for r in files),
         "pending_files": sum(
             r["analysis"].get("parse_state")
-            not in {"complete", "excluded_irrelevant", "unsupported", "optional_static_attachment"}
+            not in {"complete", "complete_for_scope", "excluded_irrelevant", "unsupported", "optional_static_attachment"}
             for r in files
         ),
         "optional_attachments": sum(r["analysis"].get("parse_state") == "optional_static_attachment" for r in files),

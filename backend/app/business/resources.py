@@ -5,12 +5,12 @@ import sys
 _handles = []
 
 
-def apply_memory_limit():
+def apply_memory_limit(memory_bytes=768 * 1024 * 1024, cpu_seconds=40):
     if sys.platform != "win32":
         import resource
 
-        resource.setrlimit(resource.RLIMIT_AS, (768 * 1024 * 1024, 768 * 1024 * 1024))
-        resource.setrlimit(resource.RLIMIT_CPU, (40, 40))
+        resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
+        resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds))
         return
     import ctypes
     from ctypes import wintypes
@@ -66,7 +66,7 @@ def apply_memory_limit():
     limits = Extended()
     limits.basic.flags = 0x100 | 0x8
     limits.basic.active = 1
-    limits.memory = 768 * 1024 * 1024
+    limits.memory = memory_bytes
     if (
         not handle
         or not kernel.SetInformationJobObject(

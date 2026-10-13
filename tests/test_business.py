@@ -130,10 +130,10 @@ def test_malicious_upload_quarantined_without_profile_loss(client):
     assert latest["services"] == profile["services"]
 
 
-def test_media_is_pending_then_manual(client):
+def test_damaged_media_can_receive_explicit_manual_annotation(client):
     profile = onboard(client, {"architecture.png": b"\x89PNG\r\n\x1a\nplaceholder"})
     ref = profile["source_references"][0]
-    assert ref["parse_state"] == "pending_manual"
+    assert ref["parse_state"] == "media_local_failed"
     result = client.post(
         f"/api/v1/businesses/{profile['business_id']}/files/{ref['id']}/media-review",
         json={

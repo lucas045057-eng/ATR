@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 
 from pydantic import Field
 
@@ -16,8 +17,23 @@ class BudgetExceeded(ValueError):
 
 
 def estimate_model_input(messages):
-    # UTF-8 bytes + per-message framing is an upper estimate, not a billing count.
-    return sum(len(m["content"].encode("utf-8")) + 128 for m in messages) + 256
+    # Text bytes are conservative; image patches are an explicit estimate, never billed usage.
+    total=256
+    for message in messages:
+        content=message['content']
+        total+=128
+        if isinstance(content,str):
+            total+=len(content.encode('utf-8'))
+        else:
+            for part in content:
+                if part['type']=='text':
+                    total+=len(part['text'].encode('utf-8'))
+                elif part['type']=='image_url':
+                    # Frames are bounded to1024px before private transport; reserve the worst allowed size.
+                    total+=1024+4*math.ceil(1024/32)**2
+                else:
+                    raise ValueError('Unsupported model content')
+    return total
 
 
 def interrupt_usage(tx, usage):
@@ -57,6 +73,7 @@ class ContextBudgetManager:
             else self.settings.investigation_model_rounds,
             max_tools=self.settings.investigation_tool_calls,
             max_total_tokens=self.settings.budget_total_tokens,
+            max_execution_seconds=self.settings.initial_timeout_seconds if initial else 1800,
         )
         budget_id = uid()
         with self.db.transaction() as tx:

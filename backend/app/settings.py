@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     artifact_max_files: int = Field(default=2000, ge=1, le=2000)
     artifact_max_file_bytes: int = Field(default=20 * 1024 * 1024, ge=1024, le=200 * 1024 * 1024)
     artifact_read_bytes: int = Field(default=256 * 1024, ge=1024, le=1024 * 1024)
+    media_timeout_seconds: int = Field(default=120, ge=1, le=120)
+    initial_timeout_seconds: int = Field(default=900, ge=1, le=900)
+    media_max_pages: int = Field(default=50, ge=1, le=50)
+    media_max_image_bytes: int = Field(default=20 * 1024 * 1024, ge=1024, le=20 * 1024 * 1024)
+    media_max_pdf_bytes: int = Field(default=50 * 1024 * 1024, ge=1024, le=50 * 1024 * 1024)
     artifact_max_depth: int = Field(default=16, ge=1, le=32)
     extraction_timeout_seconds: int = Field(default=45, ge=1, le=120)
     external_model_enabled: bool = False

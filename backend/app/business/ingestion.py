@@ -55,7 +55,8 @@ def unpack(source: Path, destination: Path, filename: str, limits: dict) -> list
         if count > limits["files"] or name.casefold() in seen:
             raise UnsafeArtifact("文件数量超限或重复路径")
         seen.add(name.casefold())
-        if size < 0 or size > limits["file_bytes"] or total + size > limits["total_bytes"]:
+        file_limit=limits.get('pdf_file_bytes',limits['file_bytes']) if name.lower().endswith('.pdf') else limits['file_bytes']
+        if size < 0 or size > file_limit or total + size > limits["total_bytes"]:
             raise UnsafeArtifact("解包后资料大小超限")
         path = destination / name
         if is_dir:
@@ -68,14 +69,14 @@ def unpack(source: Path, destination: Path, filename: str, limits: dict) -> list
             while True:
                 if time.monotonic() > deadline:
                     raise UnsafeArtifact("解包耗时超限")
-                chunk = stream.read(min(65536, limits["file_bytes"] - written + 1))
+                chunk = stream.read(min(65536, file_limit - written + 1))
                 if not chunk:
                     break
                 written += len(chunk)
                 total += len(chunk)
                 if (
                     written > size
-                    or written > limits["file_bytes"]
+                    or written > file_limit
                     or total > limits["total_bytes"]
                 ):
                     raise UnsafeArtifact("实际解包大小超限")

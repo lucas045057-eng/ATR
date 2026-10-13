@@ -41,6 +41,7 @@ class BusinessProfile(StrictModel):
     technology_stack: list[str] = Field(default_factory=list)
     business_flows: list[str] = Field(default_factory=list)
     business_flow_graphs: list[dict] = Field(default_factory=list)
+    documents: list[dict] = Field(default_factory=list)
     source_references: list[dict] = Field(default_factory=list)
     facts: list[Fact] = Field(default_factory=list)
     unknowns: list[str] = Field(default_factory=list)
@@ -77,6 +78,10 @@ class CodeContext(StrictModel):
 
 class ManualMediaReview(StrictModel):
     text: str = Field(min_length=5, max_length=4000)
+    expected_version: int = Field(ge=1)
+
+
+class MediaContinuation(StrictModel):
     expected_version: int = Field(ge=1)
 
 

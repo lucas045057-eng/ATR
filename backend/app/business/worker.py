@@ -21,10 +21,12 @@ def main():
         cached = cache.get(row["path"] + ":" + row["content_digest"])
         if Path(row['path']).suffix.lower() in LANGUAGES and cached and cached.get('parser_version') != VERSION:
             cached = None
+        if Path(row['path']).suffix.lower() in {'.png','.jpg','.jpeg','.webp','.pdf'}:
+            cached = None
         row["analysis"] = (
             cached
             if cached is not None
-            else inspect_file(Path(dest) / row["path"], row["path"], limits["read_bytes"])
+            else inspect_file(Path(dest) / row["path"], row["path"], limits["read_bytes"],defer_media=True)
         )
     Path(manifest).write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
 

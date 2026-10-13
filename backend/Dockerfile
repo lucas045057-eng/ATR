@@ -5,6 +5,11 @@ RUN useradd --create-home --uid 10001 runtime && mkdir -p /data && chown runtime
 RUN pip install --no-cache-dir uv
 COPY pyproject.toml uv.lock /app/
 RUN uv sync --locked --no-dev --no-install-project
+RUN /app/.venv/bin/python -c "import cv2" \
+    || (sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
+        && apt-get -o Acquire::Retries=2 -o Acquire::https::Timeout=20 update \
+        && apt-get -o Acquire::Retries=2 -o Acquire::https::Timeout=20 install --no-install-recommends -y libgl1 libglib2.0-0 \
+        && rm -rf /var/lib/apt/lists/*)
 RUN python -c "import ctypes; ctypes.CDLL('libseccomp.so.2')" \
     || (sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
         && apt-get -o Acquire::Retries=2 -o Acquire::https::Timeout=20 update \

@@ -27,9 +27,23 @@ def safe_yaml(text: str):
     return yaml.safe_load(text)
 
 
-def inspect_file(path: Path, relative: str, read_limit: int) -> dict:
+def inspect_file(path: Path, relative: str, read_limit: int, *, defer_media=False) -> dict:
     suffix = path.suffix.lower()
     base = path.name.lower()
+    if suffix in {'.png','.jpg','.jpeg','.webp','.pdf'} and defer_media:
+        size=path.stat().st_size
+        limit=(50 if suffix=='.pdf' else 20)*1024*1024
+        if size>limit:
+            raise UnsafeArtifact('媒体原件超出独立大小上限')
+        with path.open('rb') as stream:
+            signature=stream.read(16)
+        valid=(signature.startswith(b'%PDF-') if suffix=='.pdf' else
+               signature.startswith(b'\x89PNG\r\n\x1a\n') if suffix=='.png' else
+               signature.startswith(b'\xff\xd8\xff') if suffix in {'.jpg','.jpeg'} else
+               signature.startswith(b'RIFF') and signature[8:12]==b'WEBP')
+        if not valid:
+            raise UnsafeArtifact('媒体签名与文件类型不匹配')
+        return {'media_type':'pdf' if suffix=='.pdf' else 'image','parse_state':'pending_media_local'}
     with path.open("rb") as stream:
         raw = stream.read(read_limit + 1)
     info = {
@@ -39,7 +53,7 @@ def inspect_file(path: Path, relative: str, read_limit: int) -> dict:
         "keys": [],
         "datastores": [],
     }
-    if suffix in {".png", ".jpg", ".jpeg"}:
+    if suffix in {".png", ".jpg", ".jpeg",'.webp'}:
         return {**info, "media_type": "image", **parse_image(raw, suffix, relative)}
     if suffix == ".pdf":
         return {**info, "media_type": "pdf", **parse_pdf(raw)}

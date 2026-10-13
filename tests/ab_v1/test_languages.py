@@ -65,6 +65,7 @@ def record():
     result=describe_language(Path('api.py'),source)
     assert result['functions'][0]['entries']==['startup']
     assert [item['function'] for item in result['data_operations']]==['startup','record']
+    assert result['data_operations'][1]['literal_parameters']==['demo-1']
     assert {item['status_code'] for item in result['branches'] if item['kind']=='http_status'}=={404,503}
 
 
@@ -175,3 +176,10 @@ def test_source_reference_version_changes_without_losing_reviewed_fact_identity(
     assert refreshed.verification_status=='confirmed'
     assert refreshed.source_refs[0]['profile_version']==2
     assert first.interfaces[0]['source_refs'][0]['profile_version']==1
+
+
+def test_sensitive_sql_parameters_are_not_sent_as_static_model_context():
+    source='def save():\n conn.execute("INSERT INTO settings(api_key) VALUES (%s)", ("TEST_ONLY_SECRET",))\n'
+    operation=describe_language('store.py',source)['data_operations'][0]
+    assert operation['sensitive'] and 'TEST_ONLY_SECRET' not in str(operation)
+    assert operation['literal_parameters']==['[REDACTED_PARAMETERS]']

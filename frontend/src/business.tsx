@@ -667,6 +667,7 @@ export function BusinessPages({
               </>
             )}
             <MediaReviewList key={`${selected}:${profile.profile_version}`} profile={profile} busy={busy}
+              onContinue={id=>void act(()=>api(base+`/files/${id}/media-continue`,{method:'POST',body:JSON.stringify({expected_version:profile.profile_version})}))}
               onBatch={(ids, action) => void act(() => api(base + '/files/media-batch-review', {
                 method: 'POST', body: JSON.stringify({file_ids: ids, action, expected_version: profile.profile_version,
                   reason: action === 'optional' ? '人工批量分类明确图标或装饰资源' : '人工撤销静态附件分类，恢复原审核状态'}),

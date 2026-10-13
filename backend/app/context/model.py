@@ -1,13 +1,12 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
-import os
+import math
 import re
-import subprocess
 import sys
 import time
-from pathlib import Path
 from types import SimpleNamespace
 
 from app.common import now
@@ -45,35 +44,31 @@ def _parse_content(content):
 def _completion(**request):
     started = time.monotonic()
     supervision = request.pop('_supervision', None)
-    env = dict(os.environ)
-    env.update(PYTHONPATH=str(Path(__file__).resolve().parents[2]), PYTHONUTF8="1",
-               LITELLM_MODE="PRODUCTION", LITELLM_LOCAL_MODEL_COST_MAP="True")
+    process_timeout=request.pop('_process_timeout',request['timeout']+(0 if supervision is not None else 10))
+    progress = {'worker_stage': 'initialize', 'worker_initialize_ms': None}
+
+    def record_progress(value):
+        if isinstance(value, dict) and value.get('worker_stage') in {'initialize', 'request'}:
+            progress['worker_stage'] = value['worker_stage']
+            elapsed = value.get('worker_initialize_ms')
+            if type(elapsed) in {float, int} and 0 <= elapsed <= process_timeout * 1000:
+                progress['worker_initialize_ms'] = elapsed
     try:
-        if supervision is not None:
-            from app.runtime.processes import run_bounded
-            result = SimpleNamespace(**run_bounded(
-                [sys.executable, '-m', 'app.context.model_worker'],
-                json.dumps(request, ensure_ascii=False).encode('utf-8'),
-                timeout=request['timeout'], max_output=request['max_tokens'] * 96 + 16000,
-                **supervision))
-        else:
-            result = subprocess.run([sys.executable, "-m", "app.context.model_worker"],
-                                input=json.dumps(request, ensure_ascii=False).encode("utf-8"),
-                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env,
-                                timeout=request["timeout"] + 10)
+        from app.runtime.processes import run_bounded
+        result = SimpleNamespace(**run_bounded(
+            [sys.executable, '-m', 'app.context.model_worker'],
+            json.dumps(request, ensure_ascii=False).encode('utf-8'),
+            timeout=process_timeout, max_output=request['max_tokens'] * 96 + 16000,
+            on_progress=record_progress,
+            **(supervision or {})))
     except InterruptedError:
         raise
     except TimeoutError as exc:
-        raise ModelCallError(diagnostic(exc, 'worker')) from None
-    except subprocess.TimeoutExpired as exc:
-        error = diagnostic(exc, "worker")
-        try:
-            progress = json.loads((exc.stdout or b'').splitlines()[-1])
-            if progress.get('worker_stage') in {'initialize', 'request'}:
-                error['stage'] = progress['worker_stage']
-        except (ValueError, IndexError, TypeError):
-            pass
-        raise ModelCallError(error) from None
+        details=diagnostic(exc, progress['worker_stage'])
+        details.update(code='model_timeout',worker_initialize_ms=progress['worker_initialize_ms'])
+        error=ModelCallError(details)
+        error.model_metadata={'timing': {'worker_initialize_ms': progress['worker_initialize_ms']}}
+        raise error from None
     except OSError as exc:
         raise ModelCallError(diagnostic(exc, "initialize")) from None
     if result.returncode or len(result.stdout) > request["max_tokens"] * 96 + 16000:
@@ -101,22 +96,37 @@ def capabilities(settings):
         "text": True,
         "structured_json": settings.model_json_supported,
         "vision_declared": settings.model_vision_supported,
-        "vision_adapter": "pending",
+        "vision_adapter": "chat_completions_and_native_responses",
         "context_window": settings.model_context_window,
         "usage": "provider_actual_or_explicit_estimate",
         "model": settings.model_name or None,
     }
 
 
-def model_messages(system_prompt, context):
-    return [
+def model_messages(system_prompt, context, images=None):
+    messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": json.dumps(sanitize_payload(context), ensure_ascii=False,
                                                separators=(",", ":"))},
     ]
+    if images:
+        if len(images) != 1:
+            raise ValueError('One bounded page per vision request')
+        parts=[{'type':'text','text':messages[1]['content']}]
+        for image in images:
+            data=image['data']
+            if (not isinstance(data,bytes) or not data.startswith(b'\xff\xd8\xff') or len(data)>900*1024
+                    or type(image['width']) is not int or type(image['height']) is not int
+                    or not 0<image['width']<=1024 or not 0<image['height']<=1024):
+                raise ValueError('Invalid bounded local image')
+            parts.append({'type':'image_url','image_url':{'url':'data:image/jpeg;base64,'+base64.b64encode(data).decode('ascii'),
+                                                        'detail':'high'}})
+        messages[1]['content']=parts
+    return messages
 
 
-def call_json(database, settings, budget_id, system_prompt, context, validate=None, *, supervision=None):
+def call_json(database, settings, budget_id, system_prompt, context, validate=None, *, supervision=None,
+              images=None, deadline=None, receipt=None):
     if (
         not settings.external_model_enabled
         or not settings.model_name
@@ -125,15 +135,27 @@ def call_json(database, settings, budget_id, system_prompt, context, validate=No
         raise ModelUnavailable("模型未配置或外部分析尚未启用")
     if not settings.model_json_supported:
         raise ModelUnavailable("模型未声明 JSON 结构化输出支持")
-    messages = model_messages(system_prompt, context)
+    if images and not settings.model_vision_supported:
+        raise ModelUnavailable('模型未声明视觉能力')
+    messages = model_messages(system_prompt, context, images)
     if supervision is not None:
         with database.connect() as tx:
             supervision['authorize'](tx)
     manager = ContextBudgetManager(database, settings)
     remaining = manager.remaining_seconds(budget_id)
+    if deadline is not None:
+        from app.context.budget import BudgetExceeded
+        remaining=min(remaining,deadline-time.monotonic())
+        if remaining<=0:
+            raise BudgetExceeded('execution_time_limit')
+    image_usage = {'image_count':len(images or []),'image_pixels':sum(image['width']*image['height'] for image in images or []),
+                   'image_estimated_tokens':sum(1024+4*math.ceil(image['width']/32)*math.ceil(image['height']/32) for image in images or []),
+                   'image_usage_kind':'pixel_estimate_provider_usage_separate'}
     reservation = manager.reserve(budget_id, messages, settings.model_max_output_tokens,
                                   **({'authorize': supervision['authorize']} if supervision else {}))
     audit = manager.start_attempt(budget_id, reservation)
+    if images:
+        audit.update(image_usage)
     started = time.monotonic()
     parse_started = None
     response = None
@@ -149,6 +171,7 @@ def call_json(database, settings, budget_id, system_prompt, context, validate=No
             api_base=settings.model_base_url or None,
             api_key=settings.model_api_key.get_secret_value(),
             timeout=min(settings.model_timeout_seconds, remaining),
+            _process_timeout=min(settings.model_timeout_seconds+(0 if supervision else 10),remaining),
             max_tokens=settings.model_max_output_tokens,
             num_retries=0,
             response_format={"type": "json_object"},
@@ -185,6 +208,8 @@ def call_json(database, settings, budget_id, system_prompt, context, validate=No
             supervision['authorize'](tx)
     manager.settle(budget_id, reservation, response, audit=audit)
     manager.record_time(budget_id, time.monotonic() - started)
+    if receipt is not None:
+        receipt.update(audit)
     return result
 
 

@@ -7,15 +7,16 @@ function optionalImage(r: Row) {
     || /(?:^|\/)(?:icons|favicons|decorations)\//i.test(r.path);
 }
 
-export function MediaReviewList({profile, busy, onBatch, onManual}: {
-  profile: Row; busy: boolean; onBatch: (ids: string[], action: string) => void; onManual: (id: string) => void;
+export function MediaReviewList({profile, busy, onBatch, onManual,onContinue}: {
+  profile: Row; busy: boolean; onBatch: (ids: string[], action: string) => void; onManual: (id: string) => void; onContinue:(id:string)=>void;
 }) {
   const [selected, setSelected] = useState<string[]>([]);
   const [page, setPage] = useState(0);
   const files: Row[] = profile.source_references;
   const icons = files.filter(r => optionalImage(r) && r.parse_state !== "optional_static_attachment");
   const optional = files.filter(r => r.parse_state === "optional_static_attachment");
-  const labels: Row = {pending_manual: "待人工录入", complete: "已解析", optional_static_attachment: "可选静态附件"};
+  const labels: Row = {pending_manual: "待人工录入", complete: "已解析", optional_static_attachment: "可选静态附件",
+    pending_media_local:'等待媒体处理',partial_media:'媒体部分完成',media_local_failed:'媒体处理失败',local_media_complete:'文字和页图已处理，图形含义待核验',complete_for_scope:'范围内页面已理解（文档来源）'};
   const pages = Math.max(1, Math.ceil(files.length / 50));
   return <details><summary>查看文件清单、解析状态和摘要 · {files.length} 个文件</summary>
     <p>可选静态附件 {optional.length} 个 · 明确图标待分类 {icons.length} 个。文件、哈希和来源保留；附件分类不会确认业务事实。</p>
@@ -27,6 +28,9 @@ export function MediaReviewList({profile, busy, onBatch, onManual}: {
         onChange={e => setSelected(e.target.checked ? [...selected, r.id] : selected.filter(id => id !== r.id))} />}
       <span>{r.path}</span><small>{labels[r.parse_state] || r.parse_state} · {r.content_digest.slice(0,12)} · v{profile.profile_version}</small>
       {["image", "pdf"].includes(r.media_type) && <button className="btn small" disabled={busy} onClick={() => onManual(r.id)}>人工录入</button>}
+      {["image","pdf"].includes(r.media_type) && <small>已处理 {r.pages_processed||0}/{r.total_pages||'未知'} 页 · {r.vision_available?'视觉能力已配置':'视觉能力未配置'}</small>}
+      {r.vision_states?.length>0 && <small>页面视觉状态：{r.vision_states.map((value:string)=>({completed:'已理解',vision_unavailable:'视觉能力未配置',vision_budget_exceeded:'预算用尽',vision_failed:'视觉调用失败',paused_sensitive_or_local_failure:'该页暂停外发'}[value]||value)).join('、')}</small>}
+      {['partial_media','media_local_failed','pending_media_local'].includes(r.parse_state) && <button className="btn small" disabled={busy} onClick={()=>onContinue(r.id)}>继续处理未完成页</button>}
     </div>)}
     <button className="btn small" disabled={!page} onClick={() => setPage(page - 1)}>上一页</button>
     <span> 第 {page + 1}/{pages} 页 </span>
