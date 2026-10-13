@@ -27,7 +27,8 @@ def reader(monkeypatch, responses):
 
 
 def test_negotiated_tool_uses_explicit_protocol(monkeypatch):
-    payload = {'protocol': PROTOCOL, 'tool_version': 2, 'state': 'exited', 'observation_location': 'remote_ssh'}
+    payload = {'protocol': PROTOCOL, 'tool_version': 2, 'state': 'exited', 'observation_location': 'remote_ssh',
+               'container_id': 'a'*64, 'startup_cycle': 'boot-cycle', 'observed_host': 'original-server'}
     instance, sent = reader(monkeypatch, [capabilities(), payload])
     assert instance.read('container.status', {'container_id': 'a'*64})['state'] == 'exited'
     assert sent[-1]['protocol'] == PROTOCOL

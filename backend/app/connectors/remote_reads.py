@@ -148,8 +148,28 @@ def process_identity(pid):
         raise ValueError('Incomplete process identity')
     with open('/proc/sys/kernel/random/boot_id', encoding='ascii') as stream:
         boot_id = stream.read(80).strip()
-    return {'pid': pid, 'name': text[text.find('(')+1:close], 'state': fields[0],
+    return {'pid': pid, 'name': text[text.find('(')+1:close], 'state': 'exited' if fields[0] in {'Z', 'X'} else 'running',
+            'process_state': fields[0],
             'start_time': boot_id + ':' + fields[19]}
+
+
+def secure_file(path, roots):
+    from pathlib import PurePosixPath
+    candidate = PurePosixPath(path)
+    if (not candidate.is_absolute() or '..' in path.split('/')
+            or not any(candidate.is_relative_to(PurePosixPath(root)) for root in roots)):
+        raise PermissionError('Log path outside policy')
+    fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for index, part in enumerate(candidate.parts[1:]):
+            child = os.open(part, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK |
+                            (os.O_DIRECTORY if index < len(candidate.parts)-2 else 0), dir_fd=fd)
+            os.close(fd)
+            fd = child
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 def execute(policy, tool, args, *, secure_open=None):
@@ -262,5 +282,5 @@ def remote_main():
     request = json.loads(raw)
     # Ordinary SSH gets only the already checked whitelist from the trusted client.
     from_root = request['policy']
-    result = execute(from_root, request['tool_id'], request['arguments'])
+    result = execute(from_root, request['tool_id'], request['arguments'], secure_open=secure_file)
     sys.stdout.write(json.dumps(result))

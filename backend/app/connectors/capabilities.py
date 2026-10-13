@@ -59,3 +59,27 @@ def validate_legacy_payload(tool, row):
     elif not isinstance(row.get('text'), str):
         raise ToolParseError()
     return row
+
+
+def validate_payload(tool, args, row, config):
+    if (row.get('protocol') != PROTOCOL or row.get('tool_version') != TOOLS.get(tool)
+            or row.get('observation_location') != 'remote_ssh'
+            or not isinstance(row.get('observed_host'), str) or not 1 <= len(row['observed_host']) <= 253):
+        raise ToolParseError()
+    if tool in {'container.status', 'container.logs'}:
+        if (not isinstance(row.get('container_id'), str) or not row['container_id'].startswith(args['container_id'])
+                or row.get('state') not in {'created', 'running', 'paused', 'restarting', 'removing', 'exited', 'dead'}
+                or not isinstance(row.get('startup_cycle'), str)):
+            raise ToolParseError()
+    if tool in {'service.status', 'service.logs'} and (row.get('name') not in {args['name'], args['name'] + '.service'}
+            or row.get('state') not in {'active', 'inactive', 'failed', 'activating', 'deactivating', 'reloading', 'maintenance', 'refreshing'}):
+        raise ToolParseError()
+    if tool.endswith('.logs') and (not isinstance(row.get('text'), str)
+            or not row.get('partial') and row.get('cycle_verified') is not True):
+        raise ToolParseError()
+    if tool == 'health.get':
+        endpoint = next((e for e in config.get('health_endpoints', []) if e['endpoint_id'] == args['endpoint_id']), None)
+        if (not endpoint or row.get('endpoint_id') != endpoint['endpoint_id'] or row.get('url') != endpoint['url']
+                or type(row.get('status_code')) is not int or not 100 <= row['status_code'] <= 599):
+            raise ToolParseError()
+    return row

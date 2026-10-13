@@ -158,6 +158,7 @@ class SSHConnector:
                     require_tool,
                     validate_capabilities,
                     validate_legacy_payload,
+                    validate_payload,
                 )
                 from app.connectors.diagnostics import CapabilityUnavailable
                 from app.connectors.remote_reads import PROTOCOL
@@ -181,10 +182,7 @@ class SSHConnector:
                 payload = receive({'tool_id': tool, 'arguments': args, 'protocol': PROTOCOL})
                 if tool in {'health.get', 'container.status', 'container.logs', 'service.status', 'service.logs',
                             'process.status', 'log.tail'}:
-                    if (payload.get('protocol') != PROTOCOL or payload.get('tool_version') != caps['tools'][tool]
-                            or payload.get('observation_location') != 'remote_ssh'):
-                        from app.connectors.diagnostics import ToolParseError
-                        raise ToolParseError()
+                    validate_payload(tool, args, payload, self.config)
                 payload.update(capabilities=caps, connector='ssh')
                 return payload
             request = json.dumps({"tool_id": tool, "arguments": args}).encode() + b"\n"

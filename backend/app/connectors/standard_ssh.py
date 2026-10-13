@@ -249,7 +249,12 @@ class StandardSSHConnector(SSHConnector):
                 'capabilities', 'health.get', 'container.status', 'container.logs', 'service.status',
                 'service.logs', 'process.status', 'log.tail',
             }:
-                from app.connectors.capabilities import decode, require_tool, validate_capabilities
+                from app.connectors.capabilities import (
+                    decode,
+                    require_tool,
+                    validate_capabilities,
+                    validate_payload,
+                )
                 source = Path(__file__).with_name('remote_reads.py').read_text(encoding='utf-8')
                 command = shlex.join(('/usr/bin/python3', '-I', '-c', source + '\nremote_main()'))
                 approved = self.config.get('_approved', ())
@@ -268,9 +273,8 @@ class StandardSSHConnector(SSHConnector):
                 caps = validate_capabilities(read_remote('capabilities', {}))
                 require_tool(caps, tool)
                 result = caps if tool == 'capabilities' else read_remote(tool, args)
-                if tool != 'capabilities' and (result.get('protocol') != caps['protocol']
-                                               or result.get('tool_version') != caps['tools'][tool]):
-                    raise ToolParseError()
+                if tool != 'capabilities':
+                    validate_payload(tool, args, result, self.config)
                 result.update(capabilities=caps, connector='ssh', identity=account)
                 return result
             if tool.startswith("config."):
