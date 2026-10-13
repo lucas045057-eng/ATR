@@ -13,7 +13,7 @@ from app.agent.decision_runtime import (
     minimal_output_contract,
 )
 from app.agent.discovery import authorization_digest
-from app.agent.log_events import normalize_log_events, semantic_payload
+from app.agent.log_events import normalize_log_events, parse_time, semantic_payload
 from app.agent.result_evaluator import evaluate_state
 from app.business.service import BusinessService
 from app.common import digest, dumps, now, uid
@@ -182,7 +182,8 @@ class InvestigationBroker:
                                                and f['value'] in {'active', 'running', 'healthy'} for f in facts))
             if kind == 'logs' and not has_faults:
                 events = normalize_log_events(str(payload.get('text', '')), e)
-                healthy = not events or all(event.event_time_utc for event in events)
+                observed = parse_time(e['observed_at'])
+                healthy = not events or bool(observed) and all(event.event_time_utc and event.event_time_utc <= observed + timedelta(seconds=5) for event in events)
             if healthy:
                 checks.append({'check_id': node + ':' + kind, 'status': 'healthy', 'evidence_id': e['evidence_id']})
         if required and set(required) <= {c['check_id'] for c in checks} and not has_faults and not self.planner.scope_requests:
@@ -194,6 +195,7 @@ class InvestigationBroker:
         with self.db.transaction() as tx:
             self.authorize(tx)
             self.summary.update(stage='investigating', evidence=self.evidence, action_history=self.history,
+                                stop_reason=None, execution_status='running', task_type=self.task_type,
                                 report=self.report, diagnosis_result=self.result,
                                 diagnosis_status=self.result['diagnosis_status'],
                                 no_progress_rounds=self.no_progress, semantic_fingerprints=sorted(self.seen),

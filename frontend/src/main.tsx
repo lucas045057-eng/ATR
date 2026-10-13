@@ -32,7 +32,7 @@ function App() {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [busy, setBusy] = useState(false)
-  const [runJob, setRunJob] = useState('')
+  const [runJob, setRunJob] = useState(sessionStorage.getItem('atr_active_run_job') || '')
   const [token, setToken] = useState(sessionStorage.getItem('atr_operator_token') || '')
 
   const refresh = useCallback(async () => {
@@ -45,6 +45,11 @@ function App() {
 
   useEffect(() => { refresh().catch(e => setError(e.message)) }, [refresh])
   useEffect(() => { if(['systems','investigation','knowledge','efficiency'].includes(page)) void refresh().catch(e=>setError(e.message)) }, [page,refresh])
+  useEffect(() => {
+    if (runJob) sessionStorage.setItem('atr_active_run_job', runJob)
+    else sessionStorage.removeItem('atr_active_run_job')
+  }, [runJob])
+
   useEffect(() => {
     if (!selectedSystem) { setGraph(null); return }
     api(`/systems/${selectedSystem}/graph`).then(setGraph).catch(() => setGraph(null))
@@ -83,9 +88,9 @@ function App() {
         const state = await api(`/jobs/${runJob}`)
         if (stopped) return
         const id = state.result?.run_id || state.result?.id
-        if (id) setRun(await api(`/runs/${id}`))
+        if (id) {const current = await api(`/runs/${id}`); setRun(current);setSelectedIncident(current.incident_id);setSelectedSystem(current.system_id)}
         if (['queued','running'].includes(state.status)) timer = setTimeout(poll,1500)
-        else {setRunJob(''); await refresh(); if(state.status!=='completed')setError(state.error || '调查被中断')}
+        else {setRunJob(''); await refresh(); if(state.status==='waiting_input')setNotice('调查正在等待范围确认，请查看当前问题。');else if(state.status==='cancelled')setNotice('本次调查已取消。');else if(state.status!=='completed')setError(state.error || '调查执行失败或中断，请查看已保留的证据。')}
       } catch(e) {if(!stopped){setError(`连接中断，调查状态暂时未知；恢复连接后将继续读取同一调查。${(e as Error).message}`);timer=setTimeout(poll,1500)}}
     }
     void poll()

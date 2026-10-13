@@ -193,7 +193,7 @@ class RunCoordinator:
             if (row['execution_status'] != 'waiting_input' or row['worker_alive']
                     or question.get('question_id') != question_id or question.get('version') != version):
                 raise ValueError('确认回答已过期或原执行进程尚未回收')
-            tx.execute("UPDATE run_executions SET execution_status='queued',job_id=?,queued_since=?,lease_token=NULL,last_sequence=0 WHERE run_id=?", (job_id, self.clock(), run_id))
+            tx.execute("UPDATE run_executions SET execution_status='queued',job_id=?,queued_since=?,lease_token=NULL,last_sequence=0,stop_reason=NULL WHERE run_id=?", (job_id, self.clock(), run_id))
             tx.execute("UPDATE jobs SET status='queued',ended_at=NULL,error=NULL,result_json=? WHERE id=?", (dumps({'run_id': run_id}), job_id))
             tx.execute("UPDATE diagnosis_runs SET status='queued',ended_at=NULL WHERE id=?", (run_id,))
             self._event(tx, run_id, 'run_resumed', {'question_id': question_id, 'version': version})
