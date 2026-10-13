@@ -90,7 +90,8 @@ def test_page_only_pause_and_documented_provenance_survive_vision_enrichment(fak
     source={'schema_version':'source-ref-1','path':'diagram.png','page_number':1,'content_digest':'original-sha'}
     parsed={'media_type':'image','parse_state':'local_media_complete','derived_path':'derived','total_pages':2,'next_page':2,
             'pages':[{'page_number':1,'text':'Catalog API','source_refs':[source],'vision_image_path':'vision-1.jpg',
-                      'vision_image_size':[400,300],'vision_image_digest':hashlib.sha256(raw).hexdigest()},
+                      'vision_image_size':[400,300],'vision_image_digest':hashlib.sha256(raw).hexdigest(),
+                      'vision_error':{'code':'previous_schema_error'}},
                      {'page_number':2,'text':'[REDACTED_SENSITIVE_PAGE]','source_refs':[{**source,'page_number':2}],
                       'external_paused':True}]}
     calls=[]
@@ -106,6 +107,7 @@ def test_page_only_pause_and_documented_provenance_survive_vision_enrichment(fak
     result=service.process_media_vision(tmp_path,row,parsed,budget,time.monotonic()+60)
     assert len(calls)==1 and result['pages'][1]['vision_state']=='paused_sensitive_or_local_failure'
     assert result['parse_state']=='partial_media'
+    assert result['pages'][0].get('vision_error') is None
     row['analysis']=result
     profile=build_static({'id':'business','name':'same-business','description':'','current_version':1},[row],None)
     edges=[fact for fact in profile.facts if fact.predicate=='writes']
