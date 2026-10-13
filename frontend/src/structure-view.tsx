@@ -1,7 +1,8 @@
 import React,{useEffect,useRef,useState} from 'react';
 import {api,Row} from './api';
+import {Theme} from './theme';
 
-export function StructureView({businessId}:{businessId:string}) {
+export function StructureView({businessId,theme}:{businessId:string;theme:Theme}) {
   const [view,setView]=useState('structure');
   const [flow,setFlow]=useState('');
   const [diagram,setDiagram]=useState<Row|null>(null);
@@ -14,11 +15,11 @@ export function StructureView({businessId}:{businessId:string}) {
   const frame=useRef<HTMLIFrameElement>(null);
   useEffect(()=>{
     let active=true;const controller=new AbortController();setLoading(true);setError('');setDiagram(null);setSelected([]);
-    api(`/businesses/${businessId}/visualization?view=${view}${flow?'&flow_id='+encodeURIComponent(flow):''}`,{signal:controller.signal})
+    api(`/businesses/${businessId}/visualization?view=${view}&theme=${theme}${flow?'&flow_id='+encodeURIComponent(flow):''}`,{signal:controller.signal})
       .then(value=>{if(active)setDiagram(value);}).catch(reason=>{if(active)setError(reason.message);})
       .finally(()=>{if(active)setLoading(false);});
     return()=>{active=false;controller.abort();};
-  },[businessId,view,flow]);
+  },[businessId,view,flow,theme]);
   useEffect(()=>{
     const receive=(event:MessageEvent)=>{
       const value=event.data;

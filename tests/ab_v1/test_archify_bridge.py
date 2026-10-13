@@ -47,3 +47,11 @@ def test_vendored_renderer_runs_without_skill_paths_or_npm_and_cache_is_frozen(t
     cached=render_snapshot(projected,time.monotonic()+30,tmp_path)
     assert cached['cached'] and cached['html_sha256']==rendered['html_sha256']
     assert cached['snapshot_id']==projected['snapshot_id']
+    light=render_snapshot(projected,time.monotonic()+30,tmp_path,theme='light')
+    assert not light['cached'] and light['theme']=='light'
+    assert light['snapshot_id']==cached['snapshot_id'] and light['view']==cached['view']
+    assert render_snapshot(projected,time.monotonic()+30,tmp_path,theme='dark')['cached']
+    embedded=embed_bridge(light['html'],light['snapshot_id'],'fresh',theme='light')
+    assert 'const theme="light"' in embedded and 'attributeFilter' in embedded
+    with pytest.raises(ValueError):
+        embed_bridge(light['html'],light['snapshot_id'],'fresh',theme='untrusted')

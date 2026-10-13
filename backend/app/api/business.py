@@ -323,7 +323,8 @@ def model_capabilities():
 
 @router.get('/businesses/{business_id}/visualization')
 def business_visualization(business_id: str,view: Literal['structure','flow']='structure',
-                           profile_version: int|None=None,flow_id: str|None=None):
+                           profile_version: int|None=None,flow_id: str|None=None,
+                           theme: Literal['light','dark']='dark'):
     import time
 
     from app.common import digest, uid
@@ -343,9 +344,9 @@ def business_visualization(business_id: str,view: Literal['structure','flow']='s
             edges=[{**dict(row),'attributes':json.loads(row['attributes_json'])} for row in tx.execute('SELECT * FROM graph_edges WHERE snapshot_id=?',(graph['id'],))]
     identity=digest([business_id,profile['profile_version'],graph['id'] if graph else None])
     projected=project_snapshot({'profile':profile,'graph':{'nodes':nodes,'edges':edges},'snapshot_id':identity,'flow_id':flow_id},view)
-    rendered=render_snapshot(projected,time.monotonic()+30,s.settings.database_path.parent/'visualizations')
+    rendered=render_snapshot(projected,time.monotonic()+30,s.settings.database_path.parent/'visualizations',theme=theme)
     nonce=uid()
-    return {**projected,**rendered,'nonce':nonce,'html':embed_bridge(rendered['html'],identity,nonce),
+    return {**projected,**rendered,'nonce':nonce,'html':embed_bridge(rendered['html'],identity,nonce,theme=theme),
             'flows':[{'flow_id':flow['flow_id'],'entry':flow['entry'],'kind':flow['kind']} for flow in profile['business_flow_graphs']]}
 
 

@@ -106,6 +106,13 @@ export function BusinessPages({
     return () => clearInterval(timer);
   }, [page, targets, reload]);
   useEffect(() => {
+    const saved = sessionStorage.getItem('atr_active_business_job');
+    try {
+      const state = saved ? JSON.parse(saved) : null;
+      setJob(state?.business_id === selected ? {job_id: state.job_id} : null);
+    } catch { sessionStorage.removeItem('atr_active_business_job'); }
+  }, [selected]);
+  useEffect(() => {
     if (!job?.job_id) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
@@ -114,9 +121,11 @@ export function BusinessPages({
         const state = await api(`/jobs/${job.job_id}`);
         if (cancelled) return;
         setJob({ ...state, job_id: state.id });
+        setError("");
         if (["queued", "running"].includes(state.status))
           timer = setTimeout(poll, 1500);
         else {
+          sessionStorage.removeItem('atr_active_business_job');
           setBusy(false);
           if (state.status !== "completed")
             setError(state.error || "任务未完成");
@@ -124,8 +133,8 @@ export function BusinessPages({
         }
       } catch (e) {
         if (!cancelled) {
-          setError((e as Error).message);
-          setBusy(false);
+          setError(`连接中断，任务状态暂时未知；恢复后继续读取同一任务。${(e as Error).message}`);
+          timer = setTimeout(poll, 1500);
         }
       }
     };
@@ -141,7 +150,10 @@ export function BusinessPages({
     setError("");
     try {
       const r = await fn();
-      if (r?.job_id) setJob(r);
+      if (r?.job_id) {
+        sessionStorage.setItem('atr_active_business_job', JSON.stringify({business_id: selected, job_id: r.job_id}));
+        setJob(r);
+      }
       else {
         await reload();
         setBusy(false);
@@ -185,10 +197,10 @@ export function BusinessPages({
           <span className="eyebrow">ATR V2.1</span>
           <h1>
             {page === "onboarding"
-              ? "新业务接入"
+              ? "导入业务资料"
               : page === "business"
-                ? "业务档案"
-                : "服务器范围确认"}
+                ? "业务概览"
+                : "服务器与服务"}
           </h1>
           <p>资料先建立骨架，运行事实通过受限读取与人工审核核验。</p>
         </div>
@@ -236,7 +248,7 @@ export function BusinessPages({
               "静态/模型分析",
               "画像审核",
               "运行环境关联",
-              "保存业务档案",
+              "保存业务概览",
             ].map((x, i) => (
               <li key={x}>
                 <b>{i + 1}</b>
@@ -246,7 +258,7 @@ export function BusinessPages({
           </ol>
           <div className="two-column">
             <section className="panel">
-              <h2>创建业务档案</h2>
+              <h2>创建业务概览</h2>
               <form
                 className="form"
                 onSubmit={(e) => {
@@ -1231,7 +1243,7 @@ export function BusinessPages({
         </>
       )}
       {!selected && page !== "onboarding" && (
-        <p className="muted">请先在“新业务接入”创建档案。</p>
+        <p className="muted">请先在“导入业务资料”创建档案。</p>
       )}
     </>
   );
@@ -1275,7 +1287,7 @@ function DependencyGraph({ profile }: { profile: Row }) {
           markerHeight="7"
           orient="auto-start-reverse"
         >
-          <path d="M0 0L10 5L0 10z" fill="#58c9ab" />
+          <path d="M0 0L10 5L0 10z" fill="var(--accent)" />
         </marker>
       </defs>
       {relations
@@ -1290,7 +1302,7 @@ function DependencyGraph({ profile }: { profile: Row }) {
                 y1={a.y}
                 x2={b.x}
                 y2={b.y}
-                stroke="#58c9ab"
+                stroke="var(--accent)"
                 strokeDasharray={r.certainty === "inferred" ? "5 4" : undefined}
                 markerEnd="url(#dependency-arrow)"
               />
@@ -1310,14 +1322,14 @@ function DependencyGraph({ profile }: { profile: Row }) {
               width="270"
               height="36"
               rx="6"
-              fill="#142e32"
-              stroke="#497d70"
+              fill="var(--panel2)"
+              stroke="var(--accent-line)"
             />
             <text
               x={p.x}
               y={p.y + 4}
               textAnchor="middle"
-              fill="#d4e9e3"
+              fill="var(--text)"
               fontSize="12"
             >
               {n.length > 34 ? n.slice(0, 32) + "…" : n}

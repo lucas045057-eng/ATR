@@ -30,8 +30,10 @@ def verify_package():
     return root/'3.0.1'
 
 
-def render_snapshot(projected: dict, deadline: float, cache_root: Path) -> dict:
-    key=digest({'projection':projected,'renderer':'archify-3.0.1'})
+def render_snapshot(projected: dict, deadline: float, cache_root: Path,theme: str='dark') -> dict:
+    if theme not in {'light','dark'}:
+        raise ValueError('未知图主题')
+    key=digest({'projection':projected,'renderer':'archify-3.0.1','theme':theme})
     directory=cache_root/key
     output=directory/'diagram.html'
     receipt=directory/'receipt.json'
@@ -55,6 +57,7 @@ def render_snapshot(projected: dict, deadline: float, cache_root: Path) -> dict:
     if len(raw)>8*1024*1024 or b'<svg' not in raw:
         raise ValueError('结构图输出超限或缺少有效图形')
     metadata={'snapshot_id':projected['snapshot_id'],'view':projected['view'],'renderer':'archify-3.0.1',
+              'theme':theme,
               'html_sha256':hashlib.sha256(raw).hexdigest(),'node_count':projected['node_count'],'edge_count':projected['edge_count']}
     receipt.write_text(dumps(metadata),encoding='utf-8')
     return {**metadata,'html':raw.decode('utf-8'),'cached':False}
