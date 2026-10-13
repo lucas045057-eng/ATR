@@ -55,6 +55,16 @@ def test_full_media_path_does_not_apply_text_read_limit(tmp_path,monkeypatch,suf
     assert not result['pages'][0]['semantic_relations_verified']
 
 
+def test_pdf_single_file_limit_is20_mib_before_native_decode(tmp_path):
+    path=tmp_path/'oversize.pdf'
+    with path.open('wb') as file:
+        file.write(b'%PDF-1.4\n')
+        file.seek(20*1024*1024)
+        file.write(b'!')
+    with pytest.raises(ValueError,match='media_file_size_limit'):
+        process_media(path,{'content_digest':'not-read','derived_dir':str(tmp_path/'derived')},{},time.monotonic()+120)
+
+
 def test_51_page_pdf_continues_without_reprocessing_first_batch(tmp_path,monkeypatch):
     monkeypatch.setattr(media_worker,'ocr',lambda image:[])
     path=tmp_path/'guide.pdf'

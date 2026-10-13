@@ -93,7 +93,7 @@ def vision_frame(image,output,number):
 def process_media(path: Path, source: dict, cursor: dict, deadline: float) -> dict:
     path=Path(path)
     pdf=path.suffix.lower()=='.pdf'
-    if path.stat().st_size>(50 if pdf else 20)*1024*1024:
+    if path.stat().st_size>20*1024*1024:
         raise ValueError('media_file_size_limit')
     if not 1<=int(source.get('max_pages',50))<=50:
         raise ValueError('media_batch_page_limit')
@@ -101,7 +101,7 @@ def process_media(path: Path, source: dict, cursor: dict, deadline: float) -> di
     digest=hashlib.sha256(raw).hexdigest()
     if digest!=source['content_digest']:
         raise ValueError('media_original_digest_changed')
-    if len(raw)>(50 if pdf else 20)*1024*1024:
+    if len(raw)>20*1024*1024:
         raise ValueError('media_file_size_limit')
     output=Path(source['derived_dir'])
     output.mkdir(parents=True,exist_ok=True)
