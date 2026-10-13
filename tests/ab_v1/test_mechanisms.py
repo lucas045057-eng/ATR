@@ -18,8 +18,8 @@ def inputs():
     facts = [
         {"fact_id": "db-state", "kind": "service_state", "target_node_id": "db", "value": "inactive", "evidence_id": "e-db", "call_id": "c-db", "freshness": "current"},
         {"fact_id": "app-state", "kind": "service_state", "target_node_id": "app", "value": "failed", "evidence_id": "e-app", "call_id": "c-app", "freshness": "current", "startup_cycle": "boot-2"},
-        {"fact_id": "app-log", "kind": "log_observation", "target_node_id": "app", "value": {"mechanisms": ["dependency_unavailable_at_startup"]}, "evidence_id": "e-log", "call_id": "c-log", "freshness": "current", "startup_cycle": "boot-2"},
-        {"fact_id": "proxy-log", "kind": "log_observation", "target_node_id": "proxy", "value": {"mechanisms": ["upstream_unavailable"]}, "evidence_id": "e-proxy", "call_id": "c-proxy", "freshness": "current"},
+        {"fact_id": "app-log", "kind": "log_observation", "target_node_id": "app", "value": {"mechanisms": ["dependency_unavailable_at_startup"], "endpoint_ids": ["mysql:3306"]}, "evidence_id": "e-log", "call_id": "c-log", "freshness": "current", "startup_cycle": "boot-2"},
+        {"fact_id": "proxy-log", "kind": "log_observation", "target_node_id": "proxy", "value": {"mechanisms": ["upstream_unavailable"], "endpoint_ids": ["app:8000"]}, "evidence_id": "e-proxy", "call_id": "c-proxy", "freshness": "current"},
         {"fact_id": "entry", "kind": "http_status", "target_node_id": "proxy", "value": 502, "evidence_id": "e-http", "call_id": "c-http", "freshness": "current"},
     ]
     relations = [

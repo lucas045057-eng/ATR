@@ -34,3 +34,12 @@ def test_current_http_observation_becomes_a_cited_fact():
     assert facts[0]["kind"] == "http_status"
     assert facts[0]["value"] == 502
     assert facts[0]["observed_on"] == "proxy"
+
+
+def test_fact_extraction_preserves_shared_observation_identity():
+    from app.agent.decision_runtime import facts_from_state
+    state = gate_state()
+    for evidence in state["evidence"]:
+        evidence["payload"]["observation_id"] = "same-acquisition"
+    facts = facts_from_state(state)
+    assert facts and all(fact["observation_id"] == "same-acquisition" for fact in facts)

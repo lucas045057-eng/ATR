@@ -48,3 +48,30 @@ def test_already_cancelled_request_does_not_start_a_process(tmp_path):
     with pytest.raises(InterruptedError):
         runner()([sys.executable, "-c", code, str(marker)], b"{}", timeout=3, cancelled=cancelled)
     assert not marker.exists()
+
+
+def test_cancellation_after_spawn_is_checked_before_releasing_request(tmp_path):
+    class Cancellation:
+        calls = 0
+
+        def is_set(self):
+            self.calls += 1
+            return self.calls >= 2
+
+    marker = tmp_path / "executed.txt"
+    code = "import pathlib,sys; x=sys.stdin.buffer.read(); pathlib.Path(sys.argv[1]).write_bytes(x) if x else None"
+    with pytest.raises(InterruptedError):
+        runner()([sys.executable, "-c", code, str(marker)], b"private-request", timeout=3, cancelled=Cancellation())
+    assert not marker.exists()
+
+
+def test_cancelled_result_cannot_be_accepted_after_child_exit(tmp_path):
+    marker = tmp_path / "cancelled.txt"
+
+    class Cancellation:
+        def is_set(self):
+            return marker.exists()
+
+    code = "import pathlib,sys; sys.stdin.buffer.read(); pathlib.Path(sys.argv[1]).write_text('cancelled'); print('result')"
+    with pytest.raises(InterruptedError):
+        runner()([sys.executable, "-c", code, str(marker)], b"{}", timeout=3, cancelled=Cancellation())

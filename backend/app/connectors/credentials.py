@@ -77,7 +77,7 @@ class SessionCredentials:
         with self._lock:
             password = self.resolve(config, owner)
             entry = self._entries[config["credential_ref"]]
-            return {"password": password.get_secret_value(), "ttl": entry.deadline - time.monotonic()}
+            return {"password": password.get_secret_value(), "deadline": entry.deadline}
 
     def revoke(self, config, owner):
         with self._lock:

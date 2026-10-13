@@ -61,6 +61,8 @@ def run_bounded(arguments: list[str], request: bytes, *, timeout: float, max_out
     if cancelled is not None and cancelled.is_set():
         raise InterruptedError("Process request cancelled")
     deadline = time.monotonic() + timeout
+    if sys.platform == "linux":
+        arguments = [sys.executable, "-m", "app.runtime.process_bootstrap", *arguments]
     process = subprocess.Popen(arguments, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, env=child_environment(),
                                start_new_session=sys.platform != "win32")
@@ -83,6 +85,9 @@ def run_bounded(arguments: list[str], request: bytes, *, timeout: float, max_out
 
     def write():
         try:
+            if (cancelled is not None and cancelled.is_set()) or time.monotonic() >= deadline:
+                process.stdin.close()
+                return
             process.stdin.write(request)
             process.stdin.close()
         except (OSError, ValueError):
@@ -91,6 +96,8 @@ def run_bounded(arguments: list[str], request: bytes, *, timeout: float, max_out
     try:
         if sys.platform == "win32":
             job = _windows_job(process)
+        if (cancelled is not None and cancelled.is_set()) or time.monotonic() >= deadline:
+            raise InterruptedError("Process dispatch no longer authorized")
         for name in buffers:
             thread = threading.Thread(target=read, args=(getattr(process, name), name), daemon=True)
             thread.start()
@@ -107,10 +114,16 @@ def run_bounded(arguments: list[str], request: bytes, *, timeout: float, max_out
             time.sleep(min(0.01, max(0, deadline - time.monotonic())))
         for thread in readers:
             thread.join(timeout=max(0, deadline - time.monotonic()))
+        if cancelled is not None and cancelled.is_set():
+            raise InterruptedError("Process request cancelled")
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Process request deadline exceeded")
         if any(thread.is_alive() for thread in readers):
             raise TimeoutError("Process descendant retained output channel")
         if exceeded.is_set():
             raise ValueError("Process output limit exceeded")
+        if process.returncode == 72:
+            raise RuntimeError("Process containment unavailable")
         return {"returncode": process.returncode, "stdout": bytes(buffers["stdout"]),
                 "stderr": bytes(buffers["stderr"]), "pid": process.pid}
     finally:

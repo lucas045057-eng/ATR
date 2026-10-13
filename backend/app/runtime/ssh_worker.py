@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import time
 from types import SimpleNamespace
 
 from pydantic import SecretStr
@@ -13,6 +14,18 @@ from app.connectors.policy import check
 from app.connectors.ssh import SSHConnector
 from app.connectors.standard_ssh import StandardSSHConnector
 from app.tools.registry import sanitize_payload
+
+
+def encode_response(response: dict, password: str) -> str:
+    def redact(value):
+        if isinstance(value, str):
+            return value.replace(password, "[REDACTED]") if password else value
+        if isinstance(value, dict):
+            return {redact(key): redact(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [redact(item) for item in value]
+        return value
+    return json.dumps(redact(response), ensure_ascii=False)
 
 
 def main():
@@ -29,7 +42,7 @@ def main():
         owner = request["owner"]
         settings = SimpleNamespace(ssh_enabled=True, operator_id=owner, ssh_credentials="{}")
         if config.get("auth_mode") == "password":
-            ttl = authentication["ttl"]
+            ttl = authentication["deadline"] - time.monotonic()
             if not isinstance(ttl, (int, float)) or ttl <= 0:
                 raise credentials.CredentialUnavailable()
             credentials.TTL_SECONDS = min(ttl, config["timeout_seconds"])
@@ -39,9 +52,7 @@ def main():
         connector = (SSHConnector(config, settings) if config.get("execution_mode") == "forced_gateway"
                      else StandardSSHConnector({**config, "_approved": approved}, settings))
         response = {"payload": sanitize_payload(connector.read(request["tool_id"], args))}
-        encoded = json.dumps(response, ensure_ascii=False)
-        if authentication.get("password"):
-            encoded = encoded.replace(authentication["password"], "[REDACTED]")
+        encoded = encode_response(response, authentication.get("password", ""))
     except Exception as exc:
         code = getattr(exc, "code", "ssh_tool_failed")
         if not isinstance(code, str) or not re.fullmatch(r"[a-z_]{1,80}", code):

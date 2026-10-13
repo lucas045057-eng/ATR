@@ -69,3 +69,18 @@ def test_health_requires_all_predefined_checks_and_no_fault_evidence():
     assert evaluate(state, [])["diagnosis_status"] == "unresolved"
     state["health_checks"].append({"check_id": "entry", "status": "healthy", "evidence_id": "e-http"})
     assert evaluate(state, [])["diagnosis_status"] == "no_fault_observed"
+
+
+def test_subset_of_rules_cannot_redefine_the_required_complete_chain():
+    state, assessments = complete_state()
+    state["required_rule_ids"] = ["dependency_unavailable_at_startup"]
+    result = evaluate(state, assessments[:1])
+    assert result["diagnosis_status"] == "partial"
+    assert result["completion_satisfied"] is False
+
+
+def test_failure_endpoint_must_match_the_verified_relationship():
+    state, assessments = complete_state()
+    state["facts"][2]["value"]["endpoint_ids"] = ["other-db:5432"]
+    state["facts"][3]["value"]["endpoint_ids"] = ["other-app:9000"]
+    assert evaluate(state, assessments)["completion_satisfied"] is False

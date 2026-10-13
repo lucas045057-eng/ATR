@@ -32,6 +32,8 @@ class ResultEvaluator:
         relations = state.get("graph", {}).get("edges", [])
         scope = state.get("investigation_scope", {})
         required = state.get("required_rule_ids", list(REQUIRED_CHAIN))
+        if required:
+            required = list(dict.fromkeys([*REQUIRED_CHAIN, *required]))
         verified, gaps, counter = [], [], []
         proposals = {item.get("rule_id"): item for item in assessments if isinstance(item, dict)}
         for rule_id in required:

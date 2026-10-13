@@ -18,6 +18,7 @@ from pydantic import (
 )
 
 from app.agent.log_events import normalize_log_events, parse_log_time, parse_time
+from app.agent.mechanisms import connection_endpoints
 from app.agent.model_schema import allowed_service_nodes
 from app.agent.verification import FAILED, HEALTHY, LOG_TOOLS, MECHANISMS, NON_EVENTS, STATUS_TOOLS
 from app.context.model_errors import (
@@ -146,6 +147,7 @@ def facts_from_state(state: dict[str, Any]) -> list[dict[str, Any]]:
             "freshness": evidence.get("freshness_state", "current"),
             "independent_observation": bool(evidence.get("call_id")),
             "call_id": evidence.get("call_id"),
+            "observation_id": evidence.get("observation_id") or evidence.get("payload", {}).get("observation_id"),
             "observed_on": target_id,
             "startup_cycle": evidence.get("startup_cycle") or evidence.get("payload", {}).get("startup_cycle")
                              or evidence.get("payload", {}).get("started_at"),
@@ -181,6 +183,7 @@ def facts_from_state(state: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         for target_id in targets:
             mechanisms = set()
+            endpoints = set()
             failure_signal = False
             for event in normalize_log_events(text, evidence):
                 line, stamp = event.raw_line, event.event_time_utc
@@ -192,9 +195,10 @@ def facts_from_state(state: dict[str, Any]) -> list[dict[str, Any]]:
                 )
                 mechanisms.update(mode for mode, pattern in MECHANISMS.items()
                                   if re.search(pattern, line, re.I))
+                endpoints.update(connection_endpoints(line))
             if failure_signal or mechanisms:
                 add(evidence, target_id, "log_observation",
-                    {"failure_signal": failure_signal, "mechanisms": sorted(mechanisms)})
+                    {"failure_signal": failure_signal, "mechanisms": sorted(mechanisms), "endpoint_ids": sorted(endpoints)})
     return facts
 
 

@@ -1,10 +1,19 @@
 """Registered causal contracts; adjacent objects never corroborate by proximity."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 FAILED = {"failed", "exited", "dead", "inactive", "restarting"}
 HEALTHY = {"active", "running", "healthy"}
+
+
+def connection_endpoints(line: str) -> list[str]:
+    if not re.search(r"failed|refused|unavailable|cannot|can't|could not|OperationalError|ConnectException", line, re.I):
+        return []
+    return list(dict.fromkeys(f"{host.lower()}:{port}" for host, port in re.findall(
+        r"\b([A-Za-z][A-Za-z0-9_.-]*|\d{1,3}(?:\.\d{1,3}){3}):(\d{1,5})\b", line
+    ) if 0 < int(port) <= 65535))
 
 
 @dataclass(frozen=True)
@@ -49,6 +58,7 @@ class MechanismRegistry:
             if edge.get("relation") != "depends_on" or left not in authorized or right not in authorized:
                 continue
             attributes = edge.get("attributes", {})
+            endpoint_ids = {attributes.get("endpoint_id"), *attributes.get("verified_endpoint_ids", [])}
             gaps, supports, counter = [], [], []
 
             def gap(requirement):
@@ -77,7 +87,8 @@ class MechanismRegistry:
                 if not cycle:
                     gap("current_startup_identity")
                 logs = require(left, "log_observation", lambda fact: rule_id in fact.get("value", {}).get("mechanisms", [])
-                               and bool(cycle) and fact.get("startup_cycle") == cycle, "current_startup_connection_failure")
+                               and bool(cycle) and fact.get("startup_cycle") == cycle
+                               and bool(set(fact.get("value", {}).get("endpoint_ids", [])) & endpoint_ids), "current_startup_connection_failure")
                 if states and (not cycle or states[-1].get("startup_cycle") != cycle):
                     gap("consumer_state_startup_identity")
                 if states and logs and (states[-1]["call_id"] == logs[-1]["call_id"]
@@ -88,8 +99,11 @@ class MechanismRegistry:
             elif rule_id == "upstream_unavailable":
                 states = require(right, "service_state", unavailable, "upstream_failed_state")
                 http = require(left, "http_status", lambda fact: fact.get("value") == 502, "current_entry_502")
-                logs = require(left, "log_observation", lambda fact: rule_id in fact.get("value", {}).get("mechanisms", []), "proxy_upstream_connection_failure")
-                if logs and any(item[-1]["call_id"] == logs[-1]["call_id"] for item in (states, http) if item):
+                logs = require(left, "log_observation", lambda fact: rule_id in fact.get("value", {}).get("mechanisms", [])
+                               and bool(set(fact.get("value", {}).get("endpoint_ids", [])) & endpoint_ids), "proxy_upstream_connection_failure")
+                if logs and any(item[-1]["call_id"] == logs[-1]["call_id"]
+                                or item[-1].get("observation_id") and item[-1].get("observation_id") == logs[-1].get("observation_id")
+                                for item in (states, http) if item):
                     gap("independent_upstream_observations")
                 counter = [fact for fact in facts if fact.get("kind") == "service_state" and fact["target_node_id"] == right and fact.get("value") in HEALTHY
                            or fact.get("kind") == "http_status" and fact["target_node_id"] == left and fact.get("value") == 200]
