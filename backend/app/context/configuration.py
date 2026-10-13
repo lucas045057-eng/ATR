@@ -11,9 +11,16 @@ from urllib.parse import urlsplit
 from cryptography.fernet import Fernet, InvalidToken
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
-from app.common import dumps, uid
+from app.common import digest, dumps, uid
 
 CONFIGURATION_LOCK = threading.RLock()
+
+
+def revision(settings):
+    from app.context.capabilities import configuration_digest
+    return digest({'configuration':configuration_digest(settings),'enabled':settings.external_model_enabled,
+                   'json_supported':settings.model_json_supported,'reasoning_effort':settings.model_reasoning_effort,
+                   'context_window':settings.model_context_window,'max_output':settings.model_max_output_tokens})
 
 
 class ModelConfiguration(BaseModel):

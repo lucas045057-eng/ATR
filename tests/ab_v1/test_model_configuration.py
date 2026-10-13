@@ -79,3 +79,14 @@ def test_text_probe_requires_actual_valid_json_and_invalid_json_keeps_http_statu
     assert caught.value.diagnostic['status_code']==200
     usage=manager.get(budget_id)['usage_records'][0]
     assert usage['diagnostic']['http_status']==200 and usage['usage_kind']=='actual'
+
+
+def test_captured_settings_cannot_send_after_authorization_or_configuration_changes(fake_model,monkeypatch):  # noqa: F811
+    database,settings,state,_=fake_model
+    object.__setattr__(settings,'model_configuration_revision','captured-revision')
+    current=settings.model_copy(update={'external_model_enabled':False,'model_configuration_revision':'disabled-revision'})
+    monkeypatch.setattr('app.settings.get_settings',lambda:current)
+    budget_id=ContextBudgetManager(database,settings).create('initial')
+    with pytest.raises(ValueError,match='模型设置已变化|外部分析已关闭'):
+        call_json(database,settings,budget_id,'source',{'private_business_material':'synthetic'})
+    assert state['requests']==0

@@ -8,7 +8,7 @@ import re
 import warnings
 from pathlib import Path
 
-from app.tools.redaction import redact_text
+from app.tools.redaction import redact_condition, redact_text
 
 LANGUAGES = {'.py': 'Python', '.js': 'JavaScript', '.jsx': 'JavaScript', '.mjs': 'JavaScript',
              '.cjs': 'JavaScript', '.ts': 'TypeScript', '.tsx': 'TypeScript', '.java': 'Java',
@@ -18,7 +18,7 @@ GRAMMARS = {'JavaScript': ('tree_sitter_javascript', 'language'),
             'Java': ('tree_sitter_java', 'language'), 'C': ('tree_sitter_c', 'language'),
             'C++': ('tree_sitter_cpp', 'language')}
 HTTP = {'get', 'post', 'put', 'patch', 'delete', 'head', 'options'}
-VERSION = 'ab-source-syntax-2'
+VERSION = 'ab-source-syntax-3'
 
 
 def sql_operation(text, ref):
@@ -215,7 +215,7 @@ def _python(content, relative, info, ref):
                       ('finally',getattr(node,'finalbody',[]))]
             groups += [('except:'+ast.unparse(handler.type) if handler.type else 'except', handler.body)
                        for handler in getattr(node,'handlers',[])]
-            groups += [('case:'+redact_text(ast.unparse(case.pattern))[:120],case.body)
+            groups += [('case:'+redact_condition(ast.unparse(case.pattern))[:120],case.body)
                        for case in getattr(node,'cases',[])]
             for label, body in groups:
                 if not isinstance(body,list):
@@ -224,7 +224,8 @@ def _python(content, relative, info, ref):
                     arms.append({'label':label,'start_line':body[0].lineno,'end_line':body[-1].end_lineno})
             info['branches'].append({'function': owner(node), 'kind': type(node).__name__, 'line': node.lineno,
                                       'end_line': node.end_lineno, 'arms':arms,
-                                      'condition':redact_text(ast.unparse(node.test))[:200] if hasattr(node,'test') else None,
+                                      'condition':redact_condition(ast.unparse(node.test))[:200] if hasattr(node,'test') else None,
+                                      'condition_source_refs':[ref(node.test.lineno,node.test.end_lineno)] if hasattr(node,'test') else [],
                                       'source_refs': [ref(node.lineno, node.end_lineno)]})
         elif isinstance(node, ast.Subscript) and _dotted(node.value) == 'os.environ' and isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str):
             info['environment_keys'].append(node.slice.value[:120])
@@ -470,7 +471,8 @@ def _tree(raw, language, suffix, info, ref):
                     arms.append({'label':child.type,'start_line':child.start_point.row+1,'end_line':child.end_point.row+1})
             condition=node.child_by_field_name('condition')
             info['branches'].append({'function':caller,'kind':node.type,'line':line,'end_line':end,
-                                    'arms':arms,'condition':redact_text(text(condition))[:200] if condition else None,'source_refs':[source]})
+                                    'arms':arms,'condition':redact_condition(text(condition))[:200] if condition else None,
+                                    'condition_source_refs':[ref(condition.start_point.row+1,condition.end_point.row+1)] if condition else [],'source_refs':[source]})
         if node.type == 'member_expression':
             value = dotted(node)
             if value and re.fullmatch(r'process\.env\.[A-Z0-9_]+',value):

@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     model_vision_supported: bool = False
     model_context_window: int = Field(default=32768, ge=1024)
     model_max_output_tokens: int = Field(default=1500, ge=64, le=8000)
+    model_configuration_revision: str|None = Field(default=None,exclude=True)
     initial_input_tokens: int = Field(default=8000, ge=1)
     investigation_input_tokens: int = Field(default=12000, ge=1)
     initial_model_calls: int = Field(default=6, ge=1, le=20)
@@ -122,5 +123,7 @@ def get_settings() -> Settings:
     for root in settings.repository_root_paths():
         if not root.exists() or not root.is_dir():
             raise ValueError(f"Configured repository root does not exist: {root}")
-    from app.context.configuration import load
-    return load(settings)
+    from app.context.configuration import load, revision
+    settings=load(settings)
+    settings.model_configuration_revision=revision(settings)
+    return settings

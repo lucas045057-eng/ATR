@@ -20,6 +20,18 @@ _AWS_ACCESS_KEY = re.compile(r"\bAKIA[0-9A-Z]{16}\b")
 _PRIVATE_KEY_BLOCK = re.compile(
     r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----", re.DOTALL
 )
+_SOURCE_LITERAL = re.compile(r'''(["'`])(?:\\.|(?!\1)[\s\S])*?\1''')
+_CREDENTIAL_CONTEXT = re.compile(r'(?i)password|passwd|token|secret|api.?key|authorization|credentials?|hmac|compare.?digest|\bauth\b')
+
+
+def redact_condition(value: str) -> str:
+    # Conditional literals can be credential arguments rather than assignments.
+    return redact_text(_SOURCE_LITERAL.sub('"[REDACTED_LITERAL]"',value))
+
+
+def redact_source_text(value: str) -> str:
+    return redact_text('\n'.join(redact_condition(line) if _CREDENTIAL_CONTEXT.search(line) else line
+                                 for line in value.splitlines()))
 
 
 def redact_text(value: str) -> str:

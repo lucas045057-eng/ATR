@@ -6,7 +6,7 @@ import json
 from app.business.models import CodeContext, CodeSearch
 from app.business.service import BusinessService
 from app.context.budget import ContextBudgetManager
-from app.tools.redaction import redact_text
+from app.tools.redaction import redact_condition, redact_source_text
 
 
 class SourceIndex:
@@ -83,12 +83,18 @@ class SourceIndex:
             symbol = matches[0]
             start = symbol["start"]
         lines = raw.decode("utf-8-sig").splitlines()
-        for operation in json.loads(row['parse_json']).get('data_operations',[]):
+        parsed=json.loads(row['parse_json'])
+        for branch in parsed.get('branches',[]):
+            # Old parser receipts have broader references; conservatively hide their literals too.
+            for reference in branch.get('condition_source_refs',branch.get('source_refs',[])):
+                for line in range(reference['start_line']-1,min(len(lines),reference['end_line'])):
+                    lines[line]=redact_condition(lines[line])
+        for operation in parsed.get('data_operations',[]):
             if operation.get('sensitive'):
                 for reference in operation.get('source_refs',[]):
                     for line in range(reference['start_line']-1,min(len(lines),reference['end_line'])):
                         lines[line]='[已隐藏涉及凭据的数据操作，原行号保留]'
-        text = redact_text("\n".join(lines[start - 1 : start - 1 + request.max_lines]))
+        text = redact_source_text("\n".join(lines[start - 1 : start - 1 + request.max_lines]))
         if budget_id:
             ContextBudgetManager(self.db, self.settings).retrieval(budget_id, len(text.encode()))
         return {

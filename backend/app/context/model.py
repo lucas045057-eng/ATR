@@ -138,6 +138,14 @@ def model_messages(system_prompt, context, images=None):
 
 def call_json(database, settings, budget_id, system_prompt, context, validate=None, *, supervision=None,
               images=None, deadline=None, receipt=None):
+    if settings.model_configuration_revision is not None:
+        from app.context.configuration import CONFIGURATION_LOCK
+        from app.settings import get_settings
+        with CONFIGURATION_LOCK:
+            current=get_settings()
+            if (not current.external_model_enabled
+                    or current.model_configuration_revision!=settings.model_configuration_revision):
+                raise ModelUnavailable('模型设置已变化或外部分析已关闭，请重新发起本次任务')
     if (
         not settings.external_model_enabled
         or not settings.model_name

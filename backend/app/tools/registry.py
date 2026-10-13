@@ -13,6 +13,7 @@ from fastapi import HTTPException
 
 from app.settings import Settings
 from app.storage.database import Database
+from app.tools.redaction import redact_condition
 from app.tools.redaction import redact_text as sanitize
 
 
@@ -22,11 +23,12 @@ def utcnow() -> str:
 
 def sanitize_payload(value: Any) -> Any:
     if isinstance(value, str):
-        return sanitize(value)
+        return redact_condition(value) if value.startswith('case:') else sanitize(value)
     if isinstance(value, list):
         return [sanitize_payload(item) for item in value]
     if isinstance(value, dict):
         return {key: "[REDACTED]" if re.search(r"(?i)password|passwd|secret|token|api.?key|private.?key|authorization|cookie", str(key))
+                else redact_condition(item) if key=='condition' and isinstance(item,str)
                 else sanitize_payload(item) for key, item in value.items()}
     return value
 
