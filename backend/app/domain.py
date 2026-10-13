@@ -42,9 +42,17 @@ class InvestigationRunRequest(StrictModel):
     decision_protocol: Literal['legacy_v22', 'minimal_v2', 'ab_v1'] | None = None
 
 
+class RuntimeScopeSelection(StrictModel):
+    option_id: str = Field(min_length=1, max_length=80)
+    service: str | None = Field(default=None, min_length=1, max_length=255)
+    role: Literal['unknown', 'proxy', 'application', 'datastore', 'cache', 'worker', 'queue'] = 'unknown'
+
+
 class ClarificationAnswer(StrictModel):
     question_id: str = Field(min_length=1, max_length=80)
-    version: int = Field(ge=1)
+    version: int = Field(ge=1, strict=True)
+    selections: list[RuntimeScopeSelection] = Field(default_factory=list, max_length=20)
+    confirm_owned: bool = Field(default=False, strict=True)
 
 
 class ReviewRequest(StrictModel):

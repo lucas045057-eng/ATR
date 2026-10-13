@@ -44,6 +44,7 @@ class BusinessProfile(StrictModel):
     unknowns: list[str] = Field(default_factory=list)
     conflicts: list[dict] = Field(default_factory=list)
     review_status: Literal["pending", "approved", "rejected"] = "pending"
+    cognition_state: Literal['empty', 'partial', 'available'] = 'empty'
     model_status: str = "pending"
     model_error: dict | None = None
     coverage: dict = Field(default_factory=dict)

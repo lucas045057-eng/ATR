@@ -57,6 +57,10 @@ class BusinessService:
                 raise KeyError("业务画像版本不存在")
             result = BusinessProfile.model_validate_json(row["profile_json"]).model_dump()
             result["system_id"] = business["system_id"]
+            runtime_known = bool(conn.execute("SELECT 1 FROM service_bindings WHERE business_id=? AND status='confirmed' AND freshness_status='confirmed' LIMIT 1", (business_id,)).fetchone())
+            semantic_known = bool(result['services'] or result['modules'] or result['interfaces'])
+            result['cognition_state'] = ('available' if semantic_known and not result['conflicts'] else
+                                         'partial' if result['facts'] or runtime_known else 'empty')
             return result
         finally:
             conn.close()

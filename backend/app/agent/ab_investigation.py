@@ -22,7 +22,7 @@ from app.context.budget import BudgetLimits, ContextBudgetManager
 from app.context.model import call_json
 from app.runtime.coordinator import get_coordinator
 from app.runtime.processes import run_bounded
-from app.system.scope import binding_is_current
+from app.system.scope import BINDING_TTL_SECONDS, binding_is_current, candidate_digest
 from app.tools.business import BusinessToolRegistry
 from app.tools.registry import sanitize_payload
 
@@ -53,7 +53,11 @@ def clarification_candidates(evidence, previous=(), hints=(), limit=20):
                 if not key[1]:
                     continue
                 choices[key] = {'name': row.get('name', ''), 'runtime_id': key[1], 'kind': kind,
-                                'evidence_id': item['evidence_id'], 'previously_mapped': key in known}
+                                'evidence_id': item['evidence_id'], 'previously_mapped': key in known,
+                                'option_id': digest([kind, key[1], item['evidence_id']]),
+                                'image': row.get('image', ''),
+                                'suggested_service': next((old.get('service') for old in previous
+                                      if (old['kind'], old['runtime_id']) == key), None)}
     def rank(row):
         relevant = any(h and h.casefold() in row['name'].casefold() for h in hints)
         return (not row['previously_mapped'], not relevant, row['kind'] != 'container', row['runtime_id'])
@@ -81,6 +85,9 @@ def prepare_run(database, settings, incident_id, business_id, target_id, job_id,
                      'configured_hard_limits': {'model': settings.investigation_model_rounds,
                                                 'tools': settings.investigation_tool_calls},
                      'effective_limits': limits, 'profile_version': profile['profile_version']}
+    task = json.loads(incident['symptom_json'])
+    configuration['task_type'] = (task.get('task_type', 'root_cause_investigation')
+                                  if task.get('task_type_explicit', True) else 'root_cause_investigation')
     with database.transaction() as tx:
         if not tx.execute('SELECT 1 FROM graph_nodes WHERE snapshot_id=?', (graph['id'],)).fetchone():
             previous = dict(tx.execute('SELECT * FROM graph_snapshots WHERE id=?', (graph['id'],)).fetchone())
@@ -95,6 +102,7 @@ def prepare_run(database, settings, incident_id, business_id, target_id, job_id,
         tx.execute("INSERT INTO diagnosis_runs(id,incident_id,graph_snapshot_id,mode,model_config_json,budget_json,started_at,status,summary_json,target_id,target_snapshot_json) VALUES(?,?,?,'normal',?,?,?,'queued',?,?,?)",
                    (run_id, incident_id, graph['id'], dumps(configuration), dumps(limits), now(),
                     dumps({'business_id': business_id, 'stage': 'queued', 'actor': actor,
+                           'task_type': configuration['task_type'],
                            'profile_version': profile['profile_version'], 'profile_review_status': profile['review_status']}),
                     target_id, dumps(frozen)))
     manager = ContextBudgetManager(database, settings)
@@ -140,7 +148,7 @@ class InvestigationBroker:
         self.graph = current_graph({'nodes': nodes, 'edges': edges}, bindings)
         self.bindings = bindings
         self.symptom = json.loads(self.incident['symptom_json'])
-        self.task_type = self.symptom.get('task_type', 'root_cause_investigation')
+        self.task_type = self.summary.get('task_type', self.symptom.get('task_type', 'root_cause_investigation'))
         service_nodes = {n['name']: n for n in self.graph['nodes'] if n['kind'] == 'service' and n['role'] != 'runtime'}
         usable = [b for b in bindings if b['kind'] in {'service', 'container'} and b['service'] in service_nodes]
         usable.sort(key=lambda b: (b['service'].casefold() not in self.symptom['text'].casefold(),
@@ -193,6 +201,7 @@ class InvestigationBroker:
                          or f['kind'] == 'log_observation'
                          or f['kind'] == 'http_status' and f['value'] >= 400 for f in facts)
         checks = []
+        present = set()
         required = [node + ':' + kind for node in scope for kind in ('status', 'logs')]
         service_ids = {n['name']: n['id'] for n in self.graph['nodes'] if n['id'] in scope}
         required += [service_ids[e['service']] + ':health:' + e['endpoint_id']
@@ -209,17 +218,27 @@ class InvestigationBroker:
                                                   'requirement_id': 'verified_current_startup_cycle'})
                     continue
             if e['tool_id'] == 'health.get':
+                if payload.get('observation_location') == 'remote_ssh' and not payload.get('redirected'):
+                    present.add(node + ':health:' + payload['endpoint_id'])
                 if payload.get('status_code') == 200 and payload.get('observation_location') == 'remote_ssh' and not payload.get('redirected'):
                     checks.append({'check_id': node + ':health:' + payload['endpoint_id'], 'status': 'healthy', 'evidence_id': e['evidence_id']})
                 continue
             healthy = (kind == 'status' and any(f['evidence_id'] == e['evidence_id'] and f['kind'] == 'service_state'
                                                and f['value'] in {'active', 'running', 'healthy'} for f in facts))
-            if kind == 'logs' and not has_faults:
+            if kind == 'status' and any(f['evidence_id'] == e['evidence_id'] and f['kind'] == 'service_state' for f in facts):
+                present.add(node + ':status')
+            if kind == 'logs':
                 events = normalize_log_events(str(payload.get('text', '')), {**payload, **e})
                 observed = parse_time(e['observed_at'])
-                healthy = not events or bool(observed) and all(event.event_time_utc and event.event_time_utc <= observed + timedelta(seconds=5) for event in events)
+                timed = not events or bool(observed) and all(event.event_time_utc and event.event_time_utc <= observed + timedelta(seconds=5) for event in events)
+                if timed:
+                    present.add(node + ':logs')
+                healthy = timed and not has_faults
             if healthy:
                 checks.append({'check_id': node + ':' + kind, 'status': 'healthy', 'evidence_id': e['evidence_id']})
+        state['runtime_gaps'] += [{'rule_id': 'runtime_read', 'target_ids': [check.split(':', 1)[0]],
+                                  'requirement_id': 'current_' + check.split(':', 1)[1].split(':', 1)[0]}
+                                 for check in required if check not in present]
         if required and set(required) <= {c['check_id'] for c in checks} and not has_faults and not self.planner.scope_requests:
             state.update(required_rule_ids=[], required_health_checks=required, health_checks=checks,
                          current_evidence_ids=[e['evidence_id'] for e in self.evidence])
@@ -272,7 +291,7 @@ class InvestigationBroker:
     def gap_action(self, actions):
         for gap in self.result['required_gaps']:
             requirement = gap['requirement_id']
-            suffix = ('logs' if 'log' in requirement else 'status' if 'state' in requirement or 'startup' in requirement
+            suffix = ('health.get' if 'health' in requirement else 'logs' if 'log' in requirement else 'status' if 'status' in requirement or 'state' in requirement or 'startup' in requirement
                       else 'config.read' if 'endpoint' in requirement else None)
             if suffix:
                 for action in actions:
@@ -378,11 +397,11 @@ class InvestigationBroker:
             self.collect(action)
             return {'continue': True}
         with self.db.connect() as tx:
-            previous = [dict(row) for row in tx.execute('SELECT kind,runtime_id FROM service_bindings WHERE business_id=? AND target_id=?',
+            previous = [dict(row) for row in tx.execute('SELECT kind,runtime_id,service FROM service_bindings WHERE business_id=? AND target_id=?',
                         (self.business_id, self.target_id))]
         candidates, omitted = clarification_candidates(self.evidence, previous, (self.symptom['text'],))
         question = {'question_id': uid(), 'version': 1, 'kind': 'runtime_scope',
-                    'text': '基础发现已完成。请在服务器范围中确认这次需要读取的业务服务映射，再继续本次调查。',
+                    'text': '基础发现已完成。请选择属于本业务且允许读取的运行对象；尚不清楚业务作用时保留“未知”。',
                     'impact': '名称相似不能证明属于当前业务；确认前不读取候选对象的详细日志。',
                     'options': candidates, 'omitted_count': omitted, 'target_id': self.target_id}
         self.persist()
@@ -445,7 +464,63 @@ def default_window():
     return (datetime.now(timezone.utc) - timedelta(minutes=15)).isoformat()
 
 
-def resume_run(database, settings, run_id, answer):
+def confirm_runtime_options(database, settings, run_id, business_id, target_id, question, answer, actor):
+    if not answer.confirm_owned:
+        raise ValueError('选择运行对象后，还需明确确认对象属于本业务且允许只读检查')
+    options = {row['option_id']: row for row in question.get('options', []) if row.get('option_id')}
+    if len({row.option_id for row in answer.selections}) != len(answer.selections):
+        raise ValueError('不能重复确认同一个运行对象')
+    profile = BusinessService(database, settings).get(business_id)
+    semantic = {row['name']: row['role'] for row in profile['services']}
+    selected = []
+    with database.transaction() as tx:
+        discovery_id = uid()
+        tx.execute("INSERT INTO discovery_runs VALUES(?,?,?,'completed',?,?)",
+                   (discovery_id, business_id, target_id, dumps({'run_id': run_id, 'question_id': question['question_id'],
+                    'source': 'explicit_runtime_scope_confirmation'}), now()))
+        for selection in answer.selections:
+            option = options.get(selection.option_id)
+            if option is None:
+                raise ValueError('回答包含不属于当前问题的对象，未增加授权')
+            service = selection.service or option.get('suggested_service') or option['name']
+            if service in {row['service'] for row in selected}:
+                raise ValueError('同一次确认不能把多个对象合并成同一个业务服务')
+            if selection.role != 'unknown' and service in semantic and semantic[service] != selection.role:
+                raise ValueError('选择的作用与原业务资料冲突，请保留未知或单独核对该项')
+            observed = tx.execute('SELECT e.observed_at,e.payload_redacted_json,t.request_id,t.target_id FROM evidence e JOIN tool_calls t ON t.id=e.tool_call_id WHERE e.id=? AND t.run_id=?',
+                                  (option['evidence_id'], run_id)).fetchone()
+            if not observed or observed['target_id'] != target_id:
+                raise ValueError('原发现证据不属于当前调查目标')
+            stamp = parse_time(observed['observed_at'])
+            if not stamp or not stamp <= datetime.now(timezone.utc) < stamp + timedelta(seconds=BINDING_TTL_SECONDS):
+                raise ValueError('原发现观测已过期，需要重新采集，不能用答案刷新证据时间')
+            field = 'services' if option['kind'] == 'service' else 'containers'
+            candidate = next((row for row in json.loads(observed['payload_redacted_json']).get(field, [])
+                             if row.get('id') == option['runtime_id'] and row.get('kind') == option['kind']), None)
+            if candidate is None:
+                raise ValueError('运行身份未出现在原发现观测中')
+            source = {'run_id': run_id, 'question_id': question['question_id'], 'question_version': question['version'],
+                      'runtime_scope_confirmation': True, 'runtime_name': candidate['name'],
+                      'observation_id': observed['request_id'], 'evidence_id': option['evidence_id'],
+                      'role': semantic.get(service, selection.role), 'actor': actor, 'confirmed_at': now()}
+            binding_id = uid()
+            tx.execute("UPDATE service_bindings SET status='superseded' WHERE business_id=? AND target_id=? AND service=? AND status='confirmed'",
+                       (business_id, target_id, service))
+            tx.execute("INSERT INTO service_bindings(id,business_id,target_id,service,runtime_id,kind,score,reasons_json,evidence_ids_json,status,discovery_id,freshness_status,observed_at,expires_at,source_json,candidate_digest) VALUES(?,?,?,?,?,?,0,?,?,'confirmed',?,'confirmed',?,?,?,?)",
+                       (binding_id, business_id, target_id, service, candidate['id'], candidate['kind'],
+                        dumps(['操作者确认当前发现对象属于本业务，作用未知时未推断语义']), dumps([observed['request_id']]),
+                        discovery_id, observed['observed_at'], (stamp + timedelta(seconds=BINDING_TTL_SECONDS)).isoformat(),
+                        dumps(source), candidate_digest(candidate)))
+            tx.execute('INSERT INTO business_reviews VALUES(?,?,?,?,?,?,?,?,?)',
+                       (uid(), business_id, profile['profile_version'], binding_id, digest(source), 'confirm',
+                        '仅确认当前问题的运行身份与只读检查；未批准整个业务档案', actor, now()))
+            selected.append({'service': service, 'binding_id': binding_id})
+    from app.system.business_graph import fuse_business_graph
+    fuse_business_graph(database, profile)
+    return selected
+
+
+def resume_run(database, settings, run_id, answer, *, actor='operator'):
     coordinator = get_coordinator(database)
     # Serialize answers, cancellation and admission for this database owner.
     with coordinator._lock:
@@ -466,12 +541,17 @@ def resume_run(database, settings, run_id, answer):
         if authorization_digest(target) != json.loads(run['target_snapshot_json'])['authorization_digest']:
             raise PermissionError('原调查授权已变化；确认回答不能扩大服务器权限')
         RuntimeService(database, settings).require_credentials(business_id, target_id)
-        if not bindings:
-            raise ValueError('还没有当前已确认的业务对象映射，请先在服务器范围中确认')
         manager = ContextBudgetManager(database, settings)
         budget = manager.get(summary['budget_id'])
         if budget['calls'] >= budget['limits']['max_calls'] or budget['tool_calls'] >= budget['limits']['max_tools']:
             raise ValueError('原调查预算已耗尽，继续不会重置预算')
+        if answer.selections:
+            confirm_runtime_options(database, settings, run_id, business_id, target_id, question, answer, actor)
+            with database.connect() as tx:
+                current_graph_row = tx.execute('SELECT id FROM graph_snapshots WHERE system_id=(SELECT system_id FROM incidents WHERE id=?) ORDER BY version DESC LIMIT 1',
+                                               (run['incident_id'],)).fetchone()
+        elif not bindings:
+            raise ValueError('还没有当前已确认的业务对象映射，请选择对象确认，或在服务器范围中确认')
         job_id = execution['job_id']
         try:
             with database.transaction() as tx:

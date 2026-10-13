@@ -3,7 +3,11 @@ import threading
 import time
 
 import pytest
-from app.agent.ab_investigation import clarification_candidates, effective_limits
+from app.agent.ab_investigation import (
+    InvestigationBroker,
+    clarification_candidates,
+    effective_limits,
+)
 from app.agent.decision_runtime import adapt_minimal_decision
 from app.runtime.coordinator import get_coordinator
 from app.settings import Settings, get_settings
@@ -31,6 +35,17 @@ def test_clarification_keeps_actual_previous_container_in_large_service_inventor
     assert len(selected) == 20 and omitted == 41
 
 
+def test_supplement_selects_the_specific_missing_runtime_check():
+    broker = object.__new__(InvestigationBroker)
+    broker.result = {'required_gaps': [
+        {'requirement_id':'current_logs','target_ids':['db']},
+        {'requirement_id':'authorized_directed_relationship','target_ids':[]}]}
+    actions = [{'action_id':'read-api','target_node_id':'api','tool_id':'container.logs'},
+               {'action_id':'read-db','target_node_id':'db','tool_id':'container.logs'}]
+    gap, action = broker.gap_action(actions)
+    assert gap['target_ids'] == ['db'] and action['action_id'] == 'read-db'
+
+
 def start(client, profile, target):
     event_id = incident(client, profile)
     response = client.post(f'/api/v1/incidents/{event_id}/runs', json={'target_id': target['id'], 'decision_protocol': 'ab_v1'})
@@ -56,6 +71,7 @@ def test_empty_pending_profile_discovers_and_releases_process(client):
     assert run['diagnosis_status'] == 'unresolved'
     assert not run['completion_satisfied']
     assert run['clarification']['question_id']
+    assert run['summary']['task_type'] == 'root_cause_investigation'
     assert {c['tool_id'] for c in run['tool_calls']} == {'host.info', 'service.list', 'container.list'}
     assert all(c['status'] == 'succeeded' for c in run['tool_calls'])
     assert client.get(f"/api/v1/businesses/{profile['business_id']}").json()['review_status'] == 'pending'

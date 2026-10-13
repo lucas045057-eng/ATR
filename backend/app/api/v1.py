@@ -214,7 +214,8 @@ def create_incident(request: IncidentCreate, actor: str = Depends(require_operat
         with db().transaction() as tx:
             tx.execute("INSERT INTO incidents(id,system_id,symptom_json,window_start,window_end,status,created_at) VALUES(?,?,?,?,?,?,?)",
                        (incident_id, request.system_id, json.dumps({"text": request.symptom, "mode": request.mode,
-                                                                    "task_type": request.task_type}),
+                                                                    "task_type": request.task_type,
+                                                                    **({'task_type_explicit': 'task_type' in request.model_fields_set} if business_entry else {})}),
                         request.window_start or (default_window() if business_entry else timestamp), None, "open", timestamp))
         return {"id": incident_id, "system_id": request.system_id, "symptom": request.symptom,
                 "mode": request.mode, "task_type": request.task_type,
@@ -679,7 +680,7 @@ def resume_business_run(run_id: str, request: dict[str, Any] | None = None, acto
         from app.agent.ab_investigation import resume_run
         try:
             answer = ClarificationAnswer.model_validate(request)
-            return resume_run(database, settings, run_id, answer)
+            return resume_run(database, settings, run_id, answer, actor=actor)
         except (ValueError, PermissionError) as exc:
             raise HTTPException(409, '确认问题的编号或版本无效' if type(exc).__name__ == 'ValidationError' else str(exc)) from exc
     with database.connect() as c:

@@ -43,3 +43,13 @@ def test_fact_extraction_preserves_shared_observation_identity():
         evidence["payload"]["observation_id"] = "same-acquisition"
     facts = facts_from_state(state)
     assert facts and all(fact["observation_id"] == "same-acquisition" for fact in facts)
+
+
+def test_ab_http_without_remote_endpoint_identity_cannot_complete_a_chain():
+    from app.agent.decision_runtime import facts_from_state
+    instant = datetime.now(timezone.utc)
+    state = {'decision_protocol':'ab_v1','graph':{'nodes':[{'id':'entry','kind':'service','name':'entry'}]},
+             'incident':{'window_start':(instant-timedelta(minutes=15)).isoformat()},
+             'evidence':[{'evidence_id':'e','call_id':'c','target_node_id':'entry','tool_id':'health.get',
+                          'observed_at':instant.isoformat(),'payload':{'status_code':502}}]}
+    assert facts_from_state(state)[0]['freshness'] == 'unverified_observer'

@@ -137,6 +137,10 @@ def facts_from_state(state: dict[str, Any]) -> list[dict[str, Any]]:
 
     def add(evidence, target_id, kind, value):
         fact_key = json.dumps([evidence.get("evidence_id"), target_id, kind, value], sort_keys=True)
+        payload = evidence.get('payload', {})
+        incomplete = any(payload.get(k) for k in ('partial', 'truncated', 'timeout'))
+        wrong_observer = (state.get('decision_protocol') == 'ab_v1' and kind == 'http_status'
+                          and (payload.get('observation_location') != 'remote_ssh' or not payload.get('endpoint_id')))
         facts.append({
             "fact_id": hashlib.sha256(fact_key.encode()).hexdigest()[:24],
             "kind": kind,
@@ -144,8 +148,7 @@ def facts_from_state(state: dict[str, Any]) -> list[dict[str, Any]]:
             "tool_id": evidence.get("tool_id"), "value": value,
             "observed_at": evidence.get("observed_at"),
             "source": evidence.get("tool_id"),
-            "freshness": 'incomplete' if any(evidence.get('payload', {}).get(k)
-                                             for k in ('partial', 'truncated', 'timeout')) else evidence.get("freshness_state", "current"),
+            "freshness": 'incomplete' if incomplete else 'unverified_observer' if wrong_observer else evidence.get("freshness_state", "current"),
             "independent_observation": bool(evidence.get("call_id")),
             "call_id": evidence.get("call_id"),
             "observation_id": evidence.get("observation_id") or evidence.get("payload", {}).get("observation_id"),

@@ -128,7 +128,11 @@ def fuse_business_graph(database, profile):
                 continue
             key = f"service:{binding['service']}"
             if key not in nodes:
-                continue
+                source = json.loads(binding['source_json'] or '{}')
+                if not source.get('runtime_scope_confirmation'):
+                    continue
+                add('service', binding['service'], source.get('role', 'unknown'),
+                    {'provenance': source, 'business_semantics': 'unknown', 'runtime_scope_only': True})
             config = json.loads(binding["config_json"])
             host = nodes.get(f"host:{binding['target_id']}") or add(
                 "host",
