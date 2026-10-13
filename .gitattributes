@@ -6,3 +6,4 @@
 *.zip binary
 *.tar binary
 *.gz binary
+third_party/licenses/** -text
