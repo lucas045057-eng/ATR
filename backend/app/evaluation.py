@@ -3,6 +3,8 @@
 import json
 from datetime import datetime
 
+from app.run_outcomes import outcome
+
 ARMS = ("graph_only", "graph_pattern", "graph_adaptive")
 
 
@@ -23,11 +25,13 @@ def run_metrics(connection, run):
         return max(0, (datetime.fromisoformat(end) - start).total_seconds()) if end else None
 
     summary = json.loads(run["summary_json"])
+    measured=outcome(connection,run)
     return {
         "diagnostic_tool_calls": len(calls),
         "failed_or_denied_calls": sum(c["status"] in {"failed", "denied", "timed_out"} for c in calls),
         "diagnostic_steps": steps, "tt_rca_seconds": seconds(run["supported_at"]),
-        "elapsed_seconds": seconds(run["ended_at"]), "run_status": run["status"],
+        "elapsed_seconds": seconds(run["ended_at"]), "run_status": measured['status'],
+        'execution_status':measured.get('execution_status',run['status']),
         "stop_reason": summary.get("stop_reason") if isinstance(summary, dict) else None,
         "model_calls": len(usages), "input_tokens": sum(u["input_tokens"] or 0 for u in usages),
         "output_tokens": sum(u["output_tokens"] or 0 for u in usages),
@@ -38,7 +42,24 @@ def run_metrics(connection, run):
 
 
 def assess_truth(connection, case, run):
-    truth = json.loads(case["ground_truth_json"]).get("truth")
+    registered=json.loads(case['ground_truth_json'])
+    measured=outcome(connection,run)
+    if measured['native']:
+        truth=registered.get('segments')
+        if not isinstance(truth,list) or any(not isinstance(item,dict) or set(item)!={'rule_id','participants'}
+                or not isinstance(item['rule_id'],str) or not isinstance(item['participants'],dict)
+                or any(not isinstance(role,str) or not isinstance(service,str) for role,service in item['participants'].items()) for item in truth):
+            raise ValueError('原生 AB 验收需要明确的 segments 真值；不能把旧 failure_mode 自动改写为因果链')
+        names={row['id']:row['name'] for row in connection.execute('SELECT id,name FROM graph_nodes WHERE snapshot_id=?',(run['graph_snapshot_id'],))}
+        diagnosed=[{'rule_id':segment['rule_id'],'participants':{role:names.get(identifier) for role,identifier in segment['participants'].items()}}
+                   for segment in measured['result'].get('verified_segments',[]) if segment.get('status')=='supported']
+        actual={json.dumps(item,sort_keys=True) for item in diagnosed}
+        expected={json.dumps(item,sort_keys=True) for item in truth}
+        verdict='unresolved' if measured['status']=='unresolved' else 'correct' if actual==expected else 'incorrect'
+        return {'expected_verdict':verdict,'false_positive':bool(actual-expected),
+                'partial_diagnosis':bool(actual and actual<=expected and actual!=expected),
+                'diagnosed_segments':diagnosed,'truth_schema':'ab-segments-1'}
+    truth = registered.get("truth")
     if not isinstance(truth, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in truth.items()):
         return None
     names = {r["id"]: r["name"] for r in connection.execute(

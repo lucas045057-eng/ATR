@@ -134,6 +134,7 @@ class RunCoordinator:
             interrupt_usage(tx, usage)
 
     def _finish(self, tx, row, execution, result, reason, stamp, clarification=None):
+        from app.run_outcomes import root_supported
         elapsed = min(row['max_seconds'], self._elapsed(row, stamp))
         result = sanitize_payload(result)
         self._close_pending(tx, row['run_id'], reason)
@@ -143,8 +144,10 @@ class RunCoordinator:
         summary = json.loads(current['summary_json'])
         summary.update(execution_status=execution, diagnosis_status=result['diagnosis_status'],
                        diagnosis_result=result, stop_reason=reason, elapsed_seconds=elapsed)
-        tx.execute('UPDATE diagnosis_runs SET status=?,ended_at=?,summary_json=? WHERE id=?',
-                   (execution, None if execution == 'waiting_input' else now(), dumps(summary), row['run_id']))
+        timestamp=now()
+        supported_at=timestamp if execution=='completed' and root_supported(result) else None
+        tx.execute('UPDATE diagnosis_runs SET status=?,ended_at=?,summary_json=?,supported_at=COALESCE(supported_at,?) WHERE id=?',
+                   (execution, None if execution == 'waiting_input' else timestamp, dumps(summary),supported_at,row['run_id']))
         tx.execute('UPDATE jobs SET status=?,ended_at=?,error=?,result_json=? WHERE id=?',
                    (execution, None if execution == 'waiting_input' else now(), reason if execution != 'completed' else None,
                     dumps({'run_id': row['run_id'], 'execution_status': execution, 'diagnosis_status': result['diagnosis_status']}), row['job_id']))

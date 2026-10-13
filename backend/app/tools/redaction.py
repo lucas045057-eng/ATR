@@ -20,18 +20,32 @@ _AWS_ACCESS_KEY = re.compile(r"\bAKIA[0-9A-Z]{16}\b")
 _PRIVATE_KEY_BLOCK = re.compile(
     r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----", re.DOTALL
 )
-_SOURCE_LITERAL = re.compile(r'''(["'`])(?:\\.|(?!\1)[\s\S])*?\1''')
+_CPP_RAW_LITERAL = re.compile(r'(?:u8|u|U|L)?R"(?P<raw_delimiter>[^\s()\\]{0,16})\([\s\S]*?(?:\)(?P=raw_delimiter)"|\Z)')
+_SOURCE_LITERAL = re.compile(_CPP_RAW_LITERAL.pattern+r'''|(?P<triple>"{3}|'{3})(?:\\.|(?!(?P=triple))[\s\S])*?(?:(?P=triple)|\Z)|(?P<single>["'`])(?:\\.|(?!(?P=single))[\s\S])*?(?:(?P=single)|\Z)''')
+_SOURCE_TOKEN = re.compile(r'(?P<comment>\#(?:\\\r?\n|[^\r\n])*|//(?:\\\r?\n|[^\r\n])*|/\*[\s\S]*?(?:\*/|\Z))|'+_SOURCE_LITERAL.pattern)
 _CREDENTIAL_CONTEXT = re.compile(r'(?i)password|passwd|token|secret|api.?key|authorization|credentials?|hmac|compare.?digest|\bauth\b')
 
 
 def redact_condition(value: str) -> str:
     # Conditional literals can be credential arguments rather than assignments.
-    return redact_text(_SOURCE_LITERAL.sub('"[REDACTED_LITERAL]"',value))
+    return redact_text(_SOURCE_LITERAL.sub(lambda match:'"[REDACTED_LITERAL]"'+'\n'*match[0].count('\n'),value))
 
 
 def redact_source_text(value: str) -> str:
-    return redact_text('\n'.join(redact_condition(line) if _CREDENTIAL_CONTEXT.search(line) else line
-                                 for line in value.splitlines()))
+    def literal(match):
+        if match.groupdict().get('comment') is not None:
+            # '#' also introduces C/C++ directives; sensitive quoted macro values stay hidden.
+            return redact_condition(match[0]) if _CREDENTIAL_CONTEXT.search(match[0]) else redact_text(match[0])
+        prefix=value[value.rfind('\n',0,match.start())+1:match.start()]
+        groups=match.groupdict()
+        delimiter=(')'+groups['raw_delimiter']+'"') if groups.get('raw_delimiter') is not None else groups.get('triple') or groups.get('single')
+        incomplete=len(match[0])==len(delimiter) or not match[0].endswith(delimiter)
+        return '"[REDACTED_LITERAL]"'+'\n'*match[0].count('\n') if incomplete or _CREDENTIAL_CONTEXT.search(prefix) else match[0]
+    # Raw literal bodies can cross a directive's physical newline even in partial source.
+    value=_CPP_RAW_LITERAL.sub(literal,value)
+    value=_SOURCE_TOKEN.sub(literal,value)
+    value=_PRIVATE_KEY_BLOCK.sub(lambda match:'[REDACTED_PRIVATE_KEY]'+'\n'*match[0].count('\n'),value)
+    return redact_text(value)
 
 
 def redact_text(value: str) -> str:

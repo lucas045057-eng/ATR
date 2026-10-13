@@ -54,6 +54,9 @@ export function BusinessPages({
   const [executionMode, setExecutionMode] = useState("forced_gateway");
   const [chosenTarget, setChosenTarget] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
+  const reloadSequence = useRef(0);
   const base = `/businesses/${selected}`;
 
   useEffect(() => {
@@ -61,10 +64,12 @@ export function BusinessPages({
   }, [profile?.system_id, onSystemSelected]);
 
   const reload = useCallback(async () => {
+    const sequence = ++reloadSequence.current;
     const [bs, cap] = await Promise.all([
       api("/businesses"),
       api("/model/capabilities"),
     ]);
+    if (selectedRef.current !== selected || sequence !== reloadSequence.current) return;
     setBusinesses(bs);
     setModel(cap);
     if (!selected) {
@@ -80,6 +85,7 @@ export function BusinessPages({
       api(base + "/bindings"),
       api(base + "/discoveries"),
     ]);
+    if (selectedRef.current !== selected || sequence !== reloadSequence.current) return;
     setProfile(p);
     setArtifacts(a);
     setBudgets(b);
@@ -87,16 +93,19 @@ export function BusinessPages({
     setTargets(t);
     setBindings(s);
     setDiscoveries(d);
-    if (t.length && !chosenTarget) setChosenTarget(t[0].id);
-  }, [selected, base, chosenTarget]);
+    setChosenTarget(current => t.some((item: Row) => item.id === current) ? current : t[0]?.id || "");
+  }, [selected, base]);
 
   useEffect(() => {
     setProfile(null);
+    setTargets([]);
+    setBindings([]);
+    setDiscoveries([]);
+    setChosenTarget("");
     setCode(null);
     setSearch([]);
     setComparison(null);
     sessionStorage.setItem("atr_business_id", selected);
-    void reload().catch((e) => setError(e.message));
   }, [selected]);
   useEffect(() => {
     void reload().catch((e) => setError(e.message));
@@ -1006,7 +1015,7 @@ export function BusinessPages({
               </select>
               {target && (
                 <p>
-                  {target.host} ·{" "}
+                  {target.host} · {target.username || "未设置账号"} ·{" "}
                   {target.connector === "mock"
                     ? "明确的隔离 Mock 数据"
                     : target.execution_mode === "standard_ssh_readonly"
@@ -1035,7 +1044,7 @@ export function BusinessPages({
                     ? `密码会话有效至 ${new Date(target.credential_status.expires_at).toLocaleString()}`
                     : "密码会话未提供、已过期或已清除；后端重启后需重新输入。"}
                 </p>
-                <form className="form" onSubmit={(e) => {
+                <form key={selected+':'+chosenTarget} className="form" onSubmit={(e) => {
                   e.preventDefault();
                   const input = e.currentTarget.elements.namedItem("refresh_password") as HTMLInputElement;
                   let password = input.value;

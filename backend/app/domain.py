@@ -64,7 +64,8 @@ class RepairRecord(StrictModel):
     summary: str = Field(min_length=5, max_length=1000)
     operator_verified: bool
     verification_summary: str = Field(min_length=5, max_length=1000)
-    verification_url: str = Field(min_length=8, max_length=500)
+    verification_url: str | None = Field(default=None,min_length=8, max_length=500)
+    verification_endpoint_id: str | None = Field(default=None,pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$')
 
 
 class PatternMatchOutcome(StrictModel):

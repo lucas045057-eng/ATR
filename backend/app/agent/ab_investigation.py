@@ -89,6 +89,9 @@ def prepare_run(database, settings, incident_id, business_id, target_id, job_id,
                                                 'tools': settings.investigation_tool_calls},
                      'effective_limits': limits, 'profile_version': profile['profile_version']}
     task = json.loads(incident['symptom_json'])
+    mode=task.get('mode','normal')
+    if mode not in {'normal','graph_adaptive'}:
+        raise ValueError('原生 AB 调查仅支持已执行的 normal 或 graph_adaptive 模式')
     configuration['task_type'] = (task.get('task_type', 'root_cause_investigation')
                                   if task.get('task_type_explicit', True) else 'root_cause_investigation')
     manager = ContextBudgetManager(database, settings)
@@ -103,8 +106,8 @@ def prepare_run(database, settings, incident_id, business_id, target_id, job_id,
                        (uid(), snapshot_id, 'host:' + target_id, 'host', target['name'], 'runtime_scope',
                         dumps({'target_id': target_id, 'provenance': 'operator_authorized_target'})))
             graph = {'id': snapshot_id}
-        tx.execute("INSERT INTO diagnosis_runs(id,incident_id,graph_snapshot_id,mode,model_config_json,budget_json,started_at,status,summary_json,target_id,target_snapshot_json) VALUES(?,?,?,'normal',?,?,?,'queued',?,?,?)",
-                   (run_id, incident_id, graph['id'], dumps(configuration), dumps(limits), now(),
+        tx.execute("INSERT INTO diagnosis_runs(id,incident_id,graph_snapshot_id,mode,model_config_json,budget_json,started_at,status,summary_json,target_id,target_snapshot_json) VALUES(?,?,?,?,?,?,?,'queued',?,?,?)",
+                   (run_id, incident_id, graph['id'], mode, dumps(configuration), dumps(limits), now(),
                     dumps({'business_id': business_id, 'stage': 'queued', 'actor': actor,
                            'task_type': configuration['task_type'],
                            'profile_version': profile['profile_version'], 'profile_review_status': profile['review_status']}),

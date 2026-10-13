@@ -146,8 +146,49 @@ def successful_checks(connection, hypothesis_id, snapshot_id):
     return checks
 
 
+def verify_native_repair(database,settings,run,request):
+    from app.connectors.service import RuntimeService
+    from app.run_outcomes import outcome
+    from app.system.scope import binding_is_current
+    from app.tools.business import BusinessToolRegistry
+    with database.connect() as tx:
+        measured=outcome(tx,run)
+        if not measured['root_supported']:
+            raise ValueError('需要已完成且有完整根因证据的原生调查')
+        summary=json.loads(run['summary_json'])
+        proxy=next(segment['participants']['proxy'] for segment in measured['result']['verified_segments'] if segment['rule_id']=='upstream_unavailable')
+        node=tx.execute('SELECT name FROM graph_nodes WHERE id=? AND snapshot_id=?',(proxy,run['graph_snapshot_id'])).fetchone()
+        if not node:
+            raise ValueError('根因入口不属于原调查的图版本')
+        bindings=[dict(row) for row in tx.execute('SELECT * FROM service_bindings WHERE business_id=? AND target_id=? AND service=?',(summary['business_id'],run['target_id'],node['name'])) if binding_is_current(row)]
+    target=RuntimeService(database,settings).get(summary['business_id'],run['target_id'])
+    endpoints=[endpoint for endpoint in target.get('health_endpoints',[]) if endpoint['service']==node['name']
+               and (endpoint['endpoint_id']==request.verification_endpoint_id if request.verification_endpoint_id else endpoint['url']==request.verification_url)]
+    if len(bindings)!=1 or len(endpoints)!=1 or request.verification_url and request.verification_url!=endpoints[0]['url']:
+        raise ValueError('恢复验证需要原服务器中唯一的当前入口绑定和已授权健康端点')
+    registry=BusinessToolRegistry(database,settings,summary['business_id'],run['id'],run['graph_snapshot_id'],summary['budget_id'],run['target_id'])
+    action={'tool_id':'health.get','target_id':run['target_id'],'target_node_id':proxy,'binding_id':bindings[0]['id'],
+            'arguments':{'endpoint_id':endpoints[0]['endpoint_id']}}
+    verification=registry.execute(action,purpose='verification')
+    payload=verification.get('payload',{})
+    if (type(payload.get('status_code')) is not int or payload['status_code']!=200
+            or payload.get('endpoint_id')!=endpoints[0]['endpoint_id'] or payload.get('url')!=endpoints[0]['url']
+            or payload.get('observation_location')!='remote_ssh' or payload.get('protocol')!='atr-read-ab-v1'
+            or any(payload.get(key) for key in ('partial','truncated','timeout','redirected'))):
+        raise ValueError('原服务器入口未通过完整的授权 HTTP 200 恢复验证；调用记录已保留')
+    return {**verification,'authorized_endpoint':endpoints[0]}
+
+
 def counterexamples(summary, status):
     examples, seen = [], set()
+    native=summary.get('diagnosis_result')
+    if isinstance(native,dict) and native.get('schema_version')=='ab-result-1':
+        if native.get('diagnosis_status') in {'root_cause_supported','no_fault_observed'}:
+            return []
+        return [{'status':native.get('diagnosis_status','unresolved'),'missing_evidence':native.get('required_gaps',[])[:24],
+                 'counter_evidence':native.get('counterevidence',[])[:8],'critical_ambiguities':native.get('critical_ambiguities',[])[:8],
+                 'direct_faults':native.get('direct_faults',[])[:8],'model_suggestions':native.get('model_unknowns',[])[:8],
+                 'stop_reason':summary.get('stop_reason'),'knowledge_status':'unverified_counterexample'}]
     hypotheses = summary.get("hypothesis_history", []) + summary.get("gate", {}).get("hypotheses", [])
     for h in hypotheses:
         if h.get("status") != "refuted" and status != "unresolved":

@@ -151,8 +151,14 @@ class RuntimeService:
         finally:
             conn.close()
 
-    def execute(self, business_id, target_id, request: ToolRequest, timeout_cap=None, *, supervision=None, read_protocol=None):
+    def execute(self, business_id, target_id, request: ToolRequest, timeout_cap=None, *, supervision=None, read_protocol=None, expected_authorization_digest=None):
         config = self.get(business_id, target_id)
+        # Check the exact immutable copy passed to the connector, before overriding limits.
+        if expected_authorization_digest is not None:
+            from app.agent.discovery import authorization_digest
+            authorization_matches = authorization_digest(config) == expected_authorization_digest
+        else:
+            authorization_matches = True
         if read_protocol is not None or request.read_protocol is not None:
             config['_read_protocol'] = read_protocol or request.read_protocol
         if timeout_cap is not None:
@@ -189,6 +195,11 @@ class RuntimeService:
             )
         stage = "parameters"
         try:
+            if not authorization_matches:
+                exc = PermissionError("Run 的 SSH 目标授权或执行配置已变化")
+                exc.code = "authorization_changed"
+                exc.stage = "authorization"
+                raise exc
             if config["connector"] == "ssh" and not config["access_authorized"]:
                 exc = PermissionError("目标访问授权已撤销")
                 exc.code = "authorization_revoked"

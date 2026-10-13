@@ -32,6 +32,7 @@ from app.knowledge import (
     graph_contract,
     successful_checks,
 )
+from app.run_outcomes import native_verification_valid, outcome, supported_checks
 from app.settings import get_settings
 from app.storage.database import Database
 from app.system.inventory import SystemOnboarding
@@ -86,6 +87,8 @@ def _normalized_model_configuration(run: Any) -> dict[str, Any]:
 
 
 def _run_pair_mismatch(left: Any, right: Any) -> str | None:
+    if dict(left).get('target_id')!=dict(right).get('target_id'):
+        return 'Paired runs must use the same frozen SSH target'
     if left["graph_snapshot_id"] != right["graph_snapshot_id"]:
         return "Paired runs must use the same graph snapshot"
     if _normalized_run_symptom(left) != _normalized_run_symptom(right):
@@ -101,6 +104,13 @@ def _evaluation_run_query() -> str:
       g.coverage_json AS fixture_coverage_json
       FROM diagnosis_runs r JOIN incidents i ON i.id=r.incident_id
       JOIN graph_snapshots g ON g.id=r.graph_snapshot_id WHERE r.id=?"""
+
+
+def _assess_run_truth(connection,case,run):
+    try:
+        return assess_truth(connection,case,run)
+    except ValueError as error:
+        raise HTTPException(409,str(error)) from error
 
 
 def _model_configuration(settings: Any, decision_protocol: str | None = None) -> dict[str, Any]:
@@ -765,6 +775,8 @@ def get_run(run_id: str) -> dict[str, Any]:
             raise HTTPException(status_code=404, detail="Run not found")
         result = dict(row)
         result["summary"] = decode(result.pop("summary_json"))
+        measured_outcome=outcome(connection,row)
+        result['repair_eligible']=measured_outcome['root_supported']
         execution = connection.execute("SELECT 1 FROM run_executions WHERE run_id=?", (run_id,)).fetchone()
         if execution:
             from app.runtime.coordinator import get_coordinator
@@ -775,6 +787,18 @@ def get_run(run_id: str) -> dict[str, Any]:
         target_snapshot = decode(result.pop("target_snapshot_json", None))
         if not isinstance(target_snapshot, dict):
             target_snapshot = {}
+        result['verification_endpoints']=[]
+        if measured_outcome['native'] and measured_outcome['root_supported']:
+            from app.agent.discovery import authorization_digest
+            from app.connectors.service import RuntimeService
+            try:
+                current=RuntimeService(db(),get_settings()).get(result['summary']['business_id'],row['target_id'])
+                if authorization_digest(current)==target_snapshot.get('authorization_digest'):
+                    proxies={segment['participants']['proxy'] for segment in measured_outcome['result']['verified_segments'] if segment['rule_id']=='upstream_unavailable'}
+                    names={node[0] for identifier in proxies for node in connection.execute('SELECT name FROM graph_nodes WHERE id=? AND snapshot_id=?',(identifier,row['graph_snapshot_id']))}
+                    result['verification_endpoints']=[endpoint for endpoint in current.get('health_endpoints',[]) if endpoint['service'] in names]
+            except (KeyError,ValueError):
+                pass
         target_snapshot.pop("authorization_digest", None)
         result["runtime_target"] = target_snapshot or None
         result["target_binding_status"] = "bound" if result.get("target_id") else "unknown"
@@ -869,11 +893,16 @@ def list_patterns() -> list[dict[str, Any]]:
 def list_counterexamples() -> list[dict[str, Any]]:
     connection = db().connect()
     try:
-        rows = connection.execute("SELECT id,graph_snapshot_id,status,summary_json FROM diagnosis_runs WHERE status IN ('supported','unresolved') ORDER BY started_at DESC LIMIT 100").fetchall()
+        rows = connection.execute("SELECT * FROM diagnosis_runs WHERE status NOT IN ('queued','running','waiting_input','awaiting_review') ORDER BY started_at DESC LIMIT 100").fetchall()
         result = []
         for row in rows:
             summary = decode(row["summary_json"])
-            examples = summary.get("counterexamples", counterexamples(summary, row["status"]))
+            measured=outcome(connection,row)
+            if measured['native']:
+                summary={**summary,'diagnosis_result':measured['result'] or {'schema_version':'ab-result-1','diagnosis_status':'unresolved'}}
+                examples=counterexamples(summary,measured['status'])
+            else:
+                examples = summary.get("counterexamples", counterexamples(summary, row["status"]))
             if examples:
                 result.append({"run_id": row["id"], "graph_snapshot_id": row["graph_snapshot_id"], "status": row["status"], "counterexamples": examples})
         return result
@@ -888,24 +917,44 @@ def record_repair(incident_id: str, request: RepairRecord, actor: str = Depends(
     connection = db().connect()
     try:
         run = connection.execute("SELECT r.*,i.system_id,s.compose_project FROM diagnosis_runs r JOIN incidents i ON i.id=r.incident_id JOIN systems s ON s.id=i.system_id WHERE r.incident_id=? ORDER BY r.started_at DESC LIMIT 1", (incident_id,)).fetchone()
-        if not run or run["status"] != "supported" or not run["final_hypothesis_id"]:
+        if not run:
             raise HTTPException(status_code=409, detail="A supported run is required before experience capture")
-        verification = ToolRegistry(db(), get_settings()).execute(
-            run["id"], run["graph_snapshot_id"], run["compose_project"], "health.get",
-            {"url": request.verification_url}, purpose="verification")
-        if verification.get("payload", {}).get("status_code") != 200:
-            raise HTTPException(status_code=409, detail="The configured read-only verification URL did not return HTTP 200")
-        hypothesis = connection.execute("SELECT * FROM hypotheses WHERE id=?", (run["final_hypothesis_id"],)).fetchone()
+        measured=outcome(connection,run)
+        if measured['native']:
+            if not measured['root_supported']:
+                raise HTTPException(409,'原生调查需要完整根因支持；部分异常或健康结果不能捕获根因经验')
+            from app.knowledge import verify_native_repair
+            try:
+                checks=supported_checks(connection,run,measured['result'])
+                verification=verify_native_repair(db(),get_settings(),run,request)
+            except (ValueError,PermissionError) as error:
+                raise HTTPException(409,str(error)) from error
+            if not native_verification_valid(connection,run,verification['call_id'],verification['authorized_endpoint']):
+                raise HTTPException(409,'原服务器入口未通过完整的授权 HTTP 200 恢复验证；调用记录已保留')
+            cause=measured['result']
+            target_ids={identifier for segment in cause['verified_segments'] for identifier in segment['participants'].values()}
+        else:
+            if run['status']!='supported' or not run['final_hypothesis_id']:
+                raise HTTPException(409,'A supported run is required before experience capture')
+            if not request.verification_url:
+                raise HTTPException(422,'旧调查的恢复验证需要原来允许的 URL')
+            verification = ToolRegistry(db(), get_settings()).execute(
+                run["id"], run["graph_snapshot_id"], run["compose_project"], "health.get",
+                {"url": request.verification_url}, purpose="verification")
+            if verification.get("payload", {}).get("status_code") != 200:
+                raise HTTPException(status_code=409, detail="The configured read-only verification URL did not return HTTP 200")
+            hypothesis = connection.execute("SELECT * FROM hypotheses WHERE id=?", (run["final_hypothesis_id"],)).fetchone()
+            cause={'failure_mode':hypothesis['failure_mode'],'causal_chain':decode(hypothesis['causal_chain_json'],[]),'prediction':hypothesis['falsifiable_prediction']}
+            target_ids={hypothesis['target_node_id']}
+            checks=successful_checks(connection,run['final_hypothesis_id'],run['graph_snapshot_id'])
         snapshot = connection.execute("SELECT * FROM graph_snapshots WHERE id=?", (run["graph_snapshot_id"],)).fetchone()
         nodes = [dict(n) for n in connection.execute("SELECT * FROM graph_nodes WHERE snapshot_id=?", (snapshot["id"],))]
-        target_node = next((n for n in nodes if n["id"] == hypothesis["target_node_id"]), None)
-        roles = [target_node["role"]] if target_node and target_node["role"] != "unknown" else []
+        roles = [node['role'] for node in nodes if node['id'] in target_ids and node['role']!='unknown']
         role_by_id = {n["id"]: n["role"] for n in nodes}
         topology = sorted({f"{role_by_id.get(e['from_node_id'],'unknown')}->{role_by_id.get(e['to_node_id'],'unknown')}:{e['relation']}"
                            for e in connection.execute("SELECT * FROM graph_edges WHERE snapshot_id=?", (snapshot["id"],))})
         symptom = decode(connection.execute("SELECT symptom_json FROM incidents WHERE id=?", (incident_id,)).fetchone()["symptom_json"])["text"]
         symptom_terms = sorted({w for w in re.findall(r"[a-zA-Z0-9_\u4e00-\u9fff]+", symptom.casefold()) if len(w) > 1})
-        checks = successful_checks(connection, run["final_hypothesis_id"], snapshot["id"])
         roles = sorted(set(roles) | {check["target_role"] for check in checks if check.get("target_role")})
         verifications = [verification["call_id"]]
         experience_id, pattern_id, timestamp = str(uuid.uuid4()), str(uuid.uuid4()), utcnow()
@@ -914,9 +963,10 @@ def record_repair(incident_id: str, request: RepairRecord, actor: str = Depends(
         digest = hashlib.sha256(json.dumps(pattern_body, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
         with db().transaction() as tx:
             tx.execute("INSERT INTO experiences(id,incident_id,run_id,graph_snapshot_id,status,root_cause_json,repair_record_json,verification_call_ids_json,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                       (experience_id, incident_id, run["id"], snapshot["id"], "verified", json.dumps({"failure_mode": hypothesis["failure_mode"], "causal_chain": decode(hypothesis["causal_chain_json"], []), "prediction": hypothesis["falsifiable_prediction"]}),
+                       (experience_id, incident_id, run["id"], snapshot["id"], "verified", json.dumps(cause),
                         json.dumps({"summary": request.summary, "verification_summary": request.verification_summary,
-                                    "verification_http_status": 200, "actor": actor}), json.dumps(verifications), timestamp))
+                                    "verification_http_status": 200, "actor": actor,
+                                    'verification_endpoint':verification.get('authorized_endpoint')}), json.dumps(verifications), timestamp))
             tx.execute("INSERT INTO pattern_versions(id,pattern_key,version,source_experience_id,status,roles_json,topology_json,symptoms_json,checks_json,exclusions_json,validity_json,schema_version,content_digest) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                        (pattern_id, f"pattern-{experience_id[:8]}", 1, experience_id, "candidate",
                         json.dumps(roles), json.dumps(topology), json.dumps(symptom_terms), json.dumps(checks),
@@ -944,8 +994,13 @@ def review_pattern(pattern_id: str, request: ReviewRequest, actor: str = Depends
                 raise HTTPException(409, "Pattern source or current graph changed; a new verified Candidate is required")
             experience = connection.execute("SELECT * FROM experiences WHERE id=?", (pattern["source_experience_id"],)).fetchone()
             verification_ids = decode(experience["verification_call_ids_json"], []) if experience else []
+            source_run=connection.execute('SELECT * FROM diagnosis_runs WHERE id=?',(pattern['run_id'],)).fetchone()
+            native=source_run and outcome(connection,source_run)['native']
             verified = False
             for call_id in verification_ids:
+                if native:
+                    verified=verified or native_verification_valid(connection,source_run,call_id,decode(experience['repair_record_json']).get('verification_endpoint'))
+                    continue
                 observation = connection.execute("SELECT t.status,t.purpose,e.payload_redacted_json FROM tool_calls t JOIN evidence e ON e.tool_call_id=t.id WHERE t.id=? AND t.run_id=?", (call_id, pattern["run_id"])).fetchone()
                 if observation and observation["status"] == "succeeded" and observation["purpose"] == "verification" and decode(observation["payload_redacted_json"]).get("status_code") == 200:
                     verified = True
@@ -1041,8 +1096,9 @@ def record_pattern_outcome(match_id: str, request: PatternMatchOutcome,
 def metrics() -> dict[str, Any]:
     connection = db().connect()
     try:
-        runs = connection.execute("SELECT status,started_at,supported_at,ended_at FROM diagnosis_runs").fetchall()
-        completed = [r for r in runs if r["status"] in {"supported", "unresolved"}]
+        runs = connection.execute("SELECT * FROM diagnosis_runs").fetchall()
+        outcomes=[outcome(connection,run) for run in runs]
+        completed = [item for item in outcomes if item['completed']]
         durations = []
         for row in runs:
             if row["supported_at"]:
@@ -1060,8 +1116,11 @@ def metrics() -> dict[str, Any]:
                            pair["graph_pattern"].get("diagnostic_tool_calls", 0) for pair in complete_pairs]
         def rate(n: int, d: int) -> float | None:
             return round(n/d, 4) if d else None
-        return {"runs_total": len(runs), "runs_completed": len(completed), "supported_runs": sum(r["status"]=="supported" for r in runs),
-                "unresolved_runs": sum(r["status"]=="unresolved" for r in runs), "tt_rca_seconds_median": statistics.median(durations) if durations else None,
+        return {"runs_total": len(runs), "runs_completed": len(completed), "supported_runs": sum(item['root_supported'] for item in outcomes),
+                "healthy_runs":sum(item['healthy'] for item in outcomes),
+                "partial_runs":sum(item.get('diagnosis_status')=='partial' for item in outcomes),
+                "aborted_runs":sum(item.get('execution_status') in {'failed','cancelled','timed_out','interrupted'} for item in outcomes),
+                "unresolved_runs": sum(item['completed'] and item['status']=='unresolved' for item in outcomes), "tt_rca_seconds_median": statistics.median(durations) if durations else None,
                 "diagnostic_tool_attempts": len(calls), "denied_or_failed_calls": sum(c["status"] in {"denied", "failed", "timed_out"} for c in calls),
                 "patterns_retrieved": len(patterns), "patterns_suggested": sum(p["decision"]=="suggested" for p in patterns),
                 "patterns_validated": sum(p["validation_outcome"]=="validated" for p in patterns),
@@ -1132,12 +1191,13 @@ def create_evaluation_pair(request: EvaluationPairCreate,
                 raise HTTPException(status_code=409, detail="Both runs must use the case system and their matching mode")
             if _run_fixture_digest(run) != case["fixture_digest"]:
                 raise HTTPException(status_code=409, detail="Run graph does not match the evaluation case fixture")
-            if run["status"] not in {"supported", "unresolved"}:
+            measured_outcome=outcome(connection,run)
+            if not measured_outcome['completed']:
                 raise HTTPException(status_code=409, detail="Both runs must be complete")
-            if (run["status"] == "unresolved") != (verdict == "unresolved"):
+            if (measured_outcome['status'] == "unresolved") != (verdict == "unresolved"):
                 raise HTTPException(409, "An unresolved run must have an unresolved verdict")
             metrics_data = run_metrics(connection, run)
-            assessment = assess_truth(connection, case, run)
+            assessment = _assess_run_truth(connection, case, run)
             if assessment:
                 if verdict != assessment["expected_verdict"]:
                     raise HTTPException(409, "Verdict does not match the registered fixture ground truth")
@@ -1195,9 +1255,10 @@ def create_evaluation_trial(request: EvaluationTrialCreate,
             raise HTTPException(status_code=409, detail="Run target does not match the evaluation case system")
         if run["mode"] != request.arm:
             raise HTTPException(status_code=409, detail="Run mode does not match the selected evaluation arm")
-        if run["status"] not in {"supported", "unresolved"}:
+        measured_outcome=outcome(connection,run)
+        if not measured_outcome['completed']:
             raise HTTPException(status_code=409, detail="Only completed supported or unresolved runs can be scored")
-        if (run["status"] == "unresolved") != (request.verdict == "unresolved"):
+        if (measured_outcome['status'] == "unresolved") != (request.verdict == "unresolved"):
             raise HTTPException(409, "An unresolved run must have an unresolved verdict")
         siblings = connection.execute("SELECT * FROM evaluation_trials WHERE pair_key=? AND repetition=?",
                                       (request.pair_key, request.repetition)).fetchall()
@@ -1216,7 +1277,7 @@ def create_evaluation_trial(request: EvaluationTrialCreate,
             if mismatch:
                 raise HTTPException(status_code=409, detail=mismatch)
         measured = run_metrics(connection, run)
-        assessment = assess_truth(connection, case, run)
+        assessment = _assess_run_truth(connection, case, run)
         if assessment:
             if request.verdict != assessment["expected_verdict"]:
                 raise HTTPException(409, "Verdict does not match the registered fixture ground truth")

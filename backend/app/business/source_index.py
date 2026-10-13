@@ -82,19 +82,21 @@ class SourceIndex:
                 raise ValueError('符号存在多个声明，请使用来源中的准确行号')
             symbol = matches[0]
             start = symbol["start"]
-        lines = raw.decode("utf-8-sig").splitlines()
+        # Preserve literal context even when the requested window starts inside a secret.
+        lines = redact_source_text(raw.decode("utf-8-sig")).splitlines()
         parsed=json.loads(row['parse_json'])
         for branch in parsed.get('branches',[]):
             # Old parser receipts have broader references; conservatively hide their literals too.
             for reference in branch.get('condition_source_refs',branch.get('source_refs',[])):
-                for line in range(reference['start_line']-1,min(len(lines),reference['end_line'])):
-                    lines[line]=redact_condition(lines[line])
+                first,last=reference['start_line']-1,min(len(lines),reference['end_line'])
+                block=redact_condition('\n'.join(lines[first:last])).split('\n')
+                lines[first:last]=block if len(block)==last-first else ['[已隐藏条件文本，原行号保留]']*(last-first)
         for operation in parsed.get('data_operations',[]):
             if operation.get('sensitive'):
                 for reference in operation.get('source_refs',[]):
                     for line in range(reference['start_line']-1,min(len(lines),reference['end_line'])):
                         lines[line]='[已隐藏涉及凭据的数据操作，原行号保留]'
-        text = redact_source_text("\n".join(lines[start - 1 : start - 1 + request.max_lines]))
+        text = "\n".join(lines[start - 1 : start - 1 + request.max_lines])
         if budget_id:
             ContextBudgetManager(self.db, self.settings).retrieval(budget_id, len(text.encode()))
         return {

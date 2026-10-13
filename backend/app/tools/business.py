@@ -78,8 +78,11 @@ class BusinessToolRegistry:
                         and source['start_time']==start and source['file_id']==action.get('arguments',{}).get('file_id')
                         for source in current.get('log_files',[])):
                     raise PermissionError('固定日志不属于当前确认的业务进程')
+        return snapshot['authorization_digest']
 
-    def execute(self, action):
+    def execute(self, action, *, purpose='diagnosis'):
+        if purpose not in {'diagnosis','verification'} or purpose=='verification' and (action.get('tool_id')!='health.get' or self.supervision is not None):
+            raise PermissionError('恢复验证仅允许独立的已授权健康检查')
         call_id = uid()
         tool = action["tool_id"]
         with self.db.transaction() as tx:
@@ -90,7 +93,7 @@ class BusinessToolRegistry:
                     call_id,
                     self.run_id,
                     self.sid,
-                    "diagnosis",
+                    purpose,
                     tool,
                     "business-v2.2",
                     dumps(action.get("arguments", {})),
@@ -104,9 +107,11 @@ class BusinessToolRegistry:
             )
         started = time.monotonic()
         try:
-            self.manager.consume_tool(self.bid, **({'authorize': self.supervision['authorize']} if self.supervision else {}))
+            if purpose=='diagnosis':
+                self.manager.consume_tool(self.bid, **({'authorize': self.supervision['authorize']} if self.supervision else {}))
+            expected_authorization = None
             if not tool.startswith("code."):
-                self._validate_runtime_action(action)
+                expected_authorization = self._validate_runtime_action(action)
             if tool.startswith("config."):
                 with self.db.connect() as c:
                     binding = c.execute("SELECT * FROM service_bindings WHERE id=? AND business_id=? AND target_id=?",
@@ -130,14 +135,16 @@ class BusinessToolRegistry:
                     self.business_id,
                     action["target_id"],
                     ToolRequest(tool_id=tool, arguments=action["arguments"]),
-                    timeout_cap=min(10, self.manager.remaining_seconds(self.bid)) if self.supervision else self.manager.remaining_seconds(self.bid),
+                    timeout_cap=10 if purpose=='verification' else min(10, self.manager.remaining_seconds(self.bid)) if self.supervision else self.manager.remaining_seconds(self.bid),
                     **({'supervision': self.supervision} if self.supervision else {}),
-                    **({'read_protocol': 'ab_v1'} if self.supervision else {}),
+                    **({'read_protocol': 'ab_v1'} if self.supervision or purpose=='verification' else {}),
+                    expected_authorization_digest=expected_authorization,
                 )
                 with self.db.transaction() as tx:
                     self._authorize(tx)
                     tx.execute("UPDATE tool_calls SET request_id=? WHERE id=?", (observation["observation_id"], call_id))
-                self.manager.retrieval(self.bid, max(observation["bytes"], observation.get("payload", {}).get("output_bytes", 0)))
+                if purpose=='diagnosis':
+                    self.manager.retrieval(self.bid, max(observation["bytes"], observation.get("payload", {}).get("output_bytes", 0)))
                 if "payload" not in observation:
                     status = observation.get("status", "failed")
                     if status not in {"denied", "timed_out", "failed"}:
@@ -214,4 +221,5 @@ class BusinessToolRegistry:
                     "status": "timed_out" if isinstance(exc, TimeoutError) else "denied"
                     if isinstance(exc, PermissionError) else "failed"}
         finally:
-            self.manager.record_time(self.bid, time.monotonic() - started)
+            if purpose=='diagnosis':
+                self.manager.record_time(self.bid, time.monotonic() - started)
