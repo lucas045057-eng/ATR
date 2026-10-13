@@ -8,6 +8,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse
 from fastapi.routing import APIRoute
 
 from app.api.dependencies import require_operator
@@ -318,6 +319,76 @@ def update_budget(business_id: str, budget_id: str, request: BudgetLimits):
 @router.get("/model/capabilities")
 def model_capabilities():
     return capabilities(get_settings())
+
+
+@router.get('/businesses/{business_id}/visualization')
+def business_visualization(business_id: str,view: Literal['structure','flow']='structure',
+                           profile_version: int|None=None,flow_id: str|None=None):
+    import time
+
+    from app.common import digest, uid
+    from app.visualization.bridge import embed_bridge
+    from app.visualization.projection import project_snapshot
+    from app.visualization.renderer import render_snapshot
+    s=service()
+    profile=s.get(business_id,profile_version)
+    with s.db.connect() as tx:
+        graph=tx.execute('''SELECT * FROM graph_snapshots WHERE system_id=?
+            AND json_extract(coverage_json,'$.profile_version')=? ORDER BY version DESC LIMIT 1''',
+                         (profile['system_id'],profile['profile_version'])).fetchone()
+        nodes=[]
+        edges=[]
+        if graph:
+            nodes=[{**dict(row),'attributes':json.loads(row['attributes_json'])} for row in tx.execute('SELECT * FROM graph_nodes WHERE snapshot_id=?',(graph['id'],))]
+            edges=[{**dict(row),'attributes':json.loads(row['attributes_json'])} for row in tx.execute('SELECT * FROM graph_edges WHERE snapshot_id=?',(graph['id'],))]
+    identity=digest([business_id,profile['profile_version'],graph['id'] if graph else None])
+    projected=project_snapshot({'profile':profile,'graph':{'nodes':nodes,'edges':edges},'snapshot_id':identity,'flow_id':flow_id},view)
+    rendered=render_snapshot(projected,time.monotonic()+30,s.settings.database_path.parent/'visualizations')
+    nonce=uid()
+    return {**projected,**rendered,'nonce':nonce,'html':embed_bridge(rendered['html'],identity,nonce),
+            'flows':[{'flow_id':flow['flow_id'],'entry':flow['entry'],'kind':flow['kind']} for flow in profile['business_flow_graphs']]}
+
+
+@router.get('/businesses/{business_id}/files/{file_id}/page')
+def source_page(business_id: str,file_id: str,profile_version: int,page_number: int):
+    s=service()
+    profile=s.get(business_id,profile_version)
+    reference=next((row for row in profile['source_references'] if row['id']==file_id),None)
+    if not reference or reference['media_type'] not in {'image','pdf'} or page_number<1:
+        raise ValueError('该原件不属于所选业务版本或页码无效')
+    with s.db.connect() as tx:
+        row=tx.execute('SELECT * FROM artifact_files WHERE id=? AND business_id=?',(file_id,business_id)).fetchone()
+    if not row or row['content_digest']!=reference['content_digest']:
+        raise ValueError('原件摘要不匹配')
+    directory=s.root/business_id/row['artifact_id']
+    original=(directory/'files'/row['path']).resolve()
+    if not original.is_relative_to(directory.resolve()):
+        raise ValueError('原件路径边界无效')
+    with original.open('rb') as stream:
+        if hashlib.file_digest(stream,'sha256').hexdigest()!=row['content_digest']:
+            raise ValueError('原件已改变，当前来源不能作为有效引用')
+    parsed=json.loads(row['parse_json'])
+    page=next((item for item in parsed.get('pages',[]) if item['page_number']==page_number),None)
+    if not page or not page.get('image_path'):
+        raise ValueError('该页尚未处理或因敏感内容暂停，原件仍已保留')
+    image=(directory/parsed['derived_path']/page['image_path']).resolve()
+    if not image.is_relative_to(directory.resolve()) or not image.is_file() or image.stat().st_size>16*1024*1024:
+        raise ValueError('派生页面超限或来源路径无效')
+    return FileResponse(image,media_type='image/png',headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'})
+
+
+@router.get('/businesses/{business_id}/observations/{observation_id}')
+def source_observation(business_id: str,observation_id: str):
+    s=service()
+    with s.db.connect() as tx:
+        row=tx.execute('''SELECT o.* FROM runtime_observations o JOIN runtime_targets t ON t.id=o.target_id
+            WHERE o.id=? AND t.business_id=?''',(observation_id,business_id)).fetchone()
+    if not row:
+        raise KeyError('观测来源不属于当前业务')
+    result=dict(row)
+    result['payload']=json.loads(result.pop('payload_json'))
+    result['arguments']=json.loads(result.pop('args_json'))
+    return result
 
 
 @router.post('/model/probe-vision',status_code=202)

@@ -3,10 +3,11 @@ import { createRoot } from 'react-dom/client'
 import './styles.css'
 import { api } from './api'
 import { BusinessPages } from './business'
+import { StructureView } from './structure-view'
 import { ModelError, ModelAttempt } from './model-error'
 
 type Row = Record<string, any>
-type Page = 'systems' | 'investigation' | 'knowledge' | 'efficiency' | 'onboarding' | 'business' | 'scope'
+type Page = 'systems' | 'investigation' | 'knowledge' | 'efficiency' | 'onboarding' | 'business' | 'scope' | 'structure'
 
 const fmtDate = (value?: string) => value ? new Date(value).toLocaleString() : '—'
 const badge = (value: string) => <span className={`badge ${value.toLowerCase().replaceAll('_', '-')}`}>{value}</span>
@@ -198,7 +199,7 @@ function App() {
       <div className="brand"><div className="brand-mark"><span /></div><div><strong>ATR</strong><small>Adaptive Runtime</small></div></div>
       <div className="workspace-label">LOCAL WORKSPACE</div>
       <nav>
-        {([['onboarding', '+', '新业务接入'], ['business', '▤', '业务档案'], ['scope', '◎', '服务器范围'], ['systems', '◈', '系统图谱'], ['investigation', '⌁', '故障调查'], ['knowledge', '✳', '知识审核'], ['efficiency', '◷', '效率分析']] as [Page, string, string][]).map(([key, icon, label]) =>
+        {([['onboarding', '+', '新业务接入'], ['business', '▤', '业务档案'], ['scope', '◎', '服务器范围'], ['structure', '◈', '业务结构图'], ['systems', '▦', '系统图谱'], ['investigation', '⌁', '故障调查'], ['knowledge', '✳', '知识审核'], ['efficiency', '◷', '效率分析']] as [Page, string, string][]).map(([key, icon, label]) =>
           <button key={key} className={`nav-item ${page === key ? 'active' : ''}`} onClick={() => setPage(key)}><span className="nav-icon">{icon}</span>{label}{key === 'investigation' && incidents.length > 0 && <i>{incidents.length}</i>}</button>)}
       </nav>
       <div className="sidebar-bottom">
@@ -209,12 +210,13 @@ function App() {
     </aside>
 
     <main className="main">
-      <header className="topbar"><div className="breadcrumb"><span>工作台</span><b>/</b><strong>{{onboarding:'新业务接入',business:'业务档案',scope:'服务器范围确认',systems:'系统图谱', investigation:'故障调查', knowledge:'知识审核', efficiency:'效率分析'}[page]}</strong></div>
+      <header className="topbar"><div className="breadcrumb"><span>工作台</span><b>/</b><strong>{{onboarding:'新业务接入',business:'业务档案',scope:'服务器范围确认',structure:'业务结构图',systems:'系统图谱', investigation:'故障调查', knowledge:'知识审核', efficiency:'效率分析'}[page]}</strong></div>
         <div className="top-actions"><span className="environment"><span /> Local · Read only</span><button className="icon-button" title="刷新" onClick={() => refresh().catch(e => setError(e.message))}>↻</button><div className="avatar">OP</div></div></header>
       <div className="content">
         {error && <div className="alert error"><span>!</span>{error}<button onClick={() => setError('')}>×</button></div>}
         {notice && <div className="alert success"><span>✓</span>{notice}<button onClick={() => setNotice('')}>×</button></div>}
         {(page==='onboarding'||page==='business'||page==='scope')&&<BusinessPages page={page} onSystemSelected={setSelectedSystem}/>}
+        {page==='structure'&&<><select aria-label="选择图的业务" value={selectedSystem} onChange={event=>setSelectedSystem(event.target.value)}>{businesses.filter(item=>item.system_id).map(item=><option key={item.id} value={item.system_id}>{item.name}</option>)}</select>{currentBusiness&&<StructureView businessId={currentBusiness.id}/>}</>}
 
         {page === 'systems' && <>
           <div className="page-heading"><div><div className="eyebrow">UNDERSTAND BEFORE ACTION</div><h1>系统图谱</h1><p>从代码、部署和运行观察建立带来源的系统认知。</p></div><div className="heading-meta"><span className="sync"><i /> 本地数据已同步</span><button className="btn ghost" onClick={() => refresh().catch(e => setError(e.message))}>↻　刷新视图</button></div></div>

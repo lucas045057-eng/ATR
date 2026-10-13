@@ -174,6 +174,12 @@ def test_actual_ingestion_pipeline_preserves_media_digest_and_page_sources(clien
     assert first['content_digest']==hashlib.sha256(raw).hexdigest()
     assert first['archive_path']=='guide.pdf' and first['original_artifact_id']==accepted['artifact_id']
     assert first['profile_version']==result['profile_version'] and first['page_number']==1
+    image=client.get(base+'/files/'+first['file_id']+'/page',params={'profile_version':result['profile_version'],'page_number':1})
+    assert image.status_code==200 and image.content.startswith(b'\x89PNG')
+    other=client.post('/api/v1/businesses',json={'name':'Foreign source scope'}).json()
+    denied=client.get('/api/v1/businesses/'+other['business_id']+'/files/'+first['file_id']+'/page',
+                      params={'profile_version':other['profile_version'],'page_number':1})
+    assert denied.status_code==422
     removed=client.delete(base+'/artifacts/'+accepted['artifact_id']).json()
     assert removed['documents']==[]
     assert all(f['verification_status']=='stale' for f in removed['facts'] if f['predicate']=='describes')
