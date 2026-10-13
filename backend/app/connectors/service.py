@@ -196,10 +196,10 @@ class RuntimeService:
                 else StandardSSHConnector({**config, "_approved": approved}, self.settings)
             )
             stage = "request"
-            if supervision is not None and config['connector'] == 'ssh':
+            if config['connector'] == 'ssh' and (supervision is not None or config.get('_read_protocol') == 'ab_v1'):
                 from app.runtime.ssh_channel import run_ssh_action
                 payload = sanitize_payload(run_ssh_action(config, self.settings, request.tool_id, args,
-                                                         approved, **{k: v for k, v in supervision.items() if k != 'authorize'}))
+                                                         approved, **{k: v for k, v in (supervision or {}).items() if k != 'authorize'}))
             else:
                 payload = sanitize_payload(connector.read(request.tool_id, args))
             stage = "output"
