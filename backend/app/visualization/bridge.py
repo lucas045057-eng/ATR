@@ -23,7 +23,7 @@ def embed_bridge(html,snapshot_id,nonce,theme='dark'):
         if(window.Archify?.theme)window.Archify.theme.toggle();
         else document.documentElement.dataset.theme=theme;
       }
-      const button=document.getElementById('btn-theme');if(button)button.hidden=true;
+      const button=document.getElementById('btn-theme');if(button)button.style.display='none';
     };sync();document.addEventListener('DOMContentLoaded',sync);
     new MutationObserver(sync).observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});})();</script>'''.replace('THEME',json.dumps(theme))
     return html.replace('<head>','<head>'+policy+theme_script,1).replace('</body>',script+theme_script+'</body>',1)

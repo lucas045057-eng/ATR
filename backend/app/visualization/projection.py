@@ -19,11 +19,19 @@ def project_snapshot(snapshot: dict, view: str) -> dict:
     profile=snapshot['profile']
     identity=snapshot['snapshot_id']
     nodes,edges,sources={},[],{}
+    categories={'Static':('backend','静态解析'),'Documented':('frontend','资料描述'),
+                'Runtime':('security','运行观测'),'Inferred':('cloud','模型推断'),
+                'Human Verified':('messagebus','人工确认'),'Conflict':('database','冲突'),
+                'Unknown':('external','未知 / 待核验')}
 
     def add(key,label,kind='backend',refs=(),certainty='待核验'):
         identifier='n'+digest(key)[:18]
         if identifier not in nodes:
-            nodes[identifier]={'id':identifier,'type':kind,'label':safe_label(label),'sublabel':safe_label(certainty)}
+            category=next((key for key,(_,title) in categories.items() if key in str(certainty) or title in str(certainty)),'Unknown')
+            color,title=categories[category]
+            detail=' · '+str(certainty).removeprefix('Static').strip(' ·') if category=='Static' and certainty!='Static' else ''
+            nodes[identifier]={'id':identifier,'type':color,'label':safe_label(label),
+                               'sublabel':safe_label(title+detail+(' · 数据组件' if kind=='database' else '')+(' · 待审核' if category=='Documented' else ''))}
         sources[identifier]=[sanitize_payload(ref) for ref in refs]
         return identifier
 
@@ -41,6 +49,8 @@ def project_snapshot(snapshot: dict, view: str) -> dict:
         for node in graph.get('nodes',[]):
             attributes=node.get('attributes',{})
             provenance=attributes.get('provenance') or {}
+            if not isinstance(provenance,dict):
+                provenance={}
             kind='database' if node.get('role') in {'datastore','cache'} or node['kind']=='datastore' else 'backend'
             refs=provenance.get('source_refs',[]) or [ {'schema_version':'observation-ref-1','observation_id':item,
                    'snapshot_id':identity,'source_type':'Runtime'} for item in attributes.get('evidence_ids',[]) ]
@@ -49,8 +59,9 @@ def project_snapshot(snapshot: dict, view: str) -> dict:
         for edge in graph.get('edges',[]):
             if edge['from_node_id'] in mapped and edge['to_node_id'] in mapped:
                 attributes=edge.get('attributes',{})
+                provenance=attributes.get('provenance') or {}
                 connect(mapped[edge['from_node_id']],mapped[edge['to_node_id']],edge['relation'],
-                        (attributes.get('provenance') or {}).get('source_refs',[]))
+                        provenance.get('source_refs',[]) if isinstance(provenance,dict) else [])
         for document in profile.get('documents',[]):
             if document.get('vision_state')!='completed' or document.get('external_paused'):
                 continue
@@ -73,7 +84,7 @@ def project_snapshot(snapshot: dict, view: str) -> dict:
             for index,step in enumerate(flow.get('steps',[])):
                 conditions='; '.join(str(region.get('condition') or region.get('arm')) for region in step.get('syntax_branch_regions',[]))
                 mapped[step['step_id']]=add(f"flow:{flow['flow_id']}:{index}",f"{index+1}. "+str(step.get('title') or step['kind']),
-                         'backend',step.get('source_refs',[]),conditions or ('启动路径' if flow['kind']=='startup' else '源码路径 · 未验证执行'))
+                         'backend',step.get('source_refs',[]),'Static · '+(conditions or ('启动路径' if flow['kind']=='startup' else '源码路径 · 未验证执行')))
             for edge in flow.get('edges',[]):
                 connect(mapped.get(edge['from']),mapped.get(edge['to']),edge['relation'])
             unknowns.extend(flow.get('unknowns',[]))
@@ -83,6 +94,8 @@ def project_snapshot(snapshot: dict, view: str) -> dict:
         node.update(pos=[60+index%3*390,100+index//3*170],size=[240,78])
     title=f"{profile['name']} · {'业务结构' if view=='structure' else '源码流程'} · v{profile['profile_version']}"
     candidate={'schema_version':1,'diagram_type':'architecture','meta':{'title':safe_label(title),'locale':'zh-CN',
-               'output':'diagram.html','quality_profile':'standard'},'components':list(nodes.values()),'connections':edges}
+               'output':'diagram.html','quality_profile':'standard','subtitle':identity[:16]+' · '+view,
+               'legend':{'mode':'all','entries':{kind:{'label':title} for kind,title in categories.values()}}},
+               'components':list(nodes.values()),'connections':edges}
     return {'snapshot_id':identity,'profile_version':profile['profile_version'],'view':view,'candidate':candidate,
             'sources':sources,'unknowns':unknowns,'node_count':len(nodes),'edge_count':len(edges),'omitted_nodes':0,'omitted_edges':0}
