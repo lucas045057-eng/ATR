@@ -80,7 +80,7 @@ async def lifespan(_: FastAPI):
             iteration += 1
             if iteration % 5 == 0:
                 await asyncio.to_thread(coordinator.tick)
-            await asyncio.to_thread(dispatch_ready, database, settings)
+            await asyncio.to_thread(dispatch_ready, database, get_settings())
 
     purge_task = asyncio.create_task(purge_passwords())
     supervisor_task = asyncio.create_task(supervise_runs())

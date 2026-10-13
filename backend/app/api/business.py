@@ -321,6 +321,31 @@ def model_capabilities():
     return capabilities(get_settings())
 
 
+@router.get('/model/configuration')
+def model_configuration():
+    from app.context.configuration import public
+    return public(get_settings())
+
+
+from app.context.configuration import ModelConfiguration  # noqa: E402
+
+
+@router.put('/model/configuration')
+def save_model_configuration(request: ModelConfiguration):
+    from app.context.configuration import save
+    s=service()
+    return save(s.db,s.settings,request)
+
+
+@router.post('/model/probe-text',status_code=202)
+def probe_model_text():
+    from app.context.capabilities import probe_text
+    s=service()
+    job_id=reserve(s.db,'model_text_probe')
+    submit(s.db,job_id,lambda:probe_text(s.db,s.settings))
+    return {'job_id':job_id,'status':'queued'}
+
+
 @router.get('/businesses/{business_id}/visualization')
 def business_visualization(business_id: str,view: Literal['structure','flow']='structure',
                            profile_version: int|None=None,flow_id: str|None=None,

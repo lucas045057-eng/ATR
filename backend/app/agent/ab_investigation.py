@@ -67,6 +67,7 @@ def clarification_candidates(evidence, previous=(), hints=(), limit=20):
 
 
 def prepare_run(database, settings, incident_id, business_id, target_id, job_id, actor):
+    from app.context.capabilities import configuration_digest
     limits = effective_limits(settings)
     target = RuntimeService(database, settings).get(business_id, target_id)
     profile = BusinessService(database, settings).get(business_id)
@@ -81,6 +82,7 @@ def prepare_run(database, settings, incident_id, business_id, target_id, job_id,
               'auth_mode', 'execution_mode', 'access_authorized', 'permission_boundary', 'docker_reader', 'docker_reads_enabled')}
     frozen['authorization_digest'] = authorization_digest(target)
     configuration = {'decision_protocol': 'ab_v1', 'model': settings.model_name,
+                     'configuration_digest':configuration_digest(settings),
                      'provider': settings.model_provider, 'wire_api': settings.model_wire_api,
                      'configured_decision_protocol': settings.agent_decision_protocol,
                      'configured_hard_limits': {'model': settings.investigation_model_rounds,
@@ -141,6 +143,10 @@ class InvestigationBroker:
                 conflict['related_node_ids'] = [row[0] for claim_id in json.loads(conflict['claim_ids_json']) for row in
                                                tx.execute('SELECT subject_node_id FROM fact_claims WHERE id=?', (claim_id,))]
         self.business_id, self.target_id, self.snapshot = self.summary['business_id'], run['target_id'], run['graph_snapshot_id']
+        from app.context.capabilities import configuration_digest
+        configuration=json.loads(run['model_config_json'])
+        if configuration.get('configuration_digest') not in {None,configuration_digest(settings)}:
+            raise ValueError('模型设置与冻结调查不一致；本次调查已停止，请用所选设置重新发起')
         from app.knowledge import compatible_patterns
         with database.connect() as tx:
             self.experience_guidance=[{'pattern_id':item['id'],'checks':[{key:check.get(key) for key in ('tool_id','target_service','target_role')}

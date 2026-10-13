@@ -6,6 +6,7 @@ import { BusinessPages } from './business'
 import { StructureView } from './structure-view'
 import { ModelError, ModelAttempt } from './model-error'
 import { applyTheme, initialTheme } from './theme'
+import { ModelSettings } from './model-settings'
 
 type Row = Record<string, any>
 type Page = 'systems' | 'investigation' | 'knowledge' | 'efficiency' | 'onboarding' | 'business' | 'scope' | 'structure'
@@ -16,6 +17,7 @@ const badge = (value: string) => <span className={`badge ${value.toLowerCase().r
 function App() {
   const [page, setPage] = useState<Page>('business')
   const [theme, setTheme] = useState(initialTheme)
+  const [modelSettingsOpen,setModelSettingsOpen]=useState(false)
   useEffect(() => applyTheme(theme), [theme])
   const [systems, setSystems] = useState<Row[]>([])
   const [businesses, setBusinesses] = useState<Row[]>([])
@@ -209,6 +211,7 @@ function App() {
       <div className="sidebar-bottom">
         <div className="live-dot" /> <span>本地诊断工作区</span>
         <button className="token-button" onClick={() => document.getElementById('token-dialog')?.classList.toggle('open')}>操作员访问设置</button>
+        <button className="token-button" onClick={() => setModelSettingsOpen(true)}>模型设置与连通性</button>
         <div id="token-dialog" className="token-dialog"><label htmlFor="operator-token">操作员访问令牌</label><input id="operator-token" type="password" autoComplete="off" value={token} onChange={e => setToken(e.target.value)} placeholder="粘贴 .env 中配置的令牌"/><button className="btn small" onClick={saveToken}>保存到本次会话</button></div>
       </div>
     </aside>
@@ -281,6 +284,7 @@ function App() {
         <footer className="footer"><span>Adaptive Troubleshooting Runtime <b>·</b> Local prototype</span><span>只读诊断 · 人工审核 · 证据可追溯</span></footer>
       </div>
     </main>
+    {modelSettingsOpen&&<ModelSettings onClose={()=>setModelSettingsOpen(false)}/>}
   </div>
 }
 

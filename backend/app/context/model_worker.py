@@ -168,7 +168,7 @@ def main():
             error.update(code='model_schema_error' if raw_body else 'model_invalid_json', stage='validate' if raw_body else 'parse', status_code=raw_status)
         envelope = {"error": error, "usage": usage_data}
     timing["worker_elapsed_ms"] = round((time.monotonic() - started) * 1000, 3)
-    envelope.update(timing=timing, provider_request_id=trace_id)
+    envelope.update(timing=timing, provider_request_id=trace_id,http_status=raw_status)
     output.write(json.dumps(envelope, ensure_ascii=False))
     output.flush()
     # Callback threads must not keep a completed/failed request alive.

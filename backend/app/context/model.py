@@ -78,7 +78,9 @@ def _completion(**request):
         usage = SimpleNamespace(**envelope["usage"]) if envelope.get("usage") else None
         timing = envelope.get("timing", {})
         timing["process_overhead_ms"] = round(max(0, (time.monotonic() - started) * 1000 - timing.get("worker_elapsed_ms", 0)), 3)
-        metadata = {"timing": timing, "provider_request_id": envelope.get("provider_request_id")}
+        status=envelope.get('http_status')
+        metadata = {"timing": timing, "provider_request_id": envelope.get("provider_request_id"),
+                    "http_status":status if type(status) is int and 100<=status<=599 else None}
         if "error" in envelope:
             error = ModelCallError(envelope["error"])
             error.response = SimpleNamespace(usage=usage, choices=[]) if usage else None
@@ -90,13 +92,17 @@ def _completion(**request):
 
 
 def capabilities(settings):
-    from app.context.capabilities import verified_vision, vision_ready
+    from app.context.capabilities import verified_text, verified_vision, vision_ready
     proof=verified_vision(settings)
+    text_proof=verified_text(settings)
     return {
         "configured": bool(settings.model_name and settings.model_api_key.get_secret_value()),
         "external_analysis_enabled": settings.external_model_enabled,
         "text": True,
         "structured_json": settings.model_json_supported,
+        "text_verified":text_proof is not None,
+        "json_verified":text_proof is not None,
+        "text_checked_at":text_proof.get('checked_at') if text_proof else None,
         "vision_declared": settings.model_vision_supported,
         "vision_verified":proof is not None,
         "vision_available":vision_ready(settings),
@@ -222,6 +228,9 @@ def call_json(database, settings, budget_id, system_prompt, context, validate=No
 def _finish_audit(audit, started, parse_started, result, error=None):
     metadata = getattr(result, "model_metadata", {})
     timing = metadata.get("timing", {})
+    status=(error.diagnostic['status_code'] if error else None) or metadata.get('http_status')
+    if error and error.diagnostic['status_code'] is None:
+        error.diagnostic['status_code']=status
     audit.update(ended_at=now(), elapsed_ms=round((time.monotonic() - started) * 1000, 3),
                  worker_initialize_ms=timing.get("worker_initialize_ms"), network_ms=timing.get("network_ms"),
                  process_overhead_ms=timing.get("process_overhead_ms"),
@@ -229,7 +238,7 @@ def _finish_audit(audit, started, parse_started, result, error=None):
                  request_stage=error.diagnostic["stage"] if error else "completed",
                  error_category=error.code if error else None,
                  exception_type=error.diagnostic["exception_type"] if error else None,
-                 http_status=error.diagnostic["status_code"] if error else None,
+                 http_status=status,
                  provider_request_id=metadata.get("provider_request_id"))
     if error:
         audit.update({k: error.diagnostic[k] for k in ("validation_kind", "validation_errors", "provider_error_reason") if k in error.diagnostic})

@@ -122,4 +122,5 @@ def get_settings() -> Settings:
     for root in settings.repository_root_paths():
         if not root.exists() or not root.is_dir():
             raise ValueError(f"Configured repository root does not exist: {root}")
-    return settings
+    from app.context.configuration import load
+    return load(settings)

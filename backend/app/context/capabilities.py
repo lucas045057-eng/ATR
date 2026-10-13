@@ -12,7 +12,8 @@ from app.common import digest, dumps, now, uid
 
 def configuration_digest(settings):
     return digest({'model':settings.model_name,'provider':settings.model_provider,
-                   'base_url':settings.model_base_url,'wire_api':settings.model_wire_api})
+                   'base_url':settings.model_base_url,'wire_api':settings.model_wire_api,
+                   'key_fingerprint':hashlib.sha256(settings.model_api_key.get_secret_value().encode()).hexdigest()})
 
 
 def proof_path(settings):
@@ -41,6 +42,52 @@ def verified_vision(settings):
 
 def vision_ready(settings):
     return settings.model_vision_supported or verified_vision(settings) is not None
+
+
+def verified_text(settings):
+    try:
+        location=settings.database_path.parent/'model-text-proof.json'
+        if location.stat().st_size>16384:
+            return None
+        envelope=json.loads(location.read_text(encoding='utf-8'))
+        proof=envelope['proof']
+        if (hmac.compare_digest(envelope['signature'],proof_signature(settings,proof))
+                and proof['configuration_digest']==configuration_digest(settings)
+                and proof['text_verified'] is True and proof['json_verified'] is True):
+            return proof
+    except (OSError,ValueError,KeyError,TypeError):
+        pass
+    return None
+
+
+def probe_text(database,settings):
+    from app.context.budget import BudgetLimits, ContextBudgetManager
+    from app.context.model import call_json
+    marker=uid()
+    def validate(value):
+        if value!={'marker':marker,'result':42}:
+            raise ValueError('实际文字或 JSON 响应未通过验证')
+        return value
+    budget_id=ContextBudgetManager(database,settings).create('capability',limits=BudgetLimits(
+        max_calls=1,max_tools=1,max_input_tokens=settings.initial_input_tokens,
+        max_total_tokens=min(settings.budget_total_tokens,settings.model_context_window),max_execution_seconds=45))
+    receipt={}
+    call_json(database,settings,budget_id,'Return only a JSON object with marker copied exactly from the input and result equal to the sum of the supplied integers.',
+              {'purpose':'text and structured JSON capability check','marker':marker,'integers':[17,25]},
+              validate=validate,deadline=time.monotonic()+45,receipt=receipt)
+    proof={'text_verified':True,'json_verified':True,'configuration_digest':configuration_digest(settings),
+           'checked_at':now(),'model':settings.model_name,'wire_api':settings.model_wire_api,'budget_id':budget_id,
+           'request_attempt_id':receipt['request_attempt_id'],'usage_kind':receipt['usage_kind']}
+    location=settings.database_path.parent/'model-text-proof.json'
+    temporary=location.with_suffix('.'+uid()+'.tmp')
+    location.parent.mkdir(parents=True,exist_ok=True)
+    descriptor=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+    with os.fdopen(descriptor,'w',encoding='utf-8') as output:
+        output.write(dumps({'proof':proof,'signature':proof_signature(settings,proof)}))
+        output.flush()
+        os.fsync(output.fileno())
+    os.replace(temporary,location)
+    return {'status':'verified','text_verified':True,'json_verified':True,'proof':proof}
 
 
 def probe_vision(database,settings):
