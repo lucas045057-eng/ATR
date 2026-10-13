@@ -21,10 +21,11 @@ export function ModelSettings({onClose}:{onClose:()=>void}) {
         const value=await api(`/jobs/${job}`);if(!active)return;
         setError('');
         if(['queued','running'].includes(value.status)){timer=setTimeout(poll,1500);return;}
+        const current=await api('/model/configuration');if(!active)return;
+        setConfiguration(current);setSavedConfiguration(fingerprint(current));
         setJob('');setBusy(false);sessionStorage.removeItem('atr_active_model_probe_job');
         if(value.status==='completed')setNotice('✓ 实际服务响应已通过检测，可查看下方能力状态。');
         else setError(value.error||'检测失败，原配置和调用记录已保留。');
-        const current=await api('/model/configuration');if(active){setConfiguration(current);setSavedConfiguration(fingerprint(current));}
       } catch(reason){if(active){setError(`连接中断，检测状态暂时未知；恢复后继续读取原任务。${(reason as Error).message}`);timer=setTimeout(poll,1500);}}
     };
     void poll();return()=>{active=false;clearTimeout(timer);};
