@@ -54,10 +54,13 @@ def main():
         response = {"payload": sanitize_payload(connector.read(request["tool_id"], args))}
         encoded = encode_response(response, authentication.get("password", ""))
     except Exception as exc:
-        code = getattr(exc, "code", "ssh_tool_failed")
+        from app.connectors.diagnostics import failure
+        diagnostic = failure(exc, '', '', '', 'request')
+        code = diagnostic['error_code']
         if not isinstance(code, str) or not re.fullmatch(r"[a-z_]{1,80}", code):
             code = "ssh_tool_failed"
-        encoded = json.dumps({"error_type": type(exc).__name__, "error_code": code})
+        encoded = json.dumps({"error_type": type(exc).__name__, "error_code": code,
+                              'failure_stage': diagnostic['failure_stage'], 'output_bytes': diagnostic['output_bytes']})
     finally:
         credentials.SSH_SESSIONS.clear()
     sys.stdout.buffer.write(encoded.encode("utf-8"))

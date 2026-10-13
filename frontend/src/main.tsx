@@ -295,7 +295,7 @@ function RuntimeQuestion({question, onResume, onScope}: {question: Row; onResume
       <label><input type="checkbox" checked={!!selected[option.option_id]} onChange={event=>setSelected(current=>{
         const next={...current};if(event.target.checked)next[option.option_id]={option_id:option.option_id,service:option.suggested_service||option.name,role:'unknown'};else delete next[option.option_id];return next
       })}/>{option.name} · {option.kind==='container'?'容器':'系统服务'}{option.previously_mapped?' · 原业务曾确认':''}</label>
-      <small>完整身份：{option.runtime_id} · 来源：{option.evidence_id}</small>
+      <details><summary>查看身份和来源</summary><small>完整身份：{option.runtime_id} · 来源：{option.evidence_id}</small></details>
       {selected[option.option_id]&&<><label>本业务中的名称<input required maxLength={255} value={selected[option.option_id].service} onChange={event=>setSelected(current=>({...current,[option.option_id]:{...current[option.option_id],service:event.target.value}}))}/></label>
         <label>已知作用<select value={selected[option.option_id].role} onChange={event=>setSelected(current=>({...current,[option.option_id]:{...current[option.option_id],role:event.target.value}}))}>{Object.entries(roles).map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></label></>}
     </div>)}
