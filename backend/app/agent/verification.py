@@ -135,7 +135,8 @@ def verify_hypothesis(item, state, evidence_targets, allowed_targets, supports, 
         and {a["tool_id"].split(".")[-1], b["tool_id"].split(".")[-1]} == {"logs", "status"}
         for a, b in combinations([e for e in relevant if e["evidence_id"] in failed_ids | causal_ids], 2)
     )
-    mechanism = bool(failed_ids and causal_ids and independent)
+    cross_target = mode in {"dependency_unavailable_at_startup", "upstream_unavailable"}
+    mechanism = bool(failed_ids and causal_ids and independent and not cross_target)
     predictions_verified = bool(results) and all(p["status"] == "verified" for p in results)
     passed = bool(mechanism and predictions_verified and not counter)
     return {

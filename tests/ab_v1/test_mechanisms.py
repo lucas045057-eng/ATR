@@ -4,6 +4,8 @@ from copy import deepcopy
 import pytest
 from app.agent.model_schema import output_contract
 from app.agent.verification import MECHANISMS
+from app.agent.workflow import _reviewer
+from test_baseline import gate_state
 
 
 def registry():
@@ -78,3 +80,11 @@ def test_proxy_rule_requires_current_502_and_authorized_target():
     facts[-1]["value"] = 502
     scope["target_node_ids"].remove("app")
     assert registry().verify("upstream_unavailable", facts, relations, scope)["status"] != "supported"
+
+
+def test_legacy_single_target_gate_cannot_approve_new_cross_target_mode():
+    state = gate_state()
+    state["report"]["hypotheses"][0]["failure_mode"] = "dependency_unavailable_at_startup"
+    stamp = state["evidence"][0]["observed_at"]
+    state["evidence"][0]["payload"]["text"] = stamp + " startup database connection refused"
+    assert _reviewer(state)["gate"]["status"] != "supported"
