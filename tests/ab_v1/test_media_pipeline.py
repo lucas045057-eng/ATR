@@ -114,6 +114,26 @@ def test_pdf_text_layer_does_not_bypass_raster_secret_check(tmp_path,monkeypatch
     assert not (tmp_path/'derived'/'vision-1.jpg').exists()
 
 
+def test_retry_reprocesses_failed_ocr_page_only(tmp_path,monkeypatch):
+    path=tmp_path/'guide.pdf'
+    path.write_bytes(pdf_bytes(2))
+    calls=[]
+    def first_ocr(image):
+        calls.append(1)
+        if len(calls)==2:
+            raise ImportError
+        return []
+    monkeypatch.setattr(media_worker,'ocr',first_ocr)
+    metadata=source(path,tmp_path/'derived')
+    first=process_media(path,metadata,{},time.monotonic()+120)
+    completed=(tmp_path/'derived'/'page-1.png').stat().st_mtime_ns
+    monkeypatch.setattr(media_worker,'ocr',lambda image:calls.append(1) or [])
+    retried=process_media(path,metadata,first,time.monotonic()+120)
+    assert len(calls)==3 and retried['next_page']==2 and len(retried['pages'])==2
+    assert all(page['ocr_state']=='completed' for page in retried['pages'])
+    assert (tmp_path/'derived'/'page-1.png').stat().st_mtime_ns==completed
+
+
 @pytest.mark.parametrize('archive_kind',['direct','zip','tar','tar.gz'])
 def test_actual_ingestion_pipeline_preserves_media_digest_and_page_sources(client,archive_kind):
     profile=client.post('/api/v1/businesses',json={'name':'Source equivalence '+archive_kind}).json()

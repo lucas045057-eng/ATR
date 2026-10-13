@@ -79,6 +79,7 @@ def build_static(business, files, previous):
                   for reference in page.get('source_refs',[])]
             document={'file_id':row['id'],'page_number':page['page_number'],'text':page.get('text',''),
                       'source_refs':refs,'ocr_state':page.get('ocr_state'),'vision_state':page.get('vision_state'),
+                      'ocr_error_type':page.get('ocr_error_type'),
                       'external_paused':page.get('external_paused',False),
                       'visual':page.get('visual'),
                       'ocr_parser_version':info.get('parser_version'),'ocr_regions':page.get('regions',[]),

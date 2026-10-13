@@ -6,4 +6,4 @@
 *.zip binary
 *.tar binary
 *.gz binary
-third_party/licenses/** -text
+third_party/licenses/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab

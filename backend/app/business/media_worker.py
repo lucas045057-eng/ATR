@@ -9,6 +9,7 @@ import os
 import re
 import sys
 import time
+from itertools import chain, islice
 from pathlib import Path
 
 from app.tools.redaction import redact_text
@@ -54,6 +55,8 @@ def ocr(image):
     import numpy as np
     from rapidocr_onnxruntime import RapidOCR
     if _ocr is None:
+        import cv2
+        cv2.setNumThreads(1)
         _ocr=RapidOCR(intra_op_num_threads=1,inter_op_num_threads=1)
     values,_=_ocr(np.asarray(image))
     if len(values or [])>500:
@@ -130,7 +133,8 @@ def process_media(path: Path, source: dict, cursor: dict, deadline: float) -> di
                     raise ValueError('animated_image_requires_review')
         result['total_pages']=total
         start=int(result.get('next_page',0))
-        for number in range(start,min(total,start+int(source.get('max_pages',50)))):
+        retry=[index for index,page in enumerate(pages) if page.get('ocr_state') in {'ocr_failed','ocr_unavailable'}]
+        for number in islice(chain(retry,range(start,total)),int(source.get('max_pages',50))):
             if time.monotonic()>=deadline:
                 break
             native_text=''
@@ -157,14 +161,17 @@ def process_media(path: Path, source: dict, cursor: dict, deadline: float) -> di
                 with Image.open(path) as original:
                     image,original_size=resize(original)
             regions=[]
+            ocr_error_type=None
             # A PDF text layer does not reveal secrets embedded in its raster content.
             try:
                 regions=ocr(image)
                 ocr_state='completed'
-            except ImportError:
+            except ImportError as error:
                 ocr_state='ocr_unavailable'
-            except Exception:
+                ocr_error_type=type(error).__name__
+            except Exception as error:
                 ocr_state='ocr_failed'
+                ocr_error_type=type(error).__name__
             text=native_text if native_text.strip() else '\n'.join(row['text'] for row in regions)
             sensitive=bool(SENSITIVE.search(text)) or redact_text(text)!=text or any(region['sensitive'] for region in regions)
             paused=sensitive or text_incomplete or ocr_state in {'ocr_failed','ocr_unavailable'}
@@ -179,13 +186,18 @@ def process_media(path: Path, source: dict, cursor: dict, deadline: float) -> di
             reference={'schema_version':'source-ref-1','path':source['path'],'archive_path':source['path'],
                        'content_digest':digest,'digest_basis':'original_bytes','page_number':number+1,
                        'source_type':'Documented','region_coordinate_system':'normalized_page','region':[0,0,1,1]}
-            pages.append({**frame,'page_number':number+1,'text':redact_text(text)[:4000],
+            record={**frame,'page_number':number+1,'text':redact_text(text)[:4000],
                           'text_truncated':len(text)>4000,'text_source':'pdf_text' if native_text.strip() else 'ocr',
                           'regions':regions,'source_refs':[reference],'ocr_state':ocr_state,
+                          'ocr_error_type':ocr_error_type,
                           'image_path':filename if not paused else None,'image_size':list(image.size),
                           'original_size':original_size,'external_paused':paused,'local_text_incomplete':text_incomplete,
-                          'vision_state':'pending_vision','semantic_relations_verified':False})
-            result['next_page']=number+1
+                          'vision_state':'pending_vision','semantic_relations_verified':False}
+            if number<len(pages):
+                pages[number]=record
+            else:
+                pages.append(record)
+            result['next_page']=len(pages)
             result['parse_state']='partial_media' if result['next_page']<total else 'local_media_complete'
             result['omitted_pages']=list(range(result['next_page']+1,min(total+1,result['next_page']+1001)))
             result['omitted_page_count']=total-result['next_page']
