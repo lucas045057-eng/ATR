@@ -10,7 +10,7 @@ from app.runtime.processes import run_bounded
 
 
 def run_ssh_action(config: dict, settings, tool_id: str, arguments: dict, approved: set,
-                   *, cancelled=None) -> dict:
+                   *, cancelled=None, on_spawn=None) -> dict:
     if not settings.ssh_enabled or not config.get("access_authorized"):
         raise PermissionError("SSH is disabled or authorization was revoked")
     args = check(config, tool_id, arguments, approved)
@@ -32,7 +32,7 @@ def run_ssh_action(config: dict, settings, tool_id: str, arguments: dict, approv
                "arguments": args, "approved": sorted(approved), "authentication": authentication}
     result = run_bounded([sys.executable, "-m", "app.runtime.ssh_worker"],
                          json.dumps(request).encode(), timeout=config["timeout_seconds"],
-                         max_output=config["max_output_bytes"] + 1024, cancelled=Cancellation())
+                         max_output=config["max_output_bytes"] + 1024, cancelled=Cancellation(), on_spawn=on_spawn)
     response = json.loads(result["stdout"])
     if response.get("error_type"):
         if response["error_type"] in {"AuthenticationException", "BadHostKeyException"}:

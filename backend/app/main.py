@@ -73,9 +73,14 @@ async def lifespan(_: FastAPI):
             SSH_SESSIONS.purge()
 
     async def supervise_runs():
+        from app.agent.ab_investigation import dispatch_ready
+        iteration = 0
         while True:
-            await asyncio.sleep(5)
-            await asyncio.to_thread(coordinator.tick)
+            await asyncio.sleep(1)
+            iteration += 1
+            if iteration % 5 == 0:
+                await asyncio.to_thread(coordinator.tick)
+            await asyncio.to_thread(dispatch_ready, database, settings)
 
     purge_task = asyncio.create_task(purge_passwords())
     supervisor_task = asyncio.create_task(supervise_runs())

@@ -126,12 +126,14 @@ class RuntimeService:
         finally:
             conn.close()
 
-    def execute(self, business_id, target_id, request: ToolRequest, timeout_cap=None):
+    def execute(self, business_id, target_id, request: ToolRequest, timeout_cap=None, *, supervision=None):
         config = self.get(business_id, target_id)
         if timeout_cap is not None:
             config["timeout_seconds"] = min(config["timeout_seconds"], timeout_cap)
         observation_id = uid()
         with self.db.transaction() as tx:
+            if supervision is not None:
+                supervision['authorize'](tx)
             count = tx.execute(
                 "SELECT COUNT(*) FROM runtime_observations WHERE target_id=?", (target_id,)
             ).fetchone()[0]
@@ -179,7 +181,12 @@ class RuntimeService:
                 else StandardSSHConnector({**config, "_approved": approved}, self.settings)
             )
             stage = "request"
-            payload = sanitize_payload(connector.read(request.tool_id, args))
+            if supervision is not None and config['connector'] == 'ssh':
+                from app.runtime.ssh_channel import run_ssh_action
+                payload = sanitize_payload(run_ssh_action(config, self.settings, request.tool_id, args,
+                                                         approved, **{k: v for k, v in supervision.items() if k != 'authorize'}))
+            else:
+                payload = sanitize_payload(connector.read(request.tool_id, args))
             stage = "output"
             serialized = dumps(payload)
             if len(serialized.encode()) > config["max_output_bytes"]:
@@ -195,6 +202,8 @@ class RuntimeService:
                     partial=True, observation_id=observation_id).public()
             stamp = now()  # Local acquisition time, remote clock is untrusted.
             with self.db.transaction() as tx:
+                if supervision is not None:
+                    supervision['authorize'](tx)
                 tx.execute(
                     "UPDATE runtime_observations SET status='succeeded',payload_json=?,content_digest=?,observed_at=?,bytes=?,diagnostics_json=? WHERE id=?",
                     (serialized, digest(payload), stamp, len(serialized.encode()), dumps(diagnostic), observation_id),
@@ -210,6 +219,8 @@ class RuntimeService:
                 "diagnostic": diagnostic,
             }
         except Exception as exc:
+            if supervision is not None and supervision['cancelled'].is_set():
+                raise InterruptedError('调查已终止') from None
             diagnostic = failure(exc, request.tool_id, config.get("execution_mode", "forced_gateway"), observation_id, stage)
             with self.db.transaction() as tx:
                 tx.execute(

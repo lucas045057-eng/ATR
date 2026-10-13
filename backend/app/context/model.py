@@ -44,14 +44,27 @@ def _parse_content(content):
 
 def _completion(**request):
     started = time.monotonic()
+    supervision = request.pop('_supervision', None)
     env = dict(os.environ)
     env.update(PYTHONPATH=str(Path(__file__).resolve().parents[2]), PYTHONUTF8="1",
                LITELLM_MODE="PRODUCTION", LITELLM_LOCAL_MODEL_COST_MAP="True")
     try:
-        result = subprocess.run([sys.executable, "-m", "app.context.model_worker"],
+        if supervision is not None:
+            from app.runtime.processes import run_bounded
+            result = SimpleNamespace(**run_bounded(
+                [sys.executable, '-m', 'app.context.model_worker'],
+                json.dumps(request, ensure_ascii=False).encode('utf-8'),
+                timeout=request['timeout'], max_output=request['max_tokens'] * 96 + 16000,
+                **supervision))
+        else:
+            result = subprocess.run([sys.executable, "-m", "app.context.model_worker"],
                                 input=json.dumps(request, ensure_ascii=False).encode("utf-8"),
                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env,
                                 timeout=request["timeout"] + 10)
+    except InterruptedError:
+        raise
+    except TimeoutError as exc:
+        raise ModelCallError(diagnostic(exc, 'worker')) from None
     except subprocess.TimeoutExpired as exc:
         error = diagnostic(exc, "worker")
         try:
@@ -103,7 +116,7 @@ def model_messages(system_prompt, context):
     ]
 
 
-def call_json(database, settings, budget_id, system_prompt, context, validate=None):
+def call_json(database, settings, budget_id, system_prompt, context, validate=None, *, supervision=None):
     if (
         not settings.external_model_enabled
         or not settings.model_name
@@ -113,9 +126,13 @@ def call_json(database, settings, budget_id, system_prompt, context, validate=No
     if not settings.model_json_supported:
         raise ModelUnavailable("模型未声明 JSON 结构化输出支持")
     messages = model_messages(system_prompt, context)
+    if supervision is not None:
+        with database.connect() as tx:
+            supervision['authorize'](tx)
     manager = ContextBudgetManager(database, settings)
     remaining = manager.remaining_seconds(budget_id)
-    reservation = manager.reserve(budget_id, messages, settings.model_max_output_tokens)
+    reservation = manager.reserve(budget_id, messages, settings.model_max_output_tokens,
+                                  **({'authorize': supervision['authorize']} if supervision else {}))
     audit = manager.start_attempt(budget_id, reservation)
     started = time.monotonic()
     parse_started = None
@@ -137,6 +154,7 @@ def call_json(database, settings, budget_id, system_prompt, context, validate=No
             response_format={"type": "json_object"},
             messages=messages,
             **protocol,
+            **({'_supervision': {k: v for k, v in supervision.items() if k != 'authorize'}} if supervision is not None else {}),
         )
         stage = "parse"
         parse_started = time.monotonic()
@@ -151,6 +169,9 @@ def call_json(database, settings, budget_id, system_prompt, context, validate=No
             if validated is not None:
                 result = validated
     except Exception as exc:
+        if supervision is not None and supervision['cancelled'].is_set():
+            # The coordinator owns settlement after lease revocation.
+            raise InterruptedError('调查已终止') from None
         error = exc if isinstance(exc, ModelCallError) else ModelCallError(diagnostic(exc, stage))
         _finish_audit(audit, started, parse_started, response or exc, error)
         manager.settle(budget_id, reservation, response or getattr(exc, "response", None), "failed", audit)
@@ -159,6 +180,9 @@ def call_json(database, settings, budget_id, system_prompt, context, validate=No
         logging.getLogger("atr.model").warning("Model failed: attempt=%s run=%s code=%s type=%s stage=%s status=%s validation=%s", reservation[0], audit["investigation_run_id"], error.code, error.diagnostic["exception_type"], error.diagnostic["stage"], error.diagnostic["status_code"], json.dumps(error.diagnostic.get("validation_errors", [])))
         raise error from None
     _finish_audit(audit, started, parse_started, response)
+    if supervision is not None:
+        with database.connect() as tx:
+            supervision['authorize'](tx)
     manager.settle(budget_id, reservation, response, audit=audit)
     manager.record_time(budget_id, time.monotonic() - started)
     return result

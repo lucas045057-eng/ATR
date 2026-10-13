@@ -14,7 +14,7 @@ from app.system.scope import binding_is_current
 
 
 class BusinessToolRegistry:
-    def __init__(self, database, settings, business_id, run_id, snapshot_id, budget_id, target_id):
+    def __init__(self, database, settings, business_id, run_id, snapshot_id, budget_id, target_id, *, supervision=None):
         self.db, self.settings = database, settings
         self.business_id, self.run_id, self.sid, self.bid = (
             business_id,
@@ -23,11 +23,16 @@ class BusinessToolRegistry:
             budget_id,
         )
         self.target_id = target_id
+        self.supervision = supervision
         with self.db.connect() as connection:
             run = connection.execute("SELECT target_id FROM diagnosis_runs WHERE id=?", (run_id,)).fetchone()
         if not run or run["target_id"] != target_id:
             raise PermissionError("工具注册表与 Run 的 SSH 目标绑定不一致")
         self.manager = ContextBudgetManager(database, settings)
+
+    def _authorize(self, tx):
+        if self.supervision is not None:
+            self.supervision['authorize'](tx)
 
     def _validate_runtime_action(self, action):
         tool = action["tool_id"]
@@ -66,6 +71,7 @@ class BusinessToolRegistry:
         call_id = uid()
         tool = action["tool_id"]
         with self.db.transaction() as tx:
+            self._authorize(tx)
             tx.execute(
                 "INSERT INTO tool_calls(id,run_id,snapshot_id,purpose,tool_id,adapter_version,args_redacted_json,risk,policy_version,status,request_id,started_at,target_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
@@ -86,7 +92,7 @@ class BusinessToolRegistry:
             )
         started = time.monotonic()
         try:
-            self.manager.consume_tool(self.bid)
+            self.manager.consume_tool(self.bid, **({'authorize': self.supervision['authorize']} if self.supervision else {}))
             if not tool.startswith("code."):
                 self._validate_runtime_action(action)
             if tool.startswith("config."):
@@ -112,9 +118,11 @@ class BusinessToolRegistry:
                     self.business_id,
                     action["target_id"],
                     ToolRequest(tool_id=tool, arguments=action["arguments"]),
-                    timeout_cap=self.manager.remaining_seconds(self.bid),
+                    timeout_cap=min(10, self.manager.remaining_seconds(self.bid)) if self.supervision else self.manager.remaining_seconds(self.bid),
+                    **({'supervision': self.supervision} if self.supervision else {}),
                 )
                 with self.db.transaction() as tx:
+                    self._authorize(tx)
                     tx.execute("UPDATE tool_calls SET request_id=? WHERE id=?", (observation["observation_id"], call_id))
                 self.manager.retrieval(self.bid, max(observation["bytes"], observation.get("payload", {}).get("output_bytes", 0)))
                 if "payload" not in observation:
@@ -141,6 +149,7 @@ class BusinessToolRegistry:
             evidence_id, stamp = uid(), now()
             content_hash = digest(payload)
             with self.db.transaction() as tx:
+                self._authorize(tx)
                 tx.execute(
                     "UPDATE tool_calls SET status='succeeded',ended_at=? WHERE id=?",
                     (stamp, call_id),
@@ -171,6 +180,8 @@ class BusinessToolRegistry:
                 "diagnostic": observation.get("diagnostic", {}) if not tool.startswith("code.") else {},
             }
         except Exception as exc:
+            if self.supervision is not None and self.supervision['cancelled'].is_set():
+                raise InterruptedError('调查已终止') from None
             with self.db.transaction() as tx:
                 tx.execute(
                     "UPDATE tool_calls SET status=?,ended_at=?,error_code=? WHERE id=?",

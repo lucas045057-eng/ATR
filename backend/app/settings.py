@@ -25,7 +25,10 @@ class Settings(BaseSettings):
     model_name: str = ""
     model_wire_api: Literal['chat_completions', 'responses'] = 'chat_completions'
     model_reasoning_effort: Literal['low', 'medium', 'high'] | None = None
-    agent_decision_protocol: Literal["legacy_v22", "minimal_v2"] = "legacy_v22"
+    agent_decision_protocol: Literal["legacy_v22", "minimal_v2", "ab_v1"] = "ab_v1"
+    ab_soft_model_calls: int = Field(default=6, ge=1, le=100)
+    ab_soft_tool_calls: int = Field(default=16, ge=1, le=500)
+    ab_supplement_enabled: bool = True
     model_timeout_seconds: float = Field(default=45, ge=2, le=180)
     allowed_health_urls: str = ""
     max_source_files: int = Field(default=1000, ge=1, le=1000)

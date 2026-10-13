@@ -31,14 +31,14 @@ def reserve(database: Database, kind: str, business_id: str | None = None, targe
 def reserve_investigation(database, incident_id, business_id=None, target_id=None):
     kind = "investigate:" + incident_id
     with database.transaction() as tx:
-        active = tx.execute("SELECT id,status,target_id FROM jobs WHERE kind=? AND status IN ('queued','running')", (kind,)).fetchone()
+        active = tx.execute("SELECT id,status,target_id FROM jobs WHERE kind=? AND status IN ('queued','running','waiting_input')", (kind,)).fetchone()
         if active:
             if active["target_id"] == target_id:
                 return active['id'], active['status'], False
             raise ValueError("此事件已有绑定到其他或来源未知 SSH 目标的活动任务，请等待结束")
         if tx.execute("SELECT 1 FROM diagnosis_runs WHERE incident_id=? AND status='running'", (incident_id,)).fetchone():
             raise ValueError("调查仍在进行，需等待当前调查结束")
-        if business_id and tx.execute("SELECT 1 FROM jobs WHERE business_id=? AND status IN ('queued','running')", (business_id,)).fetchone():
+        if business_id and tx.execute("SELECT 1 FROM jobs WHERE business_id=? AND status IN ('queued','running','waiting_input')", (business_id,)).fetchone():
             raise ValueError("当前业务已有活动任务")
         if tx.execute("SELECT COUNT(*) FROM jobs WHERE status IN ('queued','running')").fetchone()[0] >= 12:
             raise ValueError("后台任务队列已满")

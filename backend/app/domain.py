@@ -39,6 +39,12 @@ class IncidentCreate(StrictModel):
 
 class InvestigationRunRequest(StrictModel):
     target_id: str | None = Field(default=None, min_length=1, max_length=80)
+    decision_protocol: Literal['legacy_v22', 'minimal_v2', 'ab_v1'] | None = None
+
+
+class ClarificationAnswer(StrictModel):
+    question_id: str = Field(min_length=1, max_length=80)
+    version: int = Field(ge=1)
 
 
 class ReviewRequest(StrictModel):

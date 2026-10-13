@@ -96,11 +96,13 @@ class ContextBudgetManager:
                 (limits.model_dump_json(), budget_id),
             )
 
-    def reserve(self, budget_id, messages, output_limit):
+    def reserve(self, budget_id, messages, output_limit, *, authorize=None):
         estimate = estimate_model_input(messages)
         reason = None
         record_id = uid()
         with self.db.transaction() as tx:
+            if authorize is not None:
+                authorize(tx)
             row = tx.execute("SELECT * FROM context_budgets WHERE id=?", (budget_id,)).fetchone()
             limits = json.loads(row["limits_json"])
             reserved = estimate + output_limit
@@ -220,9 +222,9 @@ class ContextBudgetManager:
                     (budget_id,),
                 )
 
-    def consume_tool(self, budget_id):
+    def consume_tool(self, budget_id, *, authorize=None):
         self.remaining_seconds(budget_id)
-        self._consume(budget_id, "tool_calls", 1, "max_tools", "tool_call_limit")
+        self._consume(budget_id, "tool_calls", 1, "max_tools", "tool_call_limit", authorize=authorize)
 
     def remaining_seconds(self, budget_id):
         row = self.get(budget_id)
@@ -243,9 +245,11 @@ class ContextBudgetManager:
     def retrieval(self, budget_id, size):
         self._consume(budget_id, "retrieved_bytes", size, "max_retrieved_bytes", "retrieval_limit")
 
-    def _consume(self, budget_id, column, amount, limit_key, reason):
+    def _consume(self, budget_id, column, amount, limit_key, reason, *, authorize=None):
         exceeded = False
         with self.db.transaction() as tx:
+            if authorize is not None:
+                authorize(tx)
             row = tx.execute("SELECT * FROM context_budgets WHERE id=?", (budget_id,)).fetchone()
             if row[column] + amount > json.loads(row["limits_json"])[limit_key]:
                 tx.execute(

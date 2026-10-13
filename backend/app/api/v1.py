@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.agent.workflow import build_workflow
 from app.api.dependencies import require_operator
 from app.domain import (
+    ClarificationAnswer,
     EvaluationCaseCreate,
     EvaluationPairCreate,
     EvaluationTrialCreate,
@@ -208,11 +209,13 @@ def create_incident(request: IncidentCreate, actor: str = Depends(require_operat
         ).fetchone():
             raise HTTPException(409, "Adaptive mode requires the reviewed business profile and runtime scope entry")
         incident_id, timestamp = str(uuid.uuid4()), utcnow()
+        from app.agent.ab_investigation import default_window
+        business_entry = connection.execute('SELECT 1 FROM business_profiles WHERE system_id=?', (request.system_id,)).fetchone()
         with db().transaction() as tx:
             tx.execute("INSERT INTO incidents(id,system_id,symptom_json,window_start,window_end,status,created_at) VALUES(?,?,?,?,?,?,?)",
                        (incident_id, request.system_id, json.dumps({"text": request.symptom, "mode": request.mode,
                                                                     "task_type": request.task_type}),
-                        request.window_start or timestamp, None, "open", timestamp))
+                        request.window_start or (default_window() if business_entry else timestamp), None, "open", timestamp))
         return {"id": incident_id, "system_id": request.system_id, "symptom": request.symptom,
                 "mode": request.mode, "task_type": request.task_type,
                 "created_at": timestamp, "status": "open"}
@@ -619,8 +622,25 @@ def start_run(incident_id: str, request: InvestigationRunRequest | None = None,
             raise HTTPException(409, str(exc)) from exc
     finally:
         conn.close()
+    protocol = request.decision_protocol if request and request.decision_protocol else settings.agent_decision_protocol
+    if business and protocol == 'ab_v1':
+        from app.agent.ab_investigation import dispatch_ready, prepare_run
+        run_id = None
+        if created:
+            try:
+                run_id = prepare_run(database, settings, incident_id, business['id'], target_id, job_id, actor)
+            except Exception as exc:
+                with database.transaction() as tx:
+                    tx.execute("UPDATE jobs SET status='failed',error=?,ended_at=? WHERE id=?", (type(exc).__name__, utcnow(), job_id))
+                raise HTTPException(409, str(exc) if isinstance(exc, ValueError) else '无法创建调查，请检查业务范围和配置') from exc
+            dispatch_ready(database, settings)
+        else:
+            with database.connect() as tx:
+                run_id = decode(tx.execute('SELECT result_json FROM jobs WHERE id=?', (job_id,)).fetchone()[0]).get('run_id')
+        return {'job_id': job_id, 'run_id': run_id, 'status': status, 'reused': not created, 'decision_protocol': 'ab_v1'}
     def execute():
-        return investigate_business(database, settings, incident_id, business["id"], actor, job_id, target_id=target_id) if business else execute_legacy_run(incident_id, actor, job_id)
+        execution_settings = settings.model_copy(update={'agent_decision_protocol': protocol})
+        return investigate_business(database, execution_settings, incident_id, business["id"], actor, job_id, target_id=target_id) if business else execute_legacy_run(incident_id, actor, job_id)
     if created:
         submit(database, job_id, execute)
         with database.transaction() as tx:
@@ -642,7 +662,7 @@ def list_incident_runs(incident_id: str) -> list[dict[str, Any]]:
 
 
 @router.post("/runs/{run_id}/resume", status_code=202)
-def resume_business_run(run_id: str, actor: str = Depends(require_operator)):
+def resume_business_run(run_id: str, request: dict[str, Any] | None = None, actor: str = Depends(require_operator)):
     from app.agent.business_investigation import investigate_business
     from app.agent.discovery import authorization_digest
     from app.business.service import BusinessService
@@ -651,6 +671,17 @@ def resume_business_run(run_id: str, actor: str = Depends(require_operator)):
     from app.jobs import reserve_investigation, submit
     from app.system.scope import binding_is_current
     database, settings = db(), get_settings()
+    with database.connect() as tx:
+        coordinated = tx.execute('SELECT 1 FROM run_executions WHERE run_id=?', (run_id,)).fetchone()
+    if coordinated:
+        if request is None:
+            raise HTTPException(409, '继续调查需要当前确认问题的编号和版本')
+        from app.agent.ab_investigation import resume_run
+        try:
+            answer = ClarificationAnswer.model_validate(request)
+            return resume_run(database, settings, run_id, answer)
+        except (ValueError, PermissionError) as exc:
+            raise HTTPException(409, '确认问题的编号或版本无效' if type(exc).__name__ == 'ValidationError' else str(exc)) from exc
     with database.connect() as c:
         row = c.execute("SELECT * FROM diagnosis_runs WHERE id=?", (run_id,)).fetchone()
         if not row:
