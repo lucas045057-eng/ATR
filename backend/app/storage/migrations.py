@@ -101,3 +101,15 @@ def migrate(connection):
     if "target_id" not in columns:
         connection.execute("ALTER TABLE tool_calls ADD COLUMN target_id TEXT")
     connection.execute("INSERT OR IGNORE INTO schema_migrations VALUES(25,datetime('now'))")
+    connection.executescript("""
+    CREATE TABLE IF NOT EXISTS run_executions(
+      run_id TEXT PRIMARY KEY REFERENCES diagnosis_runs(id),job_id TEXT NOT NULL REFERENCES jobs(id),
+      execution_status TEXT NOT NULL,lease_token TEXT,epoch INTEGER NOT NULL DEFAULT 0,
+      last_sequence INTEGER NOT NULL DEFAULT 0,accepting INTEGER NOT NULL DEFAULT 0,
+      worker_alive INTEGER NOT NULL DEFAULT 0,queued_since REAL NOT NULL,segment_started REAL,
+      heartbeat_at REAL,progress_at REAL,elapsed_seconds REAL NOT NULL DEFAULT 0,max_seconds REAL NOT NULL,
+      result_json TEXT NOT NULL,stop_reason TEXT,clarification_json TEXT NOT NULL DEFAULT '{}',
+      process_owners_json TEXT NOT NULL DEFAULT '[]',last_seen_wall REAL);
+    CREATE INDEX IF NOT EXISTS ix_execution_active ON run_executions(execution_status,worker_alive);
+    """)
+    connection.execute("INSERT OR IGNORE INTO schema_migrations VALUES(26,datetime('now'))")

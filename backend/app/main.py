@@ -15,6 +15,7 @@ from app.api.health import router as health_router
 from app.api.v1 import router as v1_router
 from app.connectors.credentials import SSH_SESSIONS
 from app.context.budget import interrupt_usage
+from app.runtime.coordinator import get_coordinator
 from app.settings import get_settings
 from app.storage.database import Database
 
@@ -25,6 +26,8 @@ async def lifespan(_: FastAPI):
     settings = get_settings()
     database = Database(settings.database_path)
     database.initialize()
+    coordinator = get_coordinator(database)
+    coordinator.recover()
     timestamp = datetime.now(timezone.utc).isoformat()
     with database.transaction() as tx:
         interrupted = tx.execute("""SELECT r.id,r.summary_json,i.system_id FROM diagnosis_runs r
@@ -69,13 +72,22 @@ async def lifespan(_: FastAPI):
             await asyncio.sleep(30)
             SSH_SESSIONS.purge()
 
+    async def supervise_runs():
+        while True:
+            await asyncio.sleep(5)
+            await asyncio.to_thread(coordinator.tick)
+
     purge_task = asyncio.create_task(purge_passwords())
+    supervisor_task = asyncio.create_task(supervise_runs())
     try:
         yield
     finally:
         purge_task.cancel()
+        supervisor_task.cancel()
         with suppress(asyncio.CancelledError):
             await purge_task
+        with suppress(asyncio.CancelledError):
+            await supervisor_task
         SSH_SESSIONS.clear()
 
 

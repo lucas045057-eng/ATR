@@ -7,6 +7,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 
 ENVIRONMENT_KEYS = {"PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "HOME", "LANG", "LC_ALL", "SSL_CERT_FILE", "SSL_CERT_DIR"}
@@ -55,7 +56,7 @@ def _windows_job(process):
 
 
 def run_bounded(arguments: list[str], request: bytes, *, timeout: float, max_output: int = 2 * 1024 * 1024,
-                cancelled: threading.Event | None = None) -> dict:
+                cancelled: threading.Event | None = None, on_spawn=None) -> dict:
     if timeout <= 0 or len(request) > 2 * 1024 * 1024:
         raise ValueError("Invalid process request bounds")
     if cancelled is not None and cancelled.is_set():
@@ -63,8 +64,10 @@ def run_bounded(arguments: list[str], request: bytes, *, timeout: float, max_out
     deadline = time.monotonic() + timeout
     if sys.platform == "linux":
         arguments = [sys.executable, "-m", "app.runtime.process_bootstrap", *arguments]
+    owner_cookie = uuid.uuid4().hex
+    environment = {**child_environment(), 'ATR_PROCESS_OWNER': owner_cookie}
     process = subprocess.Popen(arguments, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE, env=child_environment(),
+                               stderr=subprocess.PIPE, env=environment,
                                start_new_session=sys.platform != "win32")
     job = None
     buffers = {"stdout": bytearray(), "stderr": bytearray()}
@@ -96,6 +99,8 @@ def run_bounded(arguments: list[str], request: bytes, *, timeout: float, max_out
     try:
         if sys.platform == "win32":
             job = _windows_job(process)
+        if on_spawn is not None:
+            on_spawn({'platform': sys.platform, 'pid': process.pid, 'cookie': owner_cookie})
         if (cancelled is not None and cancelled.is_set()) or time.monotonic() >= deadline:
             raise InterruptedError("Process dispatch no longer authorized")
         for name in buffers:
@@ -143,3 +148,37 @@ def run_bounded(arguments: list[str], request: bytes, *, timeout: float, max_out
                 stream.close()
         for thread in readers:
             thread.join(timeout=1)
+
+
+def reap_owned_process(owner: dict) -> bool:
+    """Recover a former API owner's fenced Linux group without trusting a PID alone."""
+    if owner.get('platform') == 'win32':
+        # Windows kernel jobs close when their API owner's last handle closes.
+        return sys.platform == 'win32'
+    if owner.get('platform') != 'linux' or sys.platform != 'linux':
+        return False
+    pid, cookie = owner.get('pid'), owner.get('cookie')
+    if type(pid) is not int or pid < 2 or not isinstance(cookie, str) or len(cookie) != 32:
+        return False
+    marker = ('ATR_PROCESS_OWNER=' + cookie).encode()
+    owned = []
+    for entry in Path('/proc').iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            fields = (entry / 'stat').read_text().rsplit(')', 1)[1].split()
+            if fields[0] == 'Z' or int(fields[2]) != pid or int(fields[3]) != pid:
+                continue
+            if entry.stat().st_uid != os.getuid() or marker not in (entry / 'environ').read_bytes().split(b'\0'):
+                return False
+            owned.append(int(entry.name))
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError, IndexError):
+            return False
+    if owned:
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    return True

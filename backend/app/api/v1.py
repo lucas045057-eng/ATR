@@ -726,6 +726,13 @@ def get_run(run_id: str) -> dict[str, Any]:
             raise HTTPException(status_code=404, detail="Run not found")
         result = dict(row)
         result["summary"] = decode(result.pop("summary_json"))
+        execution = connection.execute("SELECT 1 FROM run_executions WHERE run_id=?", (run_id,)).fetchone()
+        if execution:
+            from app.runtime.coordinator import get_coordinator
+            coordinated = get_coordinator(db()).public(run_id)
+            result.update(execution_status=coordinated["execution_status"], diagnosis_status=coordinated["diagnosis_status"],
+                          diagnosis_result=decode(coordinated["result_json"]), clarification=decode(coordinated["clarification_json"]),
+                          completion_satisfied=coordinated["completion_satisfied"])
         target_snapshot = decode(result.pop("target_snapshot_json", None))
         if not isinstance(target_snapshot, dict):
             target_snapshot = {}
@@ -780,6 +787,19 @@ def get_run(run_id: str) -> dict[str, Any]:
         return result
     finally:
         connection.close()
+
+
+@router.post("/runs/{run_id}/cancel")
+def cancel_run(run_id: str):
+    database = db()
+    with database.connect() as connection:
+        run = connection.execute("SELECT id FROM diagnosis_runs WHERE id=?", (run_id,)).fetchone()
+        if not run:
+            raise HTTPException(404, "调查不存在")
+        if not connection.execute("SELECT 1 FROM run_executions WHERE run_id=?", (run_id,)).fetchone():
+            raise HTTPException(409, "历史协议不支持可靠取消；请等待旧调查结束")
+    from app.runtime.coordinator import get_coordinator
+    return get_coordinator(database).cancel(run_id)
 
 
 @router.get("/patterns")
