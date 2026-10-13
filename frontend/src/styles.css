@@ -40,3 +40,4 @@ button,summary{touch-action:manipulation}.content,.panel,.business-row>div,.patt
 .settings-modal[open]{display:flex}
 .model-settings{width:min(760px,100%);background:var(--panel);box-shadow:0 12px 48px color-mix(in srgb,var(--shadow) 30%,transparent)}
 .model-settings .form{gap:12px}.model-settings .panel-title{align-items:center}.model-settings p{font-size:13px}
+.model-fields{display:grid;gap:12px;border:0;margin:0;padding:0;min-width:0}
