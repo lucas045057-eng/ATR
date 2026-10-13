@@ -27,6 +27,7 @@ from app.connectors.credentials import SSH_SESSIONS
 from app.connectors.models import (
     BindingReview,
     DockerReaderSelection,
+    HealthEndpointSelection,
     RuntimeTargetCreate,
     SSHPassword,
     ToolRequest,
@@ -355,6 +356,13 @@ def select_docker_reader(business_id: str, target_id: str, request: DockerReader
 def provide_ssh_password(business_id: str, target_id: str, request: SSHPassword):
     s = service()
     return RuntimeService(s.db, s.settings).provide_password(business_id, target_id, request.password)
+
+
+@router.patch('/businesses/{business_id}/targets/{target_id}/health-endpoints')
+def select_health_endpoints(business_id: str, target_id: str, request: HealthEndpointSelection):
+    ensure_idle(business_id)
+    s = service()
+    return RuntimeService(s.db, s.settings).select_health_endpoints(business_id, target_id, request)
 
 
 @router.delete("/businesses/{business_id}/targets/{target_id}/credential")

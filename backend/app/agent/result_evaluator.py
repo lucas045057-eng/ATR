@@ -34,7 +34,7 @@ class ResultEvaluator:
         required = state.get("required_rule_ids", list(REQUIRED_CHAIN))
         if required:
             required = list(dict.fromkeys([*REQUIRED_CHAIN, *required]))
-        verified, gaps, counter = [], [], []
+        verified, gaps, counter = [], list(state.get('runtime_gaps', [])), []
         proposals = {item.get("rule_id"): item for item in assessments if isinstance(item, dict)}
         for rule_id in required:
             actual = registry.verify(rule_id, facts, relations, scope)

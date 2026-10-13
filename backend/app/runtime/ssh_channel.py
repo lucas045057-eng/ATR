@@ -39,5 +39,6 @@ def run_ssh_action(config: dict, settings, tool_id: str, arguments: dict, approv
             SSH_SESSIONS.revoke(config, settings.operator_id)
         error = PermissionError("SSH execution rejected")
         error.code = response.get("error_code", "ssh_tool_failed")
+        error.remote_error_type = response['error_type']
         raise error
     return response["payload"]

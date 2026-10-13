@@ -95,6 +95,9 @@ class AdaptiveInvestigationPlanner:
                 args = {"name": binding["runtime_id"]} if binding["kind"] == "service" else {"container_id": binding["runtime_id"]}
                 for suffix in ("status", "logs"):
                     add(f"{binding['kind']}.{suffix}", node_id, args, binding["target_id"], binding["id"])
+                for endpoint in self.targets.get(binding['target_id'], {}).get('health_endpoints', []):
+                    if endpoint['service'] == name:
+                        add('health.get', node_id, {'endpoint_id': endpoint['endpoint_id']}, binding['target_id'], binding['id'])
                 for path in self.targets.get(binding["target_id"], {}).get("allowed_paths", [])[:2]:
                     add("config.list", node_id, {"path": path}, binding["target_id"], binding["id"])
         for entry in evidence:

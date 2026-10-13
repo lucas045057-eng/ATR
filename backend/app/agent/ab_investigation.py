@@ -43,6 +43,24 @@ def effective_limits(settings):
     return limits
 
 
+def clarification_candidates(evidence, previous=(), hints=(), limit=20):
+    known = {(row['kind'], row['runtime_id']) for row in previous}
+    choices = {}
+    for item in evidence:
+        for field, kind in (('services', 'service'), ('containers', 'container')):
+            for row in item['payload'].get(field, []):
+                key = (kind, row.get('id', ''))
+                if not key[1]:
+                    continue
+                choices[key] = {'name': row.get('name', ''), 'runtime_id': key[1], 'kind': kind,
+                                'evidence_id': item['evidence_id'], 'previously_mapped': key in known}
+    def rank(row):
+        relevant = any(h and h.casefold() in row['name'].casefold() for h in hints)
+        return (not row['previously_mapped'], not relevant, row['kind'] != 'container', row['runtime_id'])
+    ranked = sorted(choices.values(), key=rank)
+    return ranked[:limit], max(0, len(ranked)-limit)
+
+
 def prepare_run(database, settings, incident_id, business_id, target_id, job_id, actor):
     limits = effective_limits(settings)
     target = RuntimeService(database, settings).get(business_id, target_id)
@@ -166,22 +184,38 @@ class InvestigationBroker:
                 'window_start': self.incident['window_start']}, 'graph': self.graph,
                 'scope_node_ids': scope, 'critical_ambiguities': conflicts,
                 'evidence': self.evidence, 'report': self.report, 'available_actions': actions or [],
+                'runtime_gaps': [{'rule_id': 'runtime_read', 'target_ids': [h['target_node_id']],
+                                  'requirement_id': h.get('error_code') or 'runtime_read_failed'}
+                                 for h in self.history if h['status'] != 'succeeded'],
                 'scope_omission_count': max(0, len(names) - 20)}
         facts = facts_from_state(state)
         has_faults = any(f['kind'] == 'service_state' and f['value'] not in {'active', 'running', 'healthy'}
-                         or f['kind'] in {'log_observation', 'http_status'} for f in facts)
+                         or f['kind'] == 'log_observation'
+                         or f['kind'] == 'http_status' and f['value'] >= 400 for f in facts)
         checks = []
         required = [node + ':' + kind for node in scope for kind in ('status', 'logs')]
+        service_ids = {n['name']: n['id'] for n in self.graph['nodes'] if n['id'] in scope}
+        required += [service_ids[e['service']] + ':health:' + e['endpoint_id']
+                     for e in self.target.get('health_endpoints', []) if e['service'] in service_ids]
         for e in self.evidence:
             node = e['target_node_id']
             kind = e['tool_id'].rsplit('.', 1)[-1]
             payload = e['payload']
-            if node not in scope or kind not in {'status', 'logs'} or any(payload.get(k) for k in ('partial', 'truncated', 'timeout')):
+            if node not in scope or kind not in {'status', 'logs', 'get'} or any(payload.get(k) for k in ('partial', 'truncated', 'timeout')):
+                continue
+            if self.target['connector'] == 'ssh' and kind in {'status', 'logs'}:
+                if not payload.get('startup_cycle') or kind == 'logs' and not payload.get('cycle_verified'):
+                    state['runtime_gaps'].append({'rule_id': 'runtime_read', 'target_ids': [node],
+                                                  'requirement_id': 'verified_current_startup_cycle'})
+                    continue
+            if e['tool_id'] == 'health.get':
+                if payload.get('status_code') == 200 and payload.get('observation_location') == 'remote_ssh' and not payload.get('redirected'):
+                    checks.append({'check_id': node + ':health:' + payload['endpoint_id'], 'status': 'healthy', 'evidence_id': e['evidence_id']})
                 continue
             healthy = (kind == 'status' and any(f['evidence_id'] == e['evidence_id'] and f['kind'] == 'service_state'
                                                and f['value'] in {'active', 'running', 'healthy'} for f in facts))
             if kind == 'logs' and not has_faults:
-                events = normalize_log_events(str(payload.get('text', '')), e)
+                events = normalize_log_events(str(payload.get('text', '')), {**payload, **e})
                 observed = parse_time(e['observed_at'])
                 healthy = not events or bool(observed) and all(event.event_time_utc and event.event_time_utc <= observed + timedelta(seconds=5) for event in events)
             if healthy:
@@ -262,7 +296,7 @@ class InvestigationBroker:
         scope = set(self.state()['scope_node_ids'])
         actions = [a for a in actions if a['target_node_id'] in scope]
         if self.task_type == 'health_check':
-            actions = [a for a in actions if a['tool_id'].endswith(('.status', '.logs'))]
+            actions = [a for a in actions if a['tool_id'].endswith(('.status', '.logs')) or a['tool_id'] == 'health.get']
         if not actions:
             return self.finish('no_authorized_actions')
         if self.supplement and self.supplement.get('executed'):
@@ -343,17 +377,14 @@ class InvestigationBroker:
             action['action_id'] = digest(action)
             self.collect(action)
             return {'continue': True}
-        candidates = []
-        for e in self.evidence:
-            for field in ('services', 'containers'):
-                for item in e['payload'].get(field, [])[:20]:
-                    candidates.append({'name': item.get('name', ''), 'runtime_id': item.get('id', ''),
-                                       'kind': 'service' if field == 'services' else 'container',
-                                       'evidence_id': e['evidence_id']})
+        with self.db.connect() as tx:
+            previous = [dict(row) for row in tx.execute('SELECT kind,runtime_id FROM service_bindings WHERE business_id=? AND target_id=?',
+                        (self.business_id, self.target_id))]
+        candidates, omitted = clarification_candidates(self.evidence, previous, (self.symptom['text'],))
         question = {'question_id': uid(), 'version': 1, 'kind': 'runtime_scope',
                     'text': '基础发现已完成。请在服务器范围中确认这次需要读取的业务服务映射，再继续本次调查。',
                     'impact': '名称相似不能证明属于当前业务；确认前不读取候选对象的详细日志。',
-                    'options': candidates[:20], 'target_id': self.target_id}
+                    'options': candidates, 'omitted_count': omitted, 'target_id': self.target_id}
         self.persist()
         self.coordinator.wait_for_input(self.run_id, question, lease_token=self.lease['lease_token'])
         return {'continue': False}

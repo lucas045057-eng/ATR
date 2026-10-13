@@ -6,12 +6,19 @@ from app.connectors.models import (
     ContainerArgs,
     ContainerLogArgs,
     EmptyArgs,
+    HealthArgs,
     ListArgs,
+    LogFileArgs,
+    ProcessArgs,
     ServiceArgs,
     ServiceLogArgs,
 )
 
 SCHEMAS = {
+    'capabilities': EmptyArgs,
+    'health.get': HealthArgs,
+    'process.status': ProcessArgs,
+    'log.tail': LogFileArgs,
     "host.info": EmptyArgs,
     "host.memory": EmptyArgs,
     "host.disk": EmptyArgs,
@@ -52,6 +59,13 @@ def check(config, tool, arguments, approved=()):
     if (tool in {"container.status", "container.logs"} and config.get("docker_reader") == "restricted_list"):
         raise CapabilityUnavailable("受限 Docker 网关仅提供 list")
     args = SCHEMAS[tool].model_validate(arguments).model_dump()
+    if tool == 'health.get' and not any(row['endpoint_id'] == args['endpoint_id']
+                                       for row in config.get('health_endpoints', [])):
+        raise PermissionError('HTTP 端点未在当前目标的精确授权清单内')
+    if tool == 'process.status' and ('process', str(args['pid']) + ':' + args['start_time']) not in approved:
+        raise PermissionError('进程 PID 与启动时间尚未确认')
+    if tool == 'log.tail' and not any(row['file_id'] == args['file_id'] for row in config.get('log_files', [])):
+        raise PermissionError('日志文件标识尚未授权')
     if tool.startswith("container.") and not config["docker_reads_enabled"]:
         raise PermissionError("没有授权 Docker 元数据读取；不访问 Docker socket")
     if tool.startswith("config."):

@@ -5,6 +5,7 @@ import json
 import re
 import shlex
 import time
+from pathlib import Path
 
 from app.connectors.diagnostics import ToolParseError
 from app.connectors.docker_reader import COMMAND as DOCKER_LIST_COMMAND
@@ -89,6 +90,9 @@ def identity(values, username):
 
 
 def command_for(tool, args):
+    if tool in {'capabilities', 'health.get', 'process.status', 'log.tail'}:
+        source = Path(__file__).with_name('remote_reads.py').read_text(encoding='utf-8')
+        return shlex.join(('/usr/bin/python3', '-I', '-c', source + '\nremote_main()'))
     if tool in COMMANDS:
         return shlex.join(COMMANDS[tool])
     if tool == "service.status":
@@ -215,8 +219,14 @@ class StandardSSHConnector(SSHConnector):
 
     def read(self, tool, args):
         args = check(self.config, tool, args, self.config.get("_approved", ()))
+        if tool in {'capabilities', 'health.get', 'process.status', 'log.tail'} and self.config.get('_read_protocol') != 'ab_v1':
+            from app.connectors.diagnostics import CapabilityUnavailable
+            raise CapabilityUnavailable('新固定工具需要明确的 ab_v1 读取协议')
         restricted = self.config.get("docker_reader") == "restricted_list" and tool == "container.list"
-        command = DOCKER_LIST_COMMAND if restricted else command_for(tool, args)
+        enhanced = self.config.get('_read_protocol') == 'ab_v1' and tool in {
+            'capabilities', 'health.get', 'container.status', 'container.logs', 'service.status',
+            'service.logs', 'process.status', 'log.tail'}
+        command = DOCKER_LIST_COMMAND if restricted else '' if enhanced else command_for(tool, args)
         deadline, budget = time.monotonic() + self.config["timeout_seconds"], [0]
         with self.connection() as client:
             try:
@@ -235,6 +245,34 @@ class StandardSSHConnector(SSHConnector):
                     raise
                 raise IdentityRejected("SSH 身份检查无法完成") from exc
             stdin = None
+            if self.config.get('_read_protocol') == 'ab_v1' and tool in {
+                'capabilities', 'health.get', 'container.status', 'container.logs', 'service.status',
+                'service.logs', 'process.status', 'log.tail',
+            }:
+                from app.connectors.capabilities import decode, require_tool, validate_capabilities
+                source = Path(__file__).with_name('remote_reads.py').read_text(encoding='utf-8')
+                command = shlex.join(('/usr/bin/python3', '-I', '-c', source + '\nremote_main()'))
+                approved = self.config.get('_approved', ())
+                policy = {'services': [v for k, v in approved if k == 'service'],
+                          'containers': [v for k, v in approved if k == 'container'],
+                          'docker_reads_enabled': self.config['docker_reads_enabled'],
+                          'health_endpoints': self.config.get('health_endpoints', []),
+                          'allowed_paths': self.config['allowed_paths'],
+                          'processes': self.config.get('processes', []), 'log_files': self.config.get('log_files', [])}
+
+                def read_remote(identifier, arguments):
+                    request = json.dumps({'policy': policy, 'tool_id': identifier, 'arguments': arguments}).encode()
+                    if len(request) > 16384:
+                        raise ValueError('固定读取授权清单过大')
+                    return decode(self.receive(client, command, request, deadline=deadline, budget=budget))
+                caps = validate_capabilities(read_remote('capabilities', {}))
+                require_tool(caps, tool)
+                result = caps if tool == 'capabilities' else read_remote(tool, args)
+                if tool != 'capabilities' and (result.get('protocol') != caps['protocol']
+                                               or result.get('tool_version') != caps['tools'][tool]):
+                    raise ToolParseError()
+                result.update(capabilities=caps, connector='ssh', identity=account)
+                return result
             if tool.startswith("config."):
                 stdin = json.dumps({"tool": tool, "path": args["path"], "roots": self.config["allowed_paths"],
                                     "cap": self.config["max_output_bytes"]}).encode()

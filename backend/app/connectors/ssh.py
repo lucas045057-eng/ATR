@@ -134,7 +134,11 @@ class SSHConnector:
                     break
                 time.sleep(0.01)
             if channel.recv_exit_status() != 0:
-                raise PermissionError("远程只读工具失败或账号权限不足")
+                exc = PermissionError("远程只读工具失败或账号权限不足")
+                # Only a known class name is retained, never arbitrary remote stderr.
+                if bytes(err.strip()) in {b'PermissionError', b'ValueError'}:
+                    exc.remote_error_type = err.strip().decode('ascii')
+                raise exc
             self.check_session()
             return bytes(out + (b"\n" + err if include_stderr and err else b""))
         except Exception as exc:
@@ -146,6 +150,43 @@ class SSHConnector:
 
     def read(self, tool, args):
         with self.connection() as client:
+            if self.config.get('_read_protocol') == 'ab_v1':
+                from app.connectors.capabilities import (
+                    LEGACY_TOOLS,
+                    decode,
+                    legacy_host,
+                    require_tool,
+                    validate_capabilities,
+                    validate_legacy_payload,
+                )
+                from app.connectors.diagnostics import CapabilityUnavailable
+                from app.connectors.remote_reads import PROTOCOL
+                deadline, budget = time.monotonic() + self.config['timeout_seconds'], [0]
+
+                def receive(request):
+                    return decode(self.receive(client, 'atr-read-v1', json.dumps(request).encode() + b'\n',
+                                               deadline=deadline, budget=budget))
+                try:
+                    caps = validate_capabilities(receive({'tool_id': 'capabilities', 'arguments': {}}))
+                except PermissionError as exc:
+                    if getattr(exc, 'remote_error_type', None) != 'PermissionError':
+                        raise
+                    caps = legacy_host(receive({'tool_id': 'host.info', 'arguments': {}}))
+                    if tool not in LEGACY_TOOLS:
+                        raise CapabilityUnavailable('旧网关未提供该工具；需要维护升级') from None
+                    payload = validate_legacy_payload(tool, receive({'tool_id': tool, 'arguments': args}))
+                    payload.update(capabilities=caps, connector='ssh', read_adapter='tested-json-v1')
+                    return payload
+                require_tool(caps, tool)
+                payload = receive({'tool_id': tool, 'arguments': args, 'protocol': PROTOCOL})
+                if tool in {'health.get', 'container.status', 'container.logs', 'service.status', 'service.logs',
+                            'process.status', 'log.tail'}:
+                    if (payload.get('protocol') != PROTOCOL or payload.get('tool_version') != caps['tools'][tool]
+                            or payload.get('observation_location') != 'remote_ssh'):
+                        from app.connectors.diagnostics import ToolParseError
+                        raise ToolParseError()
+                payload.update(capabilities=caps, connector='ssh')
+                return payload
             request = json.dumps({"tool_id": tool, "arguments": args}).encode() + b"\n"
             out = self.receive(client, "atr-read-v1", request)
             from app.connectors.diagnostics import ToolParseError

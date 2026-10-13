@@ -3,7 +3,7 @@ import threading
 import time
 
 import pytest
-from app.agent.ab_investigation import effective_limits
+from app.agent.ab_investigation import clarification_candidates, effective_limits
 from app.agent.decision_runtime import adapt_minimal_decision
 from app.runtime.coordinator import get_coordinator
 from app.settings import Settings, get_settings
@@ -20,6 +20,15 @@ def test_actual_limits_do_not_hide_missing_supplement_room():
     assert effective_limits(settings.model_copy(update={'ab_supplement_enabled': False}))['hard_model_calls'] == 6
     limits = effective_limits(Settings(_env_file=None))
     assert (limits['soft_model_calls'], limits['soft_tool_calls'], limits['hard_model_calls'], limits['hard_tool_calls']) == (6, 16, 8, 20)
+
+
+def test_clarification_keeps_actual_previous_container_in_large_service_inventory():
+    evidence = [{'evidence_id': 'service-list', 'payload': {'services': [
+        {'name': 'noise-' + str(i), 'id': 'noise-' + str(i)} for i in range(60)]}},
+        {'evidence_id': 'container-list', 'payload': {'containers': [{'name': 'business-api', 'id': 'a'*64}]}}]
+    selected, omitted = clarification_candidates(evidence, [{'kind': 'container', 'runtime_id': 'a'*64}])
+    assert selected[0]['runtime_id'] == 'a'*64 and selected[0]['previously_mapped']
+    assert len(selected) == 20 and omitted == 41
 
 
 def start(client, profile, target):

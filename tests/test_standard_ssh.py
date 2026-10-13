@@ -101,7 +101,7 @@ def test_identity_is_a_precheck_not_readonly_proof():
 
 def test_all_registered_read_tools_have_fixed_commands():
     cfg = standard(_approved={("service", "catalog.service"), ("container", "a" * 64)}, allowed_paths=["/srv/atr-fixture"])
-    for tool in SCHEMAS:
+    for tool in set(SCHEMAS) - {'capabilities', 'health.get', 'process.status', 'log.tail'}:
         arguments = {"name": "catalog.service"} if tool.startswith("service.") and tool not in {"service.list"} else (
             {"path": "/srv/atr-fixture/app.conf"} if tool.startswith("config.") else
             {"container_id": "a" * 64} if tool in {"container.status", "container.logs"} else {})

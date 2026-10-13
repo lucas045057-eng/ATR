@@ -108,6 +108,19 @@ class RuntimeService:
                 tx.execute("UPDATE service_bindings SET freshness_status='stale' WHERE target_id=? AND kind='container'", (target_id,))
         return self.public(config)
 
+    def select_health_endpoints(self, business_id, target_id, request):
+        config = self.get(business_id, target_id)
+        endpoints = RuntimeTargetCreate(name='health-location', host=config['host'],
+                                        health_endpoints=request.health_endpoints).model_dump()['health_endpoints']
+        with self.db.transaction() as tx:
+            row = tx.execute('SELECT config_json FROM runtime_targets WHERE id=? AND business_id=?',
+                             (target_id, business_id)).fetchone()
+            stored = json.loads(row['config_json'])
+            stored['health_endpoints'] = endpoints
+            tx.execute('UPDATE runtime_targets SET config_json=? WHERE id=? AND business_id=?',
+                       (dumps(stored), target_id, business_id))
+        return self.get(business_id, target_id)
+
     def require_credentials(self, business_id, target_id):
         config = self.get(business_id, target_id)
         if config["connector"] == "ssh" and config.get("auth_mode") == "password":
@@ -126,8 +139,10 @@ class RuntimeService:
         finally:
             conn.close()
 
-    def execute(self, business_id, target_id, request: ToolRequest, timeout_cap=None, *, supervision=None):
+    def execute(self, business_id, target_id, request: ToolRequest, timeout_cap=None, *, supervision=None, read_protocol=None):
         config = self.get(business_id, target_id)
+        if read_protocol is not None or request.read_protocol is not None:
+            config['_read_protocol'] = read_protocol or request.read_protocol
         if timeout_cap is not None:
             config["timeout_seconds"] = min(config["timeout_seconds"], timeout_cap)
         observation_id = uid()

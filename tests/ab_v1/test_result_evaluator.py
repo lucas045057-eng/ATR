@@ -84,3 +84,17 @@ def test_failure_endpoint_must_match_the_verified_relationship():
     state["facts"][2]["value"]["endpoint_ids"] = ["other-db:5432"]
     state["facts"][3]["value"]["endpoint_ids"] = ["other-app:9000"]
     assert evaluate(state, assessments)["completion_satisfied"] is False
+
+
+def test_incomplete_observation_can_be_direct_signal_but_cannot_prove_chain():
+    state, assessments = complete_state()
+    state['facts'][2]['freshness'] = 'incomplete'
+    assert evaluate(state, assessments)['completion_satisfied'] is False
+
+
+def test_capability_failure_prevents_health_completion():
+    state = {'facts': [], 'required_rule_ids': [], 'required_health_checks': ['entry'],
+             'health_checks': [{'check_id': 'entry', 'status': 'healthy', 'evidence_id': 'e'}],
+             'current_evidence_ids': ['e'], 'runtime_gaps': [{'rule_id': 'runtime_read',
+                 'target_ids': ['app'], 'requirement_id': 'capability_unavailable'}]}
+    assert evaluate(state, [])['diagnosis_status'] == 'unresolved'

@@ -144,7 +144,8 @@ def facts_from_state(state: dict[str, Any]) -> list[dict[str, Any]]:
             "tool_id": evidence.get("tool_id"), "value": value,
             "observed_at": evidence.get("observed_at"),
             "source": evidence.get("tool_id"),
-            "freshness": evidence.get("freshness_state", "current"),
+            "freshness": 'incomplete' if any(evidence.get('payload', {}).get(k)
+                                             for k in ('partial', 'truncated', 'timeout')) else evidence.get("freshness_state", "current"),
             "independent_observation": bool(evidence.get("call_id")),
             "call_id": evidence.get("call_id"),
             "observation_id": evidence.get("observation_id") or evidence.get("payload", {}).get("observation_id"),
@@ -185,7 +186,7 @@ def facts_from_state(state: dict[str, Any]) -> list[dict[str, Any]]:
             mechanisms = set()
             endpoints = set()
             failure_signal = False
-            for event in normalize_log_events(text, evidence):
+            for event in normalize_log_events(text, {**payload, **evidence}):
                 line, stamp = event.raw_line, event.event_time_utc
                 if not stamp or stamp < window_start or stamp > observed + timedelta(seconds=5) or NON_EVENTS.search(line):
                     continue

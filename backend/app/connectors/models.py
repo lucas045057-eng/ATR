@@ -4,10 +4,23 @@ import re
 from pathlib import PurePosixPath
 from typing import Literal
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 
 from app.connectors.unit_names import valid_service_name
 from app.domain import StrictModel
+
+
+class HealthEndpoint(StrictModel):
+    endpoint_id: str = Field(pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$')
+    url: str = Field(min_length=1, max_length=1000)
+    service: str = Field(min_length=1, max_length=255)
+    execution_location: Literal['remote_ssh'] = 'remote_ssh'
+
+    @field_validator('url')
+    @classmethod
+    def exact_url(cls, value):
+        from app.connectors.remote_reads import validate_url
+        return validate_url(value)
 
 
 def authorized_path(value):
@@ -36,6 +49,7 @@ class RuntimeTargetCreate(StrictModel):
     credential_ref: str = Field(default="", max_length=80, pattern=r"^[A-Za-z0-9_.-]*$")
     host_public_key: str = Field(default="", max_length=2048)
     allowed_paths: list[str] = Field(default_factory=list, max_length=20)
+    health_endpoints: list[HealthEndpoint] = Field(default_factory=list, max_length=20)
     max_calls: int = Field(default=100, ge=1, le=1000)
     timeout_seconds: int = Field(default=10, ge=1, le=60)
     max_output_bytes: int = Field(default=48000, ge=1024, le=64000)
@@ -47,6 +61,17 @@ class RuntimeTargetCreate(StrictModel):
     mock_scenario: Literal[
         "mixed", "datastore_conflict", "permission_denied", "timeout", "disconnect"
     ] = "mixed"
+
+    @model_validator(mode='after')
+    def endpoint_location(self):
+        from urllib.parse import urlsplit
+        ids = [row.endpoint_id for row in self.health_endpoints]
+        if len(ids) != len(set(ids)):
+            raise ValueError('健康端点标识不能重复')
+        for row in self.health_endpoints:
+            if urlsplit(row.url).hostname not in {self.host.lower(), '127.0.0.1', 'localhost', '::1'}:
+                raise ValueError('健康端点只能观察当前 SSH 目标或该目标的 loopback')
+        return self
 
     @field_validator("allowed_paths")
     @classmethod
@@ -74,6 +99,11 @@ class RuntimeTargetCreate(StrictModel):
 class ToolRequest(StrictModel):
     tool_id: str = Field(min_length=1, max_length=80)
     arguments: dict = Field(default_factory=dict)
+    read_protocol: Literal['ab_v1'] | None = None
+
+
+class HealthEndpointSelection(StrictModel):
+    health_endpoints: list[HealthEndpoint] = Field(max_length=20)
 
 
 class SSHPassword(StrictModel):
@@ -90,6 +120,20 @@ class SSHPassword(StrictModel):
 
 class EmptyArgs(StrictModel):
     pass
+
+
+class HealthArgs(StrictModel):
+    endpoint_id: str = Field(pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$')
+
+
+class ProcessArgs(StrictModel):
+    pid: int = Field(ge=1, le=4194304, strict=True)
+    start_time: str = Field(pattern=r'^[a-f0-9-]{36}:[0-9]{1,20}$')
+
+
+class LogFileArgs(StrictModel):
+    file_id: str = Field(pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$')
+    tail: int = Field(default=80, ge=1, le=200, strict=True)
 
 
 class ListArgs(StrictModel):

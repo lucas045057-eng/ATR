@@ -257,7 +257,21 @@ def secure_open(path, allowed_roots):
         raise
 
 
-def execute(policy, tool, args):
+def execute(policy, tool, args, *, protocol=None):
+    if protocol is not None or tool in {'capabilities', 'health.get', 'process.status', 'log.tail'}:
+        try:
+            from remote_reads import PROTOCOL
+            from remote_reads import execute as enhanced_read
+        except ModuleNotFoundError:
+            from app.connectors.remote_reads import PROTOCOL
+            from app.connectors.remote_reads import execute as enhanced_read
+        if protocol is not None and protocol != PROTOCOL:
+            raise ValueError('Unsupported read protocol')
+        legacy_tools = ('host.info', 'host.memory', 'host.disk', 'process.list', 'network.listeners',
+                        'service.list', 'container.list', 'config.list', 'config.read')
+        if tool in legacy_tools:
+            return execute(policy, tool, args)
+        return enhanced_read({**policy, 'legacy_tools': legacy_tools}, tool, args, secure_open=secure_open)
     allowed_keys = {
         "host.info": set(),
         "host.memory": set(),
@@ -420,9 +434,9 @@ def main():
     if len(request_bytes) > 4096:
         raise ValueError("Request limit")
     request = json.loads(request_bytes)
-    if set(request) != {"tool_id", "arguments"} or not isinstance(request["arguments"], dict):
+    if set(request) not in ({"tool_id", "arguments"}, {"tool_id", "arguments", "protocol"}) or not isinstance(request["arguments"], dict):
         raise ValueError("Invalid request schema")
-    payload = execute(policy, request["tool_id"], request["arguments"])
+    payload = execute(policy, request["tool_id"], request["arguments"], protocol=request.get('protocol'))
     payload["observed_at"] = datetime.now(timezone.utc).isoformat()
     output = json.dumps(payload).encode()
     if len(output) > 64000:

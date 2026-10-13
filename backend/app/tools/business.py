@@ -60,8 +60,12 @@ class BusinessToolRegistry:
                 raise PermissionError("工具映射不属于 Run 的已确认有效 SSH 目标")
             if binding["kind"] not in {"service", "container"}:
                 raise PermissionError("工具映射类型不允许用于本次调查")
-            if not tool.startswith(binding["kind"] + ".") and not tool.startswith("config."):
+            if not tool.startswith(binding["kind"] + ".") and not tool.startswith("config.") and tool != 'health.get':
                 raise PermissionError("工具类型与已确认映射不一致")
+            if tool == 'health.get' and not any(endpoint['service'] == binding['service']
+                    and endpoint['endpoint_id'] == action.get('arguments', {}).get('endpoint_id')
+                    for endpoint in current.get('health_endpoints', [])):
+                raise PermissionError('HTTP 端点不属于当前已确认的业务服务')
             if binding["kind"] == "service" and tool.startswith("service.") and action.get("arguments", {}).get("name") != binding["runtime_id"]:
                 raise PermissionError("服务参数与已确认映射不一致")
             if binding["kind"] == "container" and tool.startswith("container.") and action.get("arguments", {}).get("container_id") != binding["runtime_id"]:
@@ -120,6 +124,7 @@ class BusinessToolRegistry:
                     ToolRequest(tool_id=tool, arguments=action["arguments"]),
                     timeout_cap=min(10, self.manager.remaining_seconds(self.bid)) if self.supervision else self.manager.remaining_seconds(self.bid),
                     **({'supervision': self.supervision} if self.supervision else {}),
+                    **({'read_protocol': 'ab_v1'} if self.supervision else {}),
                 )
                 with self.db.transaction() as tx:
                     self._authorize(tx)
