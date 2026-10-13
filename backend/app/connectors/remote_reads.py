@@ -107,7 +107,7 @@ def container_status(cid, deadline):
     # Docker's environment, mounts, health output and credentials are never requested.
     template = ('{"id":{{json .Id}},"name":{{json .Name}},"status":{{json .State.Status}},'
                 '"started_at":{{json .State.StartedAt}},"finished_at":{{json .State.FinishedAt}},'
-                '"exit_code":{{json .State.ExitCode}},"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}null{{end}},'
+                '"exit_code":{{json .State.ExitCode}},"health":{{with (index .State "Health")}}{{json .Status}}{{else}}null{{end}},'
                 '"networks":{{json .NetworkSettings.Networks}},'
                 '"compose_project":{{json (index .Config.Labels "com.docker.compose.project")}},'
                 '"compose_service":{{json (index .Config.Labels "com.docker.compose.service")}}}')
