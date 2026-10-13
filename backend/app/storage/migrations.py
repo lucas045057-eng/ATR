@@ -113,3 +113,10 @@ def migrate(connection):
     CREATE INDEX IF NOT EXISTS ix_execution_active ON run_executions(execution_status,worker_alive);
     """)
     connection.execute("INSERT OR IGNORE INTO schema_migrations VALUES(26,datetime('now'))")
+    connection.executescript('''CREATE TABLE IF NOT EXISTS experience_ownership(
+        experience_id TEXT PRIMARY KEY REFERENCES experiences(id),business_id TEXT REFERENCES business_profiles(id),
+        proof_json TEXT NOT NULL,updated_at TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS ix_experience_owner ON experience_ownership(business_id);''')
+    from app.knowledge import refresh_business_ownership
+    refresh_business_ownership(connection)
+    connection.execute("INSERT OR IGNORE INTO schema_migrations VALUES(27,datetime('now'))")

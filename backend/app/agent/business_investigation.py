@@ -343,6 +343,7 @@ def investigate_business(database, settings, incident_id, business_id, actor, jo
                 signals,
                 bool(conflicts),
                 role_ids,
+                business_id=business_id,
             )
     suggested = next((m for m in matches if m["decision"] == "suggested"), None)
     if suggested and not adaptive:

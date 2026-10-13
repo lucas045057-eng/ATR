@@ -2,7 +2,79 @@
 
 import json
 
-from app.common import digest
+from app.common import digest, dumps, now
+
+
+def experience_business(connection, experience_id):
+    row=connection.execute('''SELECT e.incident_id,e.graph_snapshot_id,r.incident_id AS run_incident,
+        r.graph_snapshot_id AS run_snapshot,r.summary_json,r.target_id,i.system_id,g.system_id AS graph_system
+        FROM experiences e JOIN diagnosis_runs r ON r.id=e.run_id JOIN incidents i ON i.id=e.incident_id
+        JOIN graph_snapshots g ON g.id=e.graph_snapshot_id WHERE e.id=?''',(experience_id,)).fetchone()
+    if (not row or row['incident_id']!=row['run_incident'] or row['graph_snapshot_id']!=row['run_snapshot']
+            or row['system_id']!=row['graph_system']):
+        return None, {'reason':'source_chain_inconsistent'}
+    try:
+        summary=json.loads(row['summary_json'])
+        if not isinstance(summary,dict):
+            raise ValueError
+    except (TypeError,ValueError):
+        return None, {'reason':'source_metadata_invalid'}
+    explicit=[]
+    if summary.get('business_id'):
+        explicit.append(summary['business_id'])
+    if row['target_id']:
+        target=connection.execute('SELECT business_id FROM runtime_targets WHERE id=?',(row['target_id'],)).fetchone()
+        if not target:
+            return None, {'reason':'source_target_unavailable'}
+        explicit.append(target['business_id'])
+    owners=[item['id'] for item in connection.execute('SELECT id FROM business_profiles WHERE system_id=?',(row['system_id'],))]
+    if explicit:
+        if len(set(explicit))!=1 or explicit[0] not in owners:
+            return None, {'reason':'explicit_business_conflict'}
+        owner=explicit[0]
+        basis='run_and_target_business'
+    elif len(owners)==1:
+        owner=owners[0]
+        basis='unique_system_business'
+    else:
+        return None, {'reason':'business_ownership_unknown_or_ambiguous'}
+    return owner, {'basis':basis,'system_id':row['system_id'],'snapshot_id':row['graph_snapshot_id']}
+
+
+def refresh_business_ownership(connection, experience_id=None):
+    rows=connection.execute('SELECT id FROM experiences'+(' WHERE id=?' if experience_id else ''),
+                            (experience_id,) if experience_id else ()).fetchall()
+    for row in rows:
+        owner,proof=experience_business(connection,row['id'])
+        serialized=dumps(proof)
+        previous=connection.execute('SELECT business_id,proof_json FROM experience_ownership WHERE experience_id=?',(row['id'],)).fetchone()
+        if previous and previous['business_id']==owner and previous['proof_json']==serialized:
+            continue
+        connection.execute('''INSERT INTO experience_ownership VALUES(?,?,?,?) ON CONFLICT(experience_id)
+            DO UPDATE SET business_id=excluded.business_id,proof_json=excluded.proof_json,updated_at=excluded.updated_at''',
+                           (row['id'],owner,serialized,now()))
+
+
+def owned_patterns(connection, business_id: str, snapshot_id: str) -> list[dict]:
+    snapshot=connection.execute('SELECT system_id FROM graph_snapshots WHERE id=?',(snapshot_id,)).fetchone()
+    business=connection.execute('SELECT system_id FROM business_profiles WHERE id=?',(business_id,)).fetchone()
+    if not snapshot or not business or snapshot['system_id']!=business['system_id']:
+        return []
+    # Ownership is selected before any matching by source content or symptom.
+    rows=connection.execute('''SELECT p.* FROM pattern_versions p JOIN experience_ownership o
+        ON o.experience_id=p.source_experience_id WHERE o.business_id=? AND p.status='trusted'
+        ORDER BY p.pattern_key,p.version DESC''',(business_id,)).fetchall()
+    result=[]
+    for row in rows:
+        owner,_=experience_business(connection,row['source_experience_id'])
+        if owner==business_id:
+            result.append(dict(row))
+    return result
+
+
+def compatible_patterns(connection, business_id: str, snapshot_id: str) -> list[dict]:
+    return [pattern for pattern in owned_patterns(connection,business_id,snapshot_id)
+            if compatibility(connection,pattern,snapshot_id)['compatible']]
 
 
 def graph_contract(connection, snapshot_id):
@@ -40,6 +112,10 @@ def compatibility(connection, pattern, snapshot_id):
     # V2.1 versions retain their review; derive constraints from their immutable source snapshot.
     previous = validity if validity.get("contract_schema") == 2 else graph_contract(connection, validity.get("snapshot_id"))
     reasons = []
+    original=connection.execute('SELECT system_id FROM graph_snapshots WHERE id=?',(validity.get('snapshot_id'),)).fetchone()
+    target=connection.execute('SELECT system_id FROM graph_snapshots WHERE id=?',(snapshot_id,)).fetchone()
+    if not original or not target or original['system_id']!=target['system_id']:
+        reasons.append('system_ownership_changed')
     if not previous or not current:
         reasons.append("source_snapshot_unavailable")
     else:

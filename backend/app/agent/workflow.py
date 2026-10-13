@@ -136,6 +136,11 @@ def _compact_model_context(prompt, context, input_limit):
     context["hypothesis_history"] = [h for h in context["hypothesis_history"] if h not in context["previous_hypotheses"]]
     if fits():
         return context
+    if 'historical_check_guidance' in context:
+        while context['historical_check_guidance'] and not fits():
+            context['historical_check_guidance'].pop()
+        if fits():
+            return context
     for width in (500, 350, 180, 80):
         evidence = []
         for entry in context["current_evidence"]:

@@ -141,6 +141,13 @@ class InvestigationBroker:
                 conflict['related_node_ids'] = [row[0] for claim_id in json.loads(conflict['claim_ids_json']) for row in
                                                tx.execute('SELECT subject_node_id FROM fact_claims WHERE id=?', (claim_id,))]
         self.business_id, self.target_id, self.snapshot = self.summary['business_id'], run['target_id'], run['graph_snapshot_id']
+        from app.knowledge import compatible_patterns
+        with database.connect() as tx:
+            self.experience_guidance=[{'pattern_id':item['id'],'checks':[{key:check.get(key) for key in ('tool_id','target_service','target_role')}
+                                      for check in json.loads(item['checks_json']) if isinstance(check,dict) and check.get('purpose')=='diagnosis'][:4],
+                                      'source_experience_id':item['source_experience_id'],
+                                      'is_current_evidence':False,'purpose':'historical_check_guidance'}
+                                     for item in compatible_patterns(tx,self.business_id,self.snapshot)[:3]]
         self.limits = json.loads(run['budget_json'])
         self.target = RuntimeService(database, settings).get(self.business_id, self.target_id)
         if authorization_digest(self.target) != json.loads(run['target_snapshot_json'])['authorization_digest']:
@@ -330,6 +337,7 @@ class InvestigationBroker:
             return self.supplement_once(actions, budget, 'soft_budget_limit')
         state = self.state(actions)
         context = {'symptom': self.symptom['text'], 'window_start': self.incident['window_start'],
+                   'historical_check_guidance':self.experience_guidance,
                    'task': self.task_type, 'effective_limits': self.limits,
                    'allowed_hypothesis_targets': [{'node_id': n['id'], 'service': n['name'], 'role': n['role']}
                                                    for n in self.graph['nodes'] if n['id'] in scope],
@@ -345,6 +353,7 @@ class InvestigationBroker:
                   'Choose only an exact available action_id; never invent commands, arguments, IDs or permissions. '
                   'A direct anomaly does not prove the complete cause. Only the backend evaluator decides completion. '
                   'A finish suggestion cannot remove required gaps. Missing information is advisory. '
+                  'Historical guidance suggests checks only; re-observe all current causes and never cite history as current evidence. '
                   'Check current status and logs before code. Schema: ' + dumps(minimal_output_contract(state)))
         from app.agent.workflow import _compact_model_context
         try:

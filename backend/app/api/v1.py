@@ -226,8 +226,15 @@ def create_incident(request: IncidentCreate, actor: str = Depends(require_operat
 
 def pattern_matches(connection: Any, run_id: str, snapshot_id: str, symptom: str,
                     roles: set[str], topology: set[str], current_signals: set[tuple[str, str]],
-                    has_conflicts: bool, role_node_ids: dict[str, list[str]]) -> list[dict[str, Any]]:
-    patterns = connection.execute("SELECT * FROM pattern_versions WHERE status='trusted' ORDER BY pattern_key,version DESC").fetchall()
+                    has_conflicts: bool, role_node_ids: dict[str, list[str]],business_id=None) -> list[dict[str, Any]]:
+    if business_id:
+        from app.knowledge import owned_patterns
+        patterns=owned_patterns(connection,business_id,snapshot_id)
+    else:
+        patterns = connection.execute('''SELECT p.* FROM pattern_versions p JOIN experiences e
+            ON e.id=p.source_experience_id JOIN graph_snapshots g ON g.id=e.graph_snapshot_id
+            WHERE p.status='trusted' AND g.system_id=(SELECT system_id FROM graph_snapshots WHERE id=?)
+            ORDER BY p.pattern_key,p.version DESC''',(snapshot_id,)).fetchall()
     scored = []
     symptom_words = {w for w in re.findall(r"[a-zA-Z0-9_\u4e00-\u9fff]+", symptom.casefold()) if len(w) > 1}
     for pattern in patterns:
@@ -838,10 +845,14 @@ def cancel_run(run_id: str):
 def list_patterns() -> list[dict[str, Any]]:
     connection = db().connect()
     try:
-        rows = connection.execute("SELECT p.*,e.incident_id,e.created_at FROM pattern_versions p JOIN experiences e ON e.id=p.source_experience_id ORDER BY p.pattern_key,p.version DESC").fetchall()
+        rows = connection.execute('''SELECT p.*,e.incident_id,e.created_at,o.business_id,o.proof_json AS ownership_proof
+            FROM pattern_versions p JOIN experiences e ON e.id=p.source_experience_id
+            LEFT JOIN experience_ownership o ON o.experience_id=e.id ORDER BY p.pattern_key,p.version DESC''').fetchall()
         result = []
         for row in rows:
             item = dict(row)
+            item['ownership_state']='confirmed' if item['business_id'] else 'historical_only'
+            item['ownership_proof']=decode(item['ownership_proof'],{})
             for field in ("roles", "topology", "symptoms", "checks", "exclusions", "validity"):
                 item[field] = decode(item.pop(field+"_json"))
             latest = connection.execute("SELECT id FROM graph_snapshots WHERE system_id=(SELECT system_id FROM graph_snapshots WHERE id=?) ORDER BY version DESC LIMIT 1", (item["validity"].get("snapshot_id"),)).fetchone()
@@ -910,6 +921,8 @@ def record_repair(incident_id: str, request: RepairRecord, actor: str = Depends(
                        (pattern_id, f"pattern-{experience_id[:8]}", 1, experience_id, "candidate",
                         json.dumps(roles), json.dumps(topology), json.dumps(symptom_terms), json.dumps(checks),
                         json.dumps(pattern_body["exclusions"]), json.dumps(pattern_body["validity"]), 2, digest))
+            from app.knowledge import refresh_business_ownership
+            refresh_business_ownership(tx,experience_id)
             emit(tx, run["system_id"], run["id"], "experience", experience_id, "experience_candidate_created", {"pattern_id": pattern_id, "digest": digest}, actor)
         return {"experience_id": experience_id, "pattern_version_id": pattern_id, "status": "candidate", "content_digest": digest}
     finally:
