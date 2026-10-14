@@ -16,7 +16,7 @@ Ubuntu 使用已有 Linux Docker Engine：
 sh ./load-images.sh default
 ```
 
-加载程序校验文件摘要、检查引擎、拒绝覆盖不同内容的同名镜像标签，并验证导入后的镜像 ID。此步骤不会启动或替换容器。`manifest.json` 分别标明源码 SHA 与 API/UI 构建所对应的 SHA；后续只修改交付脚本/文档时，运行镜像 SHA 可以不同。
+加载程序校验文件摘要、检查引擎、拒绝覆盖不同内容的同名镜像标签，并验证导入后的镜像身份和 Linux amd64 平台。Docker containerd 存储与经典存储可能分别使用同一归档的 OCI index 摘要或 config 摘要；包记录两者并明确核对，不能接受其他身份。此步骤不会启动或替换容器。`manifest.json` 分别标明源码 SHA 与 API/UI 构建所对应的 SHA；后续只修改交付脚本/文档时，运行镜像 SHA 可以不同。
 
 ## 升级原部署
 

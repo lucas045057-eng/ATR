@@ -34,14 +34,16 @@ if ($LASTEXITCODE -ne 0 -or $engine -ne 'linux') { throw 'A running Linux Docker
 foreach ($service in @('api','web')) {
     $image = $manifest.images.$service
     $current = docker --context $Context image inspect --format '{{.Id}}' $image.tag 2>$null
-    if ($LASTEXITCODE -eq 0 -and $current -ne $image.id) { throw 'Existing image tag belongs to another image' }
+    if ($LASTEXITCODE -eq 0 -and $current -notin @($image.id,$image.config_id)) { throw 'Existing image tag belongs to another image' }
 }
 docker --context $Context load --input (Join-Path $bundleRoot 'images.tar')
 if ($LASTEXITCODE -ne 0) { throw 'Image import failed; original containers were not changed' }
 foreach ($service in @('api','web')) {
     $image = $manifest.images.$service
     $actual = docker --context $Context image inspect --format '{{.Id}}' $image.tag
-    if ($LASTEXITCODE -ne 0 -or $actual -ne $image.id) { throw 'Imported image identity mismatch' }
+    if ($LASTEXITCODE -ne 0 -or $actual -notin @($image.id,$image.config_id)) { throw 'Imported image identity mismatch' }
+    $platform = docker --context $Context image inspect --format '{{.Os}}/{{.Architecture}}' $image.tag
+    if ($LASTEXITCODE -ne 0 -or $platform -ne 'linux/amd64') { throw 'Imported image platform mismatch' }
 }
 Write-Output 'Images verified and loaded. Follow README.zh-CN.md to back up and update the existing deployment.'
 '''
@@ -52,13 +54,15 @@ cd "$(dirname "$0")"
 context="${1:-default}"
 sha256sum -c SHA256SUMS
 test "$(docker --context "$context" info --format '{{.OSType}}')" = linux
-while read -r tag expected; do
+while read -r tag expected config; do
     actual=$(docker --context "$context" image inspect --format '{{.Id}}' "$tag" 2>/dev/null || true)
-    test -z "$actual" || test "$actual" = "$expected"
+    test -z "$actual" || test "$actual" = "$expected" || test "$actual" = "$config"
 done < images.expected
 docker --context "$context" load --input images.tar
-while read -r tag expected; do
-    test "$(docker --context "$context" image inspect --format '{{.Id}}' "$tag")" = "$expected"
+while read -r tag expected config; do
+    actual=$(docker --context "$context" image inspect --format '{{.Id}}' "$tag")
+    test "$actual" = "$expected" || test "$actual" = "$config"
+    test "$(docker --context "$context" image inspect --format '{{.Os}}/{{.Architecture}}' "$tag")" = linux/amd64
 done < images.expected
 echo 'Images verified and loaded. Follow README.zh-CN.md to back up and update the existing deployment.'
 '''
@@ -124,11 +128,16 @@ def package(repo: Path, output: Path, context: str, api_sha: str, web_sha: str):
                    for member in archive.getmembers()):
                 raise ValueError('Private data or unreviewed links in committed source')
         command([*docker, 'save', '--output', str(root/'images.tar'), *(image['tag'] for image in images.values())])
+        with tarfile.open(root/'images.tar', 'r:') as saved:
+            metadata = json.load(saved.extractfile('manifest.json'))
+            for image in images.values():
+                record = next(record for record in metadata if image['tag'] in record['RepoTags'])
+                image['config_id'] = 'sha256:'+hashlib.sha256(saved.extractfile(record['Config']).read()).hexdigest()
         (root/'README.zh-CN.md').write_bytes((repo/'docs/ab-v1/install-upgrade-rollback.md').read_bytes())
         (root/'runtime-inventory.json').write_text(json.dumps(inventory,indent=2),encoding='utf-8')
         (root/'load-images.ps1').write_text(LOAD_PS,encoding='utf-8')
         (root/'load-images.sh').write_text(LOAD_SH,encoding='utf-8')
-        (root/'images.expected').write_text(''.join(image['tag']+' '+image['id']+'\n' for image in images.values()),encoding='ascii')
+        (root/'images.expected').write_text(''.join(image['tag']+' '+image['id']+' '+image['config_id']+'\n' for image in images.values()),encoding='ascii')
         (root/'compose.images.yaml').write_text('services:\n'+''.join(f"  {service}:\n    image: {image['tag']}\n    pull_policy: never\n" for service,image in images.items()),encoding='ascii')
         notices = root/'runtime-notices'
         notices.mkdir()
