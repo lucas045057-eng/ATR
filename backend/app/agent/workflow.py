@@ -127,7 +127,7 @@ def _offline_report(state: InvestigationState) -> dict[str, Any]:
 def _compact_model_context(prompt, context, input_limit):
     from app.context.model import model_messages
 
-    # Leave bounded room for the next observation; reserve() still enforces the original limit.
+    # Leave room within the model's declared context capacity for the next observation.
     target_limit = max(1, input_limit * 9 // 10)
     def fits():
         return estimate_model_input(model_messages(prompt, context)) <= target_limit
@@ -153,7 +153,7 @@ def _compact_model_context(prompt, context, input_limit):
         context["current_evidence"] = evidence
         if fits():
             break
-    # Irreducible requests still go through reserve(), which stops before the provider.
+    # call_json separately checks irreducible requests against the model's declared capacity.
     return context
 
 

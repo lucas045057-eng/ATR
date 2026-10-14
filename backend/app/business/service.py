@@ -535,7 +535,7 @@ class BusinessService:
         row['analysis']=json.loads(row.pop('parse_json'))
         directory=self.root/business_id/row['artifact_id']
         started=time.monotonic()
-        deadline=started+self.settings.initial_timeout_seconds
+        deadline=float('inf')
         manager=ContextBudgetManager(self.db,self.settings)
         budget_id=manager.create('initial',business_id)
         parsed=self.process_local_media(directory,row,deadline)

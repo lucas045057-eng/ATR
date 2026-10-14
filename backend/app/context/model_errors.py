@@ -37,6 +37,7 @@ def safe_validation_errors(errors, prefix=()):
 MESSAGES = {
     "model_import_error": "模型客户端初始化失败",
     "model_timeout": "模型调用超时，已停止本次请求",
+    "model_context_capacity_exceeded": "单次资料超过模型声明的上下文容量，请减少该次请求的资料范围",
     "provider_connection_error": "模型供应商连接失败或服务异常",
     "provider_unavailable": "模型服务暂时不可用",
     "provider_auth_error": "模型供应商认证失败，请检查凭据",
@@ -65,7 +66,7 @@ class ModelCallError(ValueError):
             "started_at", "ended_at", "elapsed_ms", "worker_initialize_ms", "process_overhead_ms",
             "network_ms", "parse_ms", "error_category", "http_status", "usage_kind", "usage_status",
             "retry_count", "provider_request_id", "validation_errors", "validation_kind",
-            "budget_reason", "estimated_input_tokens", "input_limit", "candidate_count", "candidate_limit") if key in diagnostic})
+            "budget_reason", "estimated_input_tokens", "input_limit", "candidate_count", "candidate_limit", "context_window") if key in diagnostic})
         if self.code == "provider_model_configuration_error" and diagnostic.get("provider_error_reason") == "model_price_not_configured":
             self.diagnostic["provider_error_reason"] = "model_price_not_configured"
         super().__init__(f"{self.code}: {MESSAGES[self.code]} ({self.diagnostic['exception_type']})")

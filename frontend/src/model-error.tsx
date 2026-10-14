@@ -1,7 +1,7 @@
 type Row = Record<string, any>
 
 const stages: Record<string, string> = {
-  initialize: '客户端初始化', request: '供应商请求', parse: 'JSON 解析',
+  prepare: '请求准备', initialize: '客户端初始化', request: '供应商请求', parse: 'JSON 解析',
   validate: '结构与引用校验', worker: '隔离进程等待', budget: '预算检查',
 }
 
@@ -47,6 +47,9 @@ export function ModelError({ error }: { error?: Row | null }) {
       {' '}· 原始异常：{error.exception_type || '未知'}
       {error.status_code != null && ` · HTTP ${error.status_code}`}</p>
     <ValidationIssues error={error} />
+    {error.code === 'model_context_capacity_exceeded' && <p>
+      模型声明容量 {error.context_window} Tokens · 请求输入估算 {error.estimated_input_tokens}（按 UTF-8 字节加开销估算）。
+    </p>}
     {error.code === 'model_budget_exceeded' && error.budget_reason && <p data-testid="budget-error-details">
       触发限制：{budgetReasons[error.budget_reason] || '预算预检查'}。
       {error.estimated_input_tokens != null && <> 本地输入估算 {error.estimated_input_tokens}（UTF-8 字节加固定开销）。</>}

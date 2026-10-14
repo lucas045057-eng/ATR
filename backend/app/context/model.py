@@ -164,10 +164,15 @@ def call_json(database, settings, budget_id, system_prompt, context, validate=No
     manager = ContextBudgetManager(database, settings)
     remaining = manager.remaining_seconds(budget_id)
     if deadline is not None:
-        from app.context.budget import BudgetExceeded
         remaining=min(remaining,deadline-time.monotonic())
         if remaining<=0:
-            raise BudgetExceeded('execution_time_limit')
+            raise ModelCallError({'code':'model_timeout','stage':'prepare','exception_type':'TimeoutError'})
+    from app.context.budget import estimate_model_input
+    estimated_input = estimate_model_input(messages)
+    if estimated_input + settings.model_max_output_tokens > settings.model_context_window:
+        raise ModelCallError({'code':'model_context_capacity_exceeded','stage':'prepare',
+                              'exception_type':'ValueError','estimated_input_tokens':estimated_input,
+                              'context_window':settings.model_context_window})
     image_usage = {'image_count':len(images or []),'image_pixels':sum(image['width']*image['height'] for image in images or []),
                    'image_estimated_tokens':sum(1024+4*math.ceil(image['width']/32)*math.ceil(image['height']/32) for image in images or []),
                    'image_usage_kind':'pixel_estimate_provider_usage_separate'}

@@ -93,21 +93,26 @@ def run_bounded(arguments: list[str], request: bytes, *, timeout: float | None, 
         pending = bytearray()
         try:
             while chunk := stream.read1(4096):
-                with buffer_lock:
-                    if sum(len(value) for value in buffers.values()) + len(chunk) > max_output:
-                        exceeded.set()
-                        break
-                    buffers[name].extend(chunk)
+                # Broker messages are consumed as a stream; bound each message, not lifetime heartbeats.
+                if exchange is None or name != 'stdout':
+                    with buffer_lock:
+                        if sum(len(value) for value in buffers.values()) + len(chunk) > max_output:
+                            exceeded.set()
+                            break
+                        buffers[name].extend(chunk)
                 if (exchange is not None or on_progress is not None) and name == 'stdout':
                     pending.extend(chunk)
                     while b'\n' in pending:
                         line, _, pending = pending.partition(b'\n')
+                        if exchange is not None and len(line) > min(65536, max_output):
+                            exceeded.set()
+                            break
                         item = json.loads(line)
                         if exchange is not None:
                             incoming.put_nowait(item)
                         elif on_progress is not None:
                             on_progress(item)
-                    if len(pending) > (65536 if exchange is not None else max_output):
+                    if exceeded.is_set() or len(pending) > (min(65536, max_output) if exchange is not None else max_output):
                         exceeded.set()
                         break
             if exchange is not None and pending:
@@ -181,8 +186,13 @@ def run_bounded(arguments: list[str], request: bytes, *, timeout: float | None, 
                         raise value
                     send(value)
             time.sleep(min(0.01, max(0, deadline - time.monotonic())))
+        # A finished child's output must drain promptly even without a total investigation deadline.
+        drain_deadline = min(deadline, time.monotonic() + 1)
         for thread in readers:
-            thread.join(timeout=max(0, deadline - time.monotonic()))
+            while thread.is_alive() and time.monotonic() < drain_deadline:
+                if cancelled is not None and cancelled.is_set():
+                    raise InterruptedError("Process request cancelled")
+                thread.join(timeout=min(0.05, max(0, drain_deadline - time.monotonic())))
         if cancelled is not None and cancelled.is_set():
             raise InterruptedError("Process request cancelled")
         if time.monotonic() >= deadline:

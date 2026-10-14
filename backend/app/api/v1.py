@@ -440,8 +440,9 @@ def execute_legacy_run(incident_id: str, actor: str, job_id: str | None = None) 
     workflow = build_workflow(settings, database, budget_id, "legacy_v22")
     action_history: list[dict[str, Any]] = []
     iterations: list[dict[str, Any]] = []
-    max_followup_actions = settings.investigation_model_rounds - 1
-    for iteration_no in range(max_followup_actions + 1):
+    iteration_no = -1
+    while True:
+        iteration_no += 1
         available_actions = available_diagnostic_actions()
         result_state = workflow.invoke({
             "incident": {"symptom": decode(incident["symptom_json"]).get("text", ""),
@@ -459,7 +460,7 @@ def execute_legacy_run(incident_id: str, actor: str, job_id: str | None = None) 
         if result_state.get("model_error"):
             iteration["policy_outcome"] = "model_failed"
             break
-        if gate.get("status") == "supported" or iteration_no >= max_followup_actions:
+        if gate.get("status") == "supported":
             break
         proposal = report.get("action")
         if not isinstance(proposal, dict):
