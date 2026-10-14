@@ -106,6 +106,8 @@ class SourceIndex:
             "profile_version": profile["profile_version"],
             "start_line": start,
             "end_line": min(len(lines), start - 1 + request.max_lines),
+            "total_lines": len(lines),
+            "excerpt_complete": start == 1 and request.max_lines >= len(lines),
             "text": text,
             "bytes": len(text.encode()),
             "redacted": True,
