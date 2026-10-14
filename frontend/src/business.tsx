@@ -382,7 +382,7 @@ export function BusinessPages({
                   void act(() => api(base + "/analyze", { method: "POST" }))
                 }
               >
-                按预算进行模型理解
+                进行模型理解
               </button>{" "}
               <button className="btn" disabled={busy||!model.configured||!model.external_analysis_enabled} onClick={()=>act(()=>api('/model/probe-vision',{method:'POST'}))}>检测当前模型的视觉能力</button>
               <p>沿用当前模型服务发送一张生成的测试卡，最多等待 45 秒。检测通过后自动用于资料图片理解；密钥不进入资料内容。</p>
@@ -744,63 +744,13 @@ export function BusinessPages({
       )}
       {initial && page !== "scope" && (
         <section className="panel business-block">
-          <h2>上下文预算与模型消耗</h2>
+          <h2>模型用量记录</h2>
+          <p className="muted">预算只读：仅记录调用、用量与费用，不设置额度或阻止任务。</p>
           <p>
             输入 {initial.input_tokens} · 输出 {initial.output_tokens} · 调用{" "}
-            {initial.calls}/{initial.limits.max_calls} · 检索{" "}
+            {initial.calls} 次 · 工具 {initial.tool_calls} 次 · 检索{" "}
             {initial.retrieved_bytes} bytes{" "}
-            {initial.stop_reason && `· 停止：${initial.stop_reason}`}
           </p>
-          <form
-            className="business-actions"
-            onSubmit={(e) => {
-              e.preventDefault();
-              const f = new FormData(e.currentTarget);
-              void act(() =>
-                api(base + `/budgets/${initial.id}`, {
-                  method: "PUT",
-                  body: JSON.stringify({
-                    ...initial.limits,
-                    max_input_tokens: Number(f.get("inputs")),
-                    max_calls: Number(f.get("calls")),
-                    max_total_tokens: Number(f.get("total")),
-                  }),
-                }),
-              );
-            }}
-          >
-            <label>
-              单次最大输入
-              <input
-                name="inputs"
-                type="number"
-                min="1"
-                defaultValue={initial.limits.max_input_tokens}
-              />
-            </label>
-            <label>
-              模型调用上限
-              <input
-                name="calls"
-                type="number"
-                min="1"
-                max="100"
-                defaultValue={initial.limits.max_calls}
-              />
-            </label>
-            <label>
-              累计 Token 上限
-              <input
-                name="total"
-                type="number"
-                min="1"
-                defaultValue={initial.limits.max_total_tokens}
-              />
-            </label>
-            <button className="btn" disabled={busy}>
-              保存预算
-            </button>
-          </form>
           {initial.usage_records.map((u: Row) => (
             <p key={u.id} className="muted">
               {u.model} · {u.input_tokens}+{u.output_tokens} Tokens ·{" "}
@@ -837,7 +787,6 @@ export function BusinessPages({
                         auth_mode: connector === "ssh" ? authMode : "private_key",
                         execution_mode: executionMode,
                         timeout_seconds: Number(f.get("timeout_seconds") || 10),
-                        max_calls: Number(f.get("max_calls") || 100),
                         max_output_bytes: Number(f.get("max_output_bytes") || 48000),
                         credential_ref: f.get("credential_ref") || "",
                         host_public_key: f.get("host_public_key") || "",
@@ -966,7 +915,6 @@ export function BusinessPages({
                     </label>
                     <div className="split-input">
                       <label>单次超时（秒）<input name="timeout_seconds" type="number" min={1} max={60} defaultValue={10} required /></label>
-                      <label>最大调用次数<input name="max_calls" type="number" min={1} max={1000} defaultValue={100} required /></label>
                     </div>
                     <label>输出大小上限（字节）<input name="max_output_bytes" type="number" min={1024} max={64000} defaultValue={48000} required /></label>
                     <small>允许 ATR 已注册的只读工具；服务、资料目录和容器仍受授权范围限制，Docker 只读默认勾选，可关闭。</small>
@@ -1021,7 +969,6 @@ export function BusinessPages({
                     : target.execution_mode === "standard_ssh_readonly"
                       ? "普通 SSH · 客户端只读约束 · AI 可调用已授权工具"
                       : "SSH 固定只读网关"}{" "}
-                  · 最大调用 {target.max_calls}
                 </p>
               )}
               {target?.execution_mode === "standard_ssh_readonly" && <p className="alert">

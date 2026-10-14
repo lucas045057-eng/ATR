@@ -52,7 +52,7 @@ def test_only_one_scoped_regeneration_keeps_both_audits_and_strict_validation(fa
     assert "decision_correction" not in context
 
 
-def test_correction_cannot_bypass_model_call_budget(fake_model):  # noqa: F811
+def test_correction_records_both_attempts_despite_legacy_call_budget(fake_model):  # noqa: F811
     db, settings, provider, _ = fake_model
     settings.model_timeout_seconds = 10
     state = {**graph_state(), "evidence": [{"evidence_id": "db-event", "target_node_id": DB}]}
@@ -65,11 +65,9 @@ def test_correction_cannot_bypass_model_call_budget(fake_model):  # noqa: F811
     provider["reply"] = lambda *_: output
     manager = ContextBudgetManager(db, settings)
     bid = manager.create("investigation", limits=BudgetLimits(max_calls=1))
-    from app.context.budget import BudgetExceeded
-
-    with pytest.raises(BudgetExceeded):
+    with pytest.raises(ModelCallError):
         one_scoped_correction(call_json, [])(db, settings, bid, "bounded", {}, validate=lambda x: validate_report(x, state))
-    assert manager.get(bid)["calls"] == provider["requests"] == 1
+    assert manager.get(bid)["calls"] == provider["requests"] == 2
 
 
 def test_invalid_prediction_gets_one_regeneration_with_exact_value_candidates(fake_model):  # noqa: F811

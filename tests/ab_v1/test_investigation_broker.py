@@ -17,13 +17,12 @@ from test_business import onboard
 from test_run_target_binding import add_target, confirm_catalog, incident
 
 
-def test_actual_limits_do_not_hide_missing_supplement_room():
+def test_legacy_soft_and_hard_budgets_do_not_restrict_investigation():
     settings = Settings(_env_file=None, investigation_model_rounds=6)
-    with pytest.raises(ValueError, match='余量'):
-        effective_limits(settings)
-    assert effective_limits(settings.model_copy(update={'ab_supplement_enabled': False}))['hard_model_calls'] == 6
-    limits = effective_limits(Settings(_env_file=None))
-    assert (limits['soft_model_calls'], limits['soft_tool_calls'], limits['hard_model_calls'], limits['hard_tool_calls']) == (6, 16, 8, 20)
+    limits = effective_limits(settings)
+    assert limits['budget_mode'] == 'accounting_only' and limits['max_seconds'] is None
+    assert not any(key.startswith(('soft_', 'hard_')) for key in limits)
+    assert limits['model_timeout_seconds'] == 45 and limits['ssh_timeout_seconds'] == 10
 
 
 def test_preparation_failure_cannot_leave_an_orphan_queued_run(client,monkeypatch):

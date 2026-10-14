@@ -29,18 +29,10 @@ from app.tools.registry import sanitize_payload
 
 
 def effective_limits(settings):
-    limits = {'soft_model_calls': settings.ab_soft_model_calls,
-              'soft_tool_calls': settings.ab_soft_tool_calls,
-              'hard_model_calls': min(8, settings.investigation_model_rounds),
-              'hard_tool_calls': min(20, settings.investigation_tool_calls),
+    limits = {'budget_mode': 'accounting_only',
               'supplement_enabled': settings.ab_supplement_enabled,
-              'max_seconds': 600, 'model_timeout_seconds': min(45, settings.model_timeout_seconds),
+              'max_seconds': None, 'model_timeout_seconds': min(45, settings.model_timeout_seconds),
               'ssh_timeout_seconds': 10}
-    if limits['soft_model_calls'] > limits['hard_model_calls'] or limits['soft_tool_calls'] > limits['hard_tool_calls']:
-        raise ValueError('调查软上限不能高于硬上限，请检查实际生效预算')
-    if limits['supplement_enabled'] and (limits['soft_model_calls'] == limits['hard_model_calls']
-                                       or limits['soft_tool_calls'] == limits['hard_tool_calls']):
-        raise ValueError('启用一次补证需要模型和工具软硬上限之间都有余量；也可明确关闭补证')
     return limits
 
 
@@ -85,8 +77,9 @@ def prepare_run(database, settings, incident_id, business_id, target_id, job_id,
                      'configuration_digest':configuration_digest(settings),
                      'provider': settings.model_provider, 'wire_api': settings.model_wire_api,
                      'configured_decision_protocol': settings.agent_decision_protocol,
-                     'configured_hard_limits': {'model': settings.investigation_model_rounds,
-                                                'tools': settings.investigation_tool_calls},
+                     'budget_mode': 'accounting_only',
+                     'legacy_budget_references': {'model': settings.investigation_model_rounds,
+                                                  'tools': settings.investigation_tool_calls},
                      'effective_limits': limits, 'profile_version': profile['profile_version']}
     task = json.loads(incident['symptom_json'])
     mode=task.get('mode','normal')
@@ -113,8 +106,8 @@ def prepare_run(database, settings, incident_id, business_id, target_id, job_id,
                            'profile_version': profile['profile_version'], 'profile_review_status': profile['review_status']}),
                     target_id, dumps(frozen)))
         budget_id = manager.create('investigation', business_id, run_id, BudgetLimits(
-            max_input_tokens=settings.investigation_input_tokens, max_calls=limits['hard_model_calls'],
-            max_tools=limits['hard_tool_calls'], max_total_tokens=settings.budget_total_tokens, max_execution_seconds=600),transaction=tx)
+            max_input_tokens=settings.investigation_input_tokens, max_calls=settings.investigation_model_rounds,
+            max_tools=settings.investigation_tool_calls, max_total_tokens=settings.budget_total_tokens, max_execution_seconds=600),transaction=tx)
         row = tx.execute('SELECT summary_json FROM diagnosis_runs WHERE id=?', (run_id,)).fetchone()
         tx.execute('UPDATE diagnosis_runs SET summary_json=? WHERE id=?',
                    (dumps({**json.loads(row[0]), 'budget_id': budget_id}), run_id))
@@ -156,7 +149,7 @@ class InvestigationBroker:
                                       'source_experience_id':item['source_experience_id'],
                                       'is_current_evidence':False,'purpose':'historical_check_guidance'}
                                      for item in compatible_patterns(tx,self.business_id,self.snapshot)[:3]]
-        self.limits = json.loads(run['budget_json'])
+        self.limits = effective_limits(settings)
         self.target = RuntimeService(database, settings).get(self.business_id, self.target_id)
         if authorization_digest(self.target) != json.loads(run['target_snapshot_json'])['authorization_digest']:
             raise PermissionError('原调查授权已变化')
@@ -324,9 +317,6 @@ class InvestigationBroker:
             self.authorize(tx)
         if self.result['completion_satisfied']:
             return self.finish('complete_chain_verified')
-        budget = self.manager.get(self.budget_id)
-        if budget['calls'] >= self.limits['hard_model_calls'] or budget['tool_calls'] >= self.limits['hard_tool_calls']:
-            return self.finish('hard_budget_limit')
         if self.no_progress >= 2:
             return self.finish('no_progress')
         if not self.root:
@@ -341,9 +331,6 @@ class InvestigationBroker:
             return self.finish('no_authorized_actions')
         if self.supplement and self.supplement.get('executed'):
             return self.finish('supplement_complete')
-        soft = budget['calls'] >= self.limits['soft_model_calls'] or budget['tool_calls'] >= self.limits['soft_tool_calls']
-        if soft:
-            return self.supplement_once(actions, budget, 'soft_budget_limit')
         state = self.state(actions)
         context = {'symptom': self.symptom['text'], 'window_start': self.incident['window_start'],
                    'historical_check_guidance':self.experience_guidance,
@@ -368,7 +355,7 @@ class InvestigationBroker:
         try:
             configured = self.settings.model_copy(update={'model_timeout_seconds': self.limits['model_timeout_seconds']})
             decision = call_json(self.db, configured, self.budget_id, prompt,
-                                 _compact_model_context(prompt, context, budget['limits']['max_input_tokens']),
+                                 _compact_model_context(prompt, context, self.manager.input_capacity()),
                                  validate=lambda value: adapt_minimal_decision(value, state), supervision=self.supervision)
             self.error_rounds = 0
             self.report = decision['report']
@@ -394,9 +381,7 @@ class InvestigationBroker:
 
     def supplement_once(self, actions, budget, reason, *, execution='completed'):
         candidate = self.gap_action(actions)
-        if (not self.limits['supplement_enabled'] or self.supplement or not candidate
-                or budget['tool_calls'] >= self.limits['hard_tool_calls']
-                or budget['calls'] >= self.limits['hard_model_calls']):
+        if not self.limits['supplement_enabled'] or self.supplement or not candidate:
             return self.finish(reason, execution)
         gap, action = candidate
         self.supplement = {'gap_id': digest(gap), 'gap': gap, 'action_id': action['action_id'],
@@ -566,10 +551,6 @@ def resume_run(database, settings, run_id, answer, *, actor='operator'):
         if authorization_digest(target) != json.loads(run['target_snapshot_json'])['authorization_digest']:
             raise PermissionError('原调查授权已变化；确认回答不能扩大服务器权限')
         RuntimeService(database, settings).require_credentials(business_id, target_id)
-        manager = ContextBudgetManager(database, settings)
-        budget = manager.get(summary['budget_id'])
-        if budget['calls'] >= budget['limits']['max_calls'] or budget['tool_calls'] >= budget['limits']['max_tools']:
-            raise ValueError('原调查预算已耗尽，继续不会重置预算')
         if answer.selections:
             confirm_runtime_options(database, settings, run_id, business_id, target_id, question, answer, actor)
             with database.connect() as tx:

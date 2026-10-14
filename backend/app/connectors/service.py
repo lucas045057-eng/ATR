@@ -167,9 +167,6 @@ class RuntimeService:
         with self.db.transaction() as tx:
             if supervision is not None:
                 supervision['authorize'](tx)
-            count = tx.execute(
-                "SELECT COUNT(*) FROM runtime_observations WHERE target_id=?", (target_id,)
-            ).fetchone()[0]
             from app.system.scope import binding_is_current
             approved = {
                 (r["kind"], r["runtime_id"])
@@ -204,11 +201,6 @@ class RuntimeService:
                 exc = PermissionError("目标访问授权已撤销")
                 exc.code = "authorization_revoked"
                 exc.stage = "authorization"
-                raise exc
-            if count >= config["max_calls"]:
-                exc = PermissionError("目标累计调用预算已用尽")
-                exc.code = "target_call_limit"
-                exc.stage = "budget"
                 raise exc
             args = check(config, request.tool_id, request.arguments, approved)
             connector = (

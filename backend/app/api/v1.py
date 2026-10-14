@@ -685,7 +685,6 @@ def resume_business_run(run_id: str, request: dict[str, Any] | None = None, acto
     from app.agent.discovery import authorization_digest
     from app.business.service import BusinessService
     from app.connectors.service import RuntimeService
-    from app.context.budget import ContextBudgetManager
     from app.jobs import reserve_investigation, submit
     from app.system.scope import binding_is_current
     database, settings = db(), get_settings()
@@ -737,15 +736,6 @@ def resume_business_run(run_id: str, request: dict[str, Any] | None = None, acto
                             if binding_is_current(b) and b["kind"] in {"service", "container"} and b["target_id"] == target_id]
         if not current_bindings:
             raise HTTPException(409, "请先确认有效的服务或容器映射")
-    manager = ContextBudgetManager(database, settings)
-    budget = manager.get(summary["budget_id"])
-    if budget["stop_reason"] or budget["tool_calls"] >= budget["limits"]["max_tools"] or budget["calls"] >= budget["limits"]["max_calls"]:
-        raise HTTPException(409, "原调查预算已耗尽，恢复不会重置预算")
-    from app.context.budget import BudgetExceeded
-    try:
-        manager.remaining_seconds(summary["budget_id"])
-    except BudgetExceeded as exc:
-        raise HTTPException(409, "原调查执行时间预算已耗尽") from exc
     job_id, status, created = reserve_investigation(database, incident_id, business_id, target_id)
     if created:
         submit(database, job_id, lambda: investigate_business(database, settings, incident_id, business_id, actor, job_id, resume_run_id=run_id, target_id=target_id))

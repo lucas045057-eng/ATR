@@ -148,8 +148,6 @@ def investigate_business(database, settings, incident_id, business_id, actor, jo
             raise PermissionError("原调查授权记录与 Run 目标不一致，不能恢复")
         manager = ContextBudgetManager(database, settings)
         manager.remaining_seconds(paused["budget_id"])
-        if manager.get(paused["budget_id"])["tool_calls"] >= manager.get(paused["budget_id"])["limits"]["max_tools"]:
-            raise PermissionError("调查工具预算已耗尽")
         bindings = [b for b in bindings if b["target_id"] == target_id and b["kind"] in {"service", "container"}]
         if not bindings:
             raise PermissionError("还没有有效且已确认的服务或容器映射")
@@ -400,10 +398,6 @@ def investigate_business(database, settings, incident_id, business_id, actor, jo
 
     def execute(action):
         nonlocal reason, stop_reason
-        budget = manager.get(budget_id)
-        if budget["tool_calls"] >= budget["limits"]["max_tools"]:
-            reason, stop_reason = "工具调用预算已耗尽", "tool_budget_exhausted"
-            return {"call_id": None, "error": "BudgetExceeded"}
         action["action_id"] = action_id(action)
         if action.get("binding_id"):
             with database.transaction() as tx:
@@ -497,7 +491,9 @@ def investigate_business(database, settings, incident_id, business_id, actor, jo
     last_runtime_claims = []
     runtime_decision_audits = []
     runtime_finish_override_audits = []
-    for iteration in range(settings.investigation_model_rounds if not reason else 0):
+    iteration = -1
+    while not reason:
+        iteration += 1
         used = {(h["tool_id"], h["target_node_id"]) for h in history}
         actions = planner.candidates(evidence, code_context, history) if adaptive else [
             action_for(b, suffix)
@@ -541,14 +537,6 @@ def investigate_business(database, settings, incident_id, business_id, actor, jo
             investigation_plan = sync_plan_with_history(investigation_plan, history)
             actions = filter_actions_for_objective(task_objective, investigation_plan, actions)
             budget_state = manager.get(budget_id)
-            hard_stop = budget_state.get("stop_reason")
-            if not hard_stop and budget_state["calls"] >= budget_state["limits"]["max_calls"]:
-                hard_stop = "model_call_limit"
-            if not hard_stop and budget_state["tool_calls"] >= budget_state["limits"]["max_tools"]:
-                hard_stop = "tool_call_limit"
-            if (not hard_stop and budget_state["input_tokens"] + budget_state["output_tokens"]
-                    + budget_state["reserved_tokens"] >= budget_state["limits"]["max_total_tokens"]):
-                hard_stop = "total_token_limit"
             scope_ids = task_objective.get("target_node_ids", [])
             finding_state = {"incident": {"window_start": incident["window_start"]},
                              "graph": graph, "evidence": evidence,
@@ -560,7 +548,6 @@ def investigate_business(database, settings, incident_id, business_id, actor, jo
                 actions, model_calls=budget_state["calls"], tool_calls=budget_state["tool_calls"],
                 active_hypothesis_nodes={h.get("target_node_id") for h in planner.hypotheses
                                          if h.get("status") != "refuted"},
-                hard_stop_reason=hard_stop,
                 soft_limit_final_step_used=soft_limit_final_step_used,
                 finding_level=current_finding.get("finding_level"),
             )
@@ -593,10 +580,6 @@ def investigate_business(database, settings, incident_id, business_id, actor, jo
                 runtime_finish_override_audits.append({"soft_limit_final_step": True,
                                                        "action_ids": task_decision["high_value_action_ids"][:4],
                                                        "reason": "任务级软上限到达，但仍有指向当前活跃假设的高价值授权检查。"})
-        budget = manager.get(budget_id)
-        if budget["tool_calls"] >= budget["limits"]["max_tools"]:
-            reason, stop_reason = "工具调用预算已耗尽", "tool_budget_exhausted"
-            break
         with database.transaction() as tx:
             tx.execute(
                 "UPDATE diagnosis_runs SET summary_json=? WHERE id=?",
@@ -834,11 +817,6 @@ def investigate_business(database, settings, incident_id, business_id, actor, jo
         if adaptive and planner.requested_scope(report):
             reason, stop_reason = "关键服务尚未授权，已记录范围扩展申请", "permission_blocked"
             outcome["policy_outcome"] = "scope_request"
-            break
-        if iteration == settings.investigation_model_rounds - 1:
-            reason, stop_reason = "调查轮数上限已达到", "round_limit"
-            if task_policy_enabled:
-                task_completion_status = "stopped_with_limit"
             break
         if not action:
             reason = state.get("provider_error") or (

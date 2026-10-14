@@ -57,14 +57,14 @@ def _windows_job(process):
     return kernel, handle
 
 
-def run_bounded(arguments: list[str], request: bytes, *, timeout: float, max_output: int = 2 * 1024 * 1024,
+def run_bounded(arguments: list[str], request: bytes, *, timeout: float | None, max_output: int = 2 * 1024 * 1024,
                 cancelled: threading.Event | None = None, on_spawn=None, exchange=None, on_message=None,
                 on_progress=None) -> dict:
-    if timeout <= 0 or len(request) > 2 * 1024 * 1024:
+    if (timeout is not None and timeout <= 0) or len(request) > 2 * 1024 * 1024:
         raise ValueError("Invalid process request bounds")
     if cancelled is not None and cancelled.is_set():
         raise InterruptedError("Process request cancelled")
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + timeout if timeout is not None else float('inf')
     if sys.platform == "linux":
         arguments = [sys.executable, "-m", "app.runtime.process_bootstrap", *arguments]
     owner_cookie = uuid.uuid4().hex

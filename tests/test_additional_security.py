@@ -57,7 +57,7 @@ def test_private_key_is_not_stored_or_echoed_on_target_validation(client):
     assert client.get(f"/api/v1/businesses/{profile['business_id']}/targets").json() == []
 
 
-def test_api_budget_stop_retains_static_and_resume(client, monkeypatch):
+def test_budget_edit_is_read_only_and_source_analysis_keeps_provenance(client, monkeypatch):
     profile = onboard(client)
     base = f"/api/v1/businesses/{profile['business_id']}"
     settings = get_settings()
@@ -82,25 +82,18 @@ def test_api_budget_stop_retains_static_and_resume(client, monkeypatch):
     monkeypatch.setattr("app.context.model._completion", completion)
     budget = client.get(base + "/budgets").json()[0]
     limits = {**budget["limits"], "max_input_tokens": 10}
-    assert client.put(base + f"/budgets/{budget['id']}", json=limits).status_code == 200
-    job = client.post(base + "/analyze").json()
-    # Budget exhaustion must not present the requested model analysis as successful.
-    stopped = wait_job(client, job["job_id"])
-    assert stopped["status"] == "failed"
-    assert stopped["result"]["model_error"]["code"] == "model_budget_exceeded"
-    usage = client.get(base + "/budgets").json()[0]
-    assert usage["calls"] == usage["reserved_tokens"] == 0
-    assert usage["usage_records"] == []
-    latest = client.get(base).json()
-    assert latest["model_status"].startswith("budget_exceeded")
-    assert latest["services"] == profile["services"]
-    assert not calls
-    client.put(base + f"/budgets/{budget['id']}", json={**limits, "max_input_tokens": 8000})
+    assert client.put(base + f"/budgets/{budget['id']}", json=limits).status_code == 409
     job = client.post(base + "/analyze").json()
     assert wait_job(client, job["job_id"])["status"] == "completed"
-    assert client.get(base).json()["model_status"] == "completed"
+    usage = client.get(base + "/budgets").json()[0]
+    assert usage["calls"] == 1 and usage["reserved_tokens"] == 0
+    assert usage["usage_records"][0]["usage_kind"] == "actual"
+    latest = client.get(base).json()
+    assert latest["model_status"] == "completed"
+    assert latest["services"] == profile["services"]
     assert len(calls) == 1
-    assert "def record" not in calls[0]["messages"][1]["content"]
+    context = json.loads(calls[0]["messages"][1]["content"])
+    assert context["source_fragments"] and all(item["content_digest"] for item in context["source_fragments"])
 
 
 def test_file_count_depth_and_declared_upload_limit(client, tmp_path):

@@ -165,7 +165,7 @@ def discover_for_run(database, settings, profile, targets, registry, service_nod
                "services": [{"name": s["name"], "role": s["role"]} for s in profile["services"][:20]],
                "candidates": candidates[:80], "collection_errors": errors,
                "boundary": "候选元数据仅用于范围建议；未确认对象禁止读取日志、业务配置或作根因结论"}
-    limit = manager.get(budget_id)["limits"]["max_input_tokens"]
+    limit = manager.input_capacity()
     prompt, context = mapping_model_input(context, limit)
     model_status, model_error, proposals = "not_called", None, []
     summary = "已采集基础证据，需要人工审核运行范围"

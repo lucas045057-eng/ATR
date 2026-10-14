@@ -272,7 +272,7 @@ def budget_regression_state(unicode=False):
 
 @pytest.mark.parametrize('unicode', [False, True])
 @pytest.mark.parametrize('input_limit', [12000, 30000])
-def test_schema_prompt_respects_old_and_authorized_new_budget(fake_model, monkeypatch, unicode, input_limit):  # noqa: F811
+def test_schema_prompt_uses_model_capacity_and_preserves_legacy_references(fake_model, monkeypatch, unicode, input_limit):  # noqa: F811
     database, settings, _, _ = fake_model
     settings.investigation_input_tokens = input_limit
     state = budget_regression_state(unicode)
@@ -290,15 +290,11 @@ def test_schema_prompt_respects_old_and_authorized_new_budget(fake_model, monkey
     assert state == before
     budget = manager.get(bid)
     assert budget['limits']['max_input_tokens'] == input_limit
-    if input_limit == 12000:
-        assert result['model_error']['budget_reason'] == 'request_input_limit'
-        assert budget['calls'] == 0 and budget['usage_records'] == [] and requests == []
-        return
     assert 'model_error' not in result and result['report']['analysis_status'] == 'model'
     assert budget['calls'] == 1 and budget['usage_records'][0]['status'] == 'succeeded'
     messages = requests[0]['messages']
     measured = sum(len(m['content'].encode()) + 128 for m in messages) + 256
-    assert measured <= input_limit
+    assert measured <= manager.input_capacity()
     context = json.loads(messages[1]['content'])
     assert [e['evidence_id'] for e in context['current_evidence']] == [e['evidence_id'] for e in before['evidence']]
     assert all(e['payload']['state'] == 'failed' for e in context['current_evidence'])
@@ -307,11 +303,11 @@ def test_schema_prompt_respects_old_and_authorized_new_budget(fake_model, monkey
     assert [a['action_id'] for a in context['available_actions']] == [a['action_id'] for a in before['available_actions']]
 
 
-def test_irreducible_prompt_budget_stops_before_provider(fake_model, monkeypatch):  # noqa: F811
+def test_small_legacy_budget_does_not_stop_before_provider(fake_model, monkeypatch):  # noqa: F811
     from app.context.budget import BudgetLimits
     database, settings, state, _ = fake_model
     manager = ContextBudgetManager(database, settings)
     bid = manager.create('investigation', limits=BudgetLimits(max_input_tokens=1000))
     result = _planner(settings, budget_regression_state(), database, bid)
-    assert result['model_error']['code'] == 'model_budget_exceeded'
-    assert manager.get(bid)['calls'] == 0 and state['requests'] == 0
+    assert 'model_error' not in result
+    assert manager.get(bid)['calls'] == state['requests'] == 1

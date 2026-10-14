@@ -75,7 +75,7 @@ def resolve_objective(task_type: str | None, target_services: list[dict[str, Any
     elif kind == "focused_diagnosis":
         completion = ["已检查目标服务直接状态", "必要日志已检查或明确不可用；触发原因可保持未知"]
     else:
-        completion = ["Evidence Gate 确认根因，或在授权检查耗尽、无进展或软上限时说明证据缺口"]
+        completion = ["Evidence Gate 确认根因，或在授权检查耗尽、无进展时说明证据缺口"]
     return {
         "task_id": str(uuid.uuid4()),
         "task_type": kind,
@@ -444,8 +444,6 @@ def decide_stop(objective: dict[str, Any], plan: dict[str, Any], progress: dict[
         result.update(should_stop=True, stop_reason=reason, task_completion_status=status)
         return result
 
-    if hard_stop_reason:
-        return stop(hard_stop_reason, "stopped_with_limit")
     if gate_status == "supported":
         result["finding_level"] = "root_cause_confirmed"
         status = "completed_with_gaps" if result["scope_omission_count"] else "completed"
@@ -462,15 +460,4 @@ def decide_stop(objective: dict[str, Any], plan: dict[str, Any], progress: dict[
     if (progress.get("consecutive_no_progress_rounds", 0) >= policy["no_progress_rounds"]
             and not high_value):
         return stop("no_progress")
-    reached_soft_limit = (model_calls >= policy["soft_model_rounds"]
-                          or tool_calls >= policy["soft_tool_calls"])
-    if reached_soft_limit:
-        if not soft_limit_final_step_used and high_value:
-            result["soft_limit_final_step"] = True
-            high_value_ids = set(result["high_value_action_ids"])
-            result["useful_action_ids"] = [
-                action_id for action_id in result["useful_action_ids"] if action_id in high_value_ids
-            ]
-            return result
-        return stop("task_soft_limit", "stopped_with_limit")
     return result

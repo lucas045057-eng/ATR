@@ -209,7 +209,7 @@ class BusinessService:
 
     def process_artifact(self, artifact_id):
         initial_started=time.monotonic()
-        initial_deadline=initial_started+self.settings.initial_timeout_seconds
+        initial_deadline=float('inf')
         conn = self.db.connect()
         try:
             artifact = dict(
@@ -240,7 +240,6 @@ class BusinessService:
                                      (artifact['business_id'],)).fetchone()[0]
             manager=ContextBudgetManager(self.db,self.settings)
             initial_elapsed_ms=manager.get(budget_id)['elapsed_ms']
-            initial_deadline=min(initial_deadline,time.monotonic()+manager.remaining_seconds(budget_id))
             conn = self.db.connect()
             try:
                 cached = {
@@ -477,7 +476,7 @@ class BusinessService:
                 context={'source':page['source_refs'],'ocr_text':page.get('text','')[:1200],
                          'ocr_regions':[{'text':entry['text'],'region':entry['region']} for entry in page.get('regions',[])[:20]]}
                 images=[{'data':data,'width':page['vision_image_size'][0],'height':page['vision_image_size'][1]}]
-                input_limit=ContextBudgetManager(self.db,self.settings).get(budget_id)['limits']['max_input_tokens']
+                input_limit=ContextBudgetManager(self.db,self.settings).input_capacity()
                 while estimate_model_input(model_messages(VISION_PROMPT,context,images))>input_limit:
                     if context['ocr_regions']:
                         context['ocr_regions'].pop()
@@ -666,7 +665,7 @@ class BusinessService:
             "unknowns": profile.unknowns[:10],
         }
         # Omitted inputs remain explicit; never truncate serialized JSON or silently claim full coverage.
-        hard_limit = manager.get(budget_id)["limits"]["max_input_tokens"]
+        hard_limit = manager.input_capacity()
         for _ in range(120):
             if len(dumps(context).encode()) + 1600 <= hard_limit:
                 break

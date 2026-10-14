@@ -5,7 +5,7 @@ from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
-from app.context.budget import BudgetLimits, ContextBudgetManager
+from app.context.budget import ContextBudgetManager
 from app.context.model import call_json
 from app.context.model_errors import ModelCallError
 from app.context.model_worker import provider_request_id
@@ -146,7 +146,7 @@ def test_process_start_failure_releases_budget_and_has_initialize_stage(fake_mod
     assert manager.get(bid)['reserved_tokens'] == 0
 
 
-def test_overreported_usage_blocks_until_explicit_budget_review(fake_model, monkeypatch):  # noqa: F811
+def test_usage_above_estimate_is_accounted_without_blocking(fake_model, monkeypatch):  # noqa: F811
     database, settings, _, _ = fake_model
     def completion(**_):
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='{}'))], usage=SimpleNamespace(prompt_tokens=20000, completion_tokens=10))
@@ -155,11 +155,10 @@ def test_overreported_usage_blocks_until_explicit_budget_review(fake_model, monk
     bid = manager.create('initial')
     call_json(database, settings, bid, 'local fake', {})
     budget = manager.get(bid)
-    assert budget['stop_reason'] == 'provider_usage_exceeded_reservation'
-    with pytest.raises(Exception):
-        call_json(database, settings, bid, 'local fake', {})
-    assert manager.get(bid)['calls'] == 1
-    manager.update(bid, BudgetLimits(**budget['limits']))
+    assert budget['stop_reason'] is None
+    call_json(database, settings, bid, 'local fake', {})
+    assert manager.get(bid)['calls'] == 2
+    assert manager.get(bid)['input_tokens'] == 40000
     assert manager.get(bid)['stop_reason'] is None
 
 

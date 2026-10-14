@@ -241,20 +241,19 @@ def test_timeout_preserves_health_business_api_and_allows_next_task(client, fake
     assert [r["status"] for r in budget["usage_records"]] == ["failed", "succeeded"]
 
 
-def test_exhausted_budget_fails_job_without_provider_request(client, fake_model):
+def test_budget_edit_is_read_only_and_analysis_still_requests_provider(client, fake_model):
     _, settings, state, _ = fake_model
     profile = onboard(client)
     base = f"/api/v1/businesses/{profile['business_id']}"
     configure_client(settings)
     budget = client.get(base + "/budgets").json()[0]
     response = client.put(base + "/budgets/" + budget["id"], json={"max_input_tokens": 1})
-    assert response.status_code == 200
+    assert response.status_code == 409
     job = wait_job(client, client.post(base + "/analyze").json()["job_id"])
-    assert job["status"] == "failed" and job["result"]["model_status"].startswith("budget_exceeded:")
-    assert job["result"]["model_error"]["code"] == "model_budget_exceeded"
+    assert job["status"] == "completed" and job["result"]["model_status"] == "completed"
     budget = client.get(base + "/budgets").json()[0]
-    assert budget["calls"] == budget["reserved_tokens"] == state["requests"] == 0
-    assert budget["usage_records"] == []
+    assert budget["calls"] == state["requests"] == 1 and budget["reserved_tokens"] == 0
+    assert budget["usage_records"][0]["status"] == "succeeded"
 
 
 def test_wrong_profile_schema_marks_actual_usage_failed_and_allows_recovery(client, fake_model):

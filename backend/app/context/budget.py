@@ -50,6 +50,7 @@ def interrupt_usage(tx, usage):
 
 
 class BudgetLimits(StrictModel):
+    """Legacy references kept with historical records; these values are not enforced."""
     max_input_tokens: int = Field(default=8000, ge=1, le=200000)
     max_calls: int = Field(default=6, ge=1, le=100)
     max_total_tokens: int = Field(default=100000, ge=1, le=1000000)
@@ -96,6 +97,10 @@ class ContextBudgetManager:
                 raise ValueError("预算不存在")
             result = dict(row)
             result["limits"] = json.loads(result.pop("limits_json"))
+            result["mode"] = "accounting_only"
+            result["enforcement_enabled"] = False
+            result["historical_stop_reason"] = result["stop_reason"]
+            result["stop_reason"] = None
             result["usage_records"] = [
                 dict(x)
                 for x in conn.execute(
@@ -110,71 +115,40 @@ class ContextBudgetManager:
             conn.close()
 
     def update(self, budget_id, limits):
-        with self.db.transaction() as tx:
-            if not tx.execute("SELECT 1 FROM context_budgets WHERE id=?", (budget_id,)).fetchone():
-                raise ValueError("预算不存在")
-            tx.execute(
-                "UPDATE context_budgets SET limits_json=?,stop_reason=NULL WHERE id=?",
-                (limits.model_dump_json(), budget_id),
-            )
+        self.get(budget_id)
+        raise ValueError("预算仅用于用量记录，不支持设置限制")
+
+    def input_capacity(self):
+        # Model context capacity is a transport capability, independent of recorded budgets.
+        return max(1, self.settings.model_context_window - self.settings.model_max_output_tokens)
 
     def reserve(self, budget_id, messages, output_limit, *, authorize=None):
         estimate = estimate_model_input(messages)
-        reason = None
         record_id = uid()
         with self.db.transaction() as tx:
             if authorize is not None:
                 authorize(tx)
             row = tx.execute("SELECT * FROM context_budgets WHERE id=?", (budget_id,)).fetchone()
-            limits = json.loads(row["limits_json"])
+            if row is None:
+                raise ValueError("预算不存在")
             reserved = estimate + output_limit
-            if row["stop_reason"] in {"provider_usage_exceeded_reservation", "execution_time_limit", "tool_call_limit", "retrieval_limit"}:
-                reason = row["stop_reason"]
-            elif estimate > limits["max_input_tokens"]:
-                reason = "request_input_limit"
-            elif reserved > self.settings.model_context_window:
-                reason = "model_context_window"
-            elif row["calls"] >= limits["max_calls"]:
-                reason = "model_call_limit"
-            elif (
-                row["input_tokens"] + row["output_tokens"] + row["reserved_tokens"] + reserved
-                > limits["max_total_tokens"]
-            ):
-                reason = "total_token_limit"
-            if reason:
-                tx.execute(
-                    "UPDATE context_budgets SET stop_reason=? WHERE id=?", (reason, budget_id)
-                )
-            else:
-                tx.execute(
-                    "UPDATE context_budgets SET calls=calls+1,reserved_tokens=reserved_tokens+?,stop_reason=NULL WHERE id=?",
-                    (reserved, budget_id),
-                )
-                tx.execute(
-                    "INSERT INTO model_usage_records(id,budget_id,model,input_tokens,output_tokens,usage_kind,cost,cost_kind,status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                    (
-                        record_id,
-                        budget_id,
-                        self.settings.model_name,
-                        estimate,
-                        output_limit,
-                        "estimate_reserved",
-                        None,
-                        "unknown",
-                        "pending",
-                        now(),
-                    ),
-                )
-        if reason:
-            raise BudgetExceeded(reason, estimated_input_tokens=estimate,
-                                 input_limit=limits["max_input_tokens"])
+            tx.execute(
+                "UPDATE context_budgets SET calls=calls+1,reserved_tokens=reserved_tokens+? WHERE id=?",
+                (reserved, budget_id),
+            )
+            tx.execute(
+                "INSERT INTO model_usage_records(id,budget_id,model,input_tokens,output_tokens,usage_kind,cost,cost_kind,status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (record_id, budget_id, self.settings.model_name, estimate, output_limit,
+                 "estimate_reserved", None, "unknown", "pending", now()),
+            )
         return record_id, estimate, reserved
 
     def start_attempt(self, budget_id, reservation):
         audit = {"request_attempt_id": reservation[0], "model": self.settings.model_name,
                  "provider": self.settings.model_provider, "started_at": now(), "retry_count": 0,
                  "request_stage": "initialize", "usage_status": "pending", "usage_kind": "estimate_reserved",
-                 "estimated_input_tokens": reservation[1]}
+                 "estimated_input_tokens": reservation[1], "budget_mode": "accounting_only",
+                 "estimated_reserved_tokens": reservation[2]}
         with self.db.transaction() as tx:
             row = tx.execute("SELECT run_id FROM context_budgets WHERE id=?", (budget_id,)).fetchone()
             audit["investigation_run_id"] = row["run_id"]
@@ -238,50 +212,30 @@ class ContextBudgetManager:
                     tx.execute("INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?,?)", (uid(), run['system_id'], run_id, sequence,
                                "model_attempt", record_id, "model_attempt_failed" if status == "failed" else "model_attempt_completed",
                                "runtime", json.dumps(audit), now()))
-            if inputs + outputs > reserved:
-                tx.execute(
-                    "UPDATE context_budgets SET stop_reason='provider_usage_exceeded_reservation' WHERE id=?",
-                    (budget_id,),
-                )
 
     def consume_tool(self, budget_id, *, authorize=None):
-        self.remaining_seconds(budget_id)
-        self._consume(budget_id, "tool_calls", 1, "max_tools", "tool_call_limit", authorize=authorize)
+        self._consume(budget_id, "tool_calls", 1, authorize=authorize)
 
     def remaining_seconds(self, budget_id):
-        row = self.get(budget_id)
-        if row["stop_reason"] in {"execution_time_limit", "retrieval_limit", "tool_call_limit", "provider_usage_exceeded_reservation"}:
-            raise BudgetExceeded(row["stop_reason"])
-        remaining = row["limits"].get("max_execution_seconds", 1800) - row.get("elapsed_ms", 0) / 1000
-        if remaining <= 0:
-            raise BudgetExceeded("execution_time_limit")
-        return remaining
+        self.get(budget_id)
+        # Existing callers still apply their own per-request timeout.
+        return float("inf")
 
     def record_time(self, budget_id, seconds):
         with self.db.transaction() as tx:
             tx.execute("UPDATE context_budgets SET elapsed_ms=elapsed_ms+? WHERE id=?", (max(0, seconds) * 1000, budget_id))
-            row = tx.execute("SELECT * FROM context_budgets WHERE id=?", (budget_id,)).fetchone()
-            if row["elapsed_ms"] >= json.loads(row["limits_json"]).get("max_execution_seconds", 1800) * 1000:
-                tx.execute("UPDATE context_budgets SET stop_reason='execution_time_limit' WHERE id=?", (budget_id,))
 
     def retrieval(self, budget_id, size):
-        self._consume(budget_id, "retrieved_bytes", size, "max_retrieved_bytes", "retrieval_limit")
+        self._consume(budget_id, "retrieved_bytes", size)
 
-    def _consume(self, budget_id, column, amount, limit_key, reason, *, authorize=None):
-        exceeded = False
+    def _consume(self, budget_id, column, amount, *, authorize=None):
         with self.db.transaction() as tx:
             if authorize is not None:
                 authorize(tx)
             row = tx.execute("SELECT * FROM context_budgets WHERE id=?", (budget_id,)).fetchone()
-            if row[column] + amount > json.loads(row["limits_json"])[limit_key]:
-                tx.execute(
-                    "UPDATE context_budgets SET stop_reason=? WHERE id=?", (reason, budget_id)
-                )
-                exceeded = True
-            else:
-                tx.execute(
-                    f"UPDATE context_budgets SET {column}={column}+? WHERE id=?",
-                    (amount, budget_id),
-                )
-        if exceeded:
-            raise BudgetExceeded(reason)
+            if row is None:
+                raise ValueError("预算不存在")
+            tx.execute(
+                f"UPDATE context_budgets SET {column}={column}+? WHERE id=?",
+                (amount, budget_id),
+            )

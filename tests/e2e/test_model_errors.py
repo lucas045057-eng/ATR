@@ -58,7 +58,7 @@ def test_browser_model_failure_is_visible_and_next_request_recovers(live_server,
         browser.close()
 
 
-def test_browser_budget_error_shows_preflight_numbers(low_input_budget, live_server, fake_model):  # noqa: F811
+def test_browser_usage_is_read_only_despite_small_legacy_budget(low_input_budget, live_server, fake_model):  # noqa: F811
     base, _ = live_server
     _, _, state, _ = fake_model
     token = 'browser-test-operator-' + 'x' * 40
@@ -79,11 +79,9 @@ def test_browser_budget_error_shows_preflight_numbers(low_input_budget, live_ser
         task = api.post('/api/v1/incidents/' + incident['id'] + '/runs').json()
         job = wait_job(api, task['job_id'])
         result = api.get('/api/v1/runs/' + job['result']['id']).json()
-        error = result['summary']['model_error']
-        assert error['budget_reason'] == 'request_input_limit'
-        assert error['estimated_input_tokens'] > error['input_limit'] == 1000
-        assert result['context_budget']['calls'] == state['requests'] == 0
-        assert len(result['tool_calls']) == 2
+        assert result['context_budget']['mode'] == 'accounting_only'
+        assert result['context_budget']['stop_reason'] is None
+        assert result['context_budget']['calls'] == state['requests'] > 0
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, channel=os.environ.get('ATR_BROWSER_CHANNEL') or None)
         context = browser.new_context()
@@ -92,10 +90,8 @@ def test_browser_budget_error_shows_preflight_numbers(low_input_budget, live_ser
         page.goto(base)
         page.get_by_role('button', name='排查故障', exact=False).click()
         page.locator('.incident-list').get_by_text(symptom, exact=True).click()
-        panel = page.get_by_test_id('budget-error-details')
-        expect(panel).to_contain_text('单次输入预检查上限')
-        expect(panel).to_contain_text(str(error['estimated_input_tokens']))
-        expect(panel).to_contain_text('单次输入上限 1000')
+        expect(page.get_by_text('预算只读，不限制调用', exact=False)).to_be_visible()
+        expect(page.get_by_test_id('budget-error-details')).to_have_count(0)
         browser.close()
 
 

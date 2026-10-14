@@ -76,7 +76,8 @@ class RunCoordinator:
                        (run_id, job_id, self.clock(), max_seconds, dumps(unresolved_result())))
             tx.execute("UPDATE diagnosis_runs SET status='queued' WHERE id=?", (run_id,))
             tx.execute("UPDATE jobs SET status='queued',result_json=? WHERE id=?", (dumps({'run_id': run_id}), job_id))
-            self._event(tx, run_id, 'run_queued', {'queue_timeout_seconds': 30, 'max_seconds': max_seconds})
+            self._event(tx, run_id, 'run_queued', {'queue_timeout_seconds': 30, 'max_seconds': None,
+                                                'budget_mode': 'accounting_only'})
 
     def claim(self, run_id):
         with self._lock, self.db.transaction() as tx:
@@ -88,9 +89,6 @@ class RunCoordinator:
                 return None
             if tx.execute('SELECT COUNT(*) FROM run_executions WHERE worker_alive=1').fetchone()[0] >= self.max_workers:
                 return None
-            if row['elapsed_seconds'] >= row['max_seconds']:
-                self._finish(tx, row, 'timed_out', unresolved_result(), 'execution_time_limit', stamp)
-                return None
             token = secrets.token_urlsafe(32)
             tx.execute("UPDATE run_executions SET lease_token=?,epoch=epoch+1,last_sequence=0,execution_status='running',accepting=1,worker_alive=1,segment_started=?,heartbeat_at=?,progress_at=?,last_seen_wall=? WHERE run_id=?",
                        (token, stamp, stamp, stamp, time.time(), run_id))
@@ -98,7 +96,7 @@ class RunCoordinator:
             tx.execute("UPDATE jobs SET status='running',ended_at=NULL WHERE id=?", (row['job_id'],))
             self.cancellation(run_id).clear()
             self._event(tx, run_id, 'run_claimed', {'epoch': row['epoch'] + 1})
-            return {'run_id': run_id, 'lease_token': token, 'remaining_seconds': row['max_seconds'] - row['elapsed_seconds'],
+            return {'run_id': run_id, 'lease_token': token, 'remaining_seconds': None,
                     'epoch': row['epoch'] + 1}
 
     def accept(self, message):
@@ -116,9 +114,6 @@ class RunCoordinator:
                     or row['lease_token'] != message['lease_token'] or row['last_sequence'] + 1 != message['sequence']):
                 return False
             stamp = self.clock()
-            if self._elapsed(row, stamp) >= row['max_seconds']:
-                self._finish(tx, row, 'timed_out', unresolved_result(), 'execution_time_limit', stamp)
-                return False
             tx.execute('UPDATE run_executions SET last_sequence=?,heartbeat_at=?,elapsed_seconds=?,segment_started=?,last_seen_wall=? WHERE run_id=?',
                        (message['sequence'], stamp, self._elapsed(row, stamp), stamp, time.time(), row['run_id']))
             if message['type'] != 'heartbeat':
@@ -135,7 +130,7 @@ class RunCoordinator:
 
     def _finish(self, tx, row, execution, result, reason, stamp, clarification=None):
         from app.run_outcomes import root_supported
-        elapsed = min(row['max_seconds'], self._elapsed(row, stamp))
+        elapsed = self._elapsed(row, stamp)
         result = sanitize_payload(result)
         self._close_pending(tx, row['run_id'], reason)
         tx.execute('UPDATE run_executions SET execution_status=?,accepting=0,elapsed_seconds=?,segment_started=NULL,result_json=?,stop_reason=?,clarification_json=? WHERE run_id=?',
@@ -211,7 +206,6 @@ class RunCoordinator:
             for record in tx.execute("SELECT * FROM run_executions WHERE execution_status IN ('queued','running')").fetchall():
                 row = dict(record)
                 reason = ('queue_timeout' if row['execution_status'] == 'queued' and stamp - row['queued_since'] >= 30
-                          else 'execution_time_limit' if self._elapsed(row, stamp) >= row['max_seconds']
                           else 'worker_liveness_timeout' if row['execution_status'] == 'running' and stamp - row['heartbeat_at'] >= 15
                           else None)
                 if reason:
@@ -240,7 +234,10 @@ class RunCoordinator:
     def public(self, run_id):
         with self.db.connect() as tx:
             row = self._row(tx, run_id)
-        row['elapsed_seconds'] = min(row['max_seconds'], self._elapsed(row, self.clock()))
+        row['elapsed_seconds'] = self._elapsed(row, self.clock())
+        row['historical_max_seconds'] = row['max_seconds']
+        row['max_seconds'] = None
+        row['budget_mode'] = 'accounting_only'
         row.pop('lease_token', None)
         row.pop('segment_started', None)
         row.pop('process_owners_json', None)

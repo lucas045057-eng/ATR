@@ -336,8 +336,7 @@ def update_budget(business_id: str, budget_id: str, request: BudgetLimits):
     manager = ContextBudgetManager(s.db, s.settings)
     if manager.get(budget_id)["business_id"] != business_id:
         raise KeyError("预算不属于当前业务")
-    manager.update(budget_id, request)
-    return manager.get(budget_id)
+    raise HTTPException(409, "预算仅用于用量记录，不支持设置限制")
 
 
 @router.get("/model/capabilities")

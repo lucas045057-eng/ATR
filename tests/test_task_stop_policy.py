@@ -144,7 +144,7 @@ def test_two_no_progress_rounds_continue_only_for_active_hypothesis_high_value_c
     assert result["high_value_action_ids"] == ["api-config"]
 
 
-def test_soft_limit_allows_one_high_value_last_step_then_stops():
+def test_legacy_soft_limits_do_not_remove_useful_checks():
     obj = objective("root_cause_investigation", [API, DB])
     plan = build_investigation_plan(obj, [action("api-status", "container.status"),
                                           action("api-logs", "container.logs")])
@@ -159,10 +159,10 @@ def test_soft_limit_allows_one_high_value_last_step_then_stops():
                          tool_calls=3, active_hypothesis_nodes={"api-node"},
                          soft_limit_final_step_used=True)
     assert allowed["should_stop"] is False
-    assert allowed["soft_limit_final_step"] is True
-    assert allowed["useful_action_ids"] == ["api-config"]
-    assert denied["should_stop"] is True
-    assert denied["stop_reason"] == "task_soft_limit"
+    assert allowed["soft_limit_final_step"] is False
+    assert allowed["useful_action_ids"] == ["api-config", "api-status-extra"]
+    assert denied["should_stop"] is False
+    assert denied["stop_reason"] is None
 
 
 def test_low_value_action_does_not_override_root_cause_finish():
@@ -204,13 +204,13 @@ def test_plan_records_succeeded_and_unavailable_checks_without_repeating_them():
     assert by_type["container.status"]["evidence_ids"] == ["ev-status"]
 
 
-def test_hard_budget_stop_precedes_task_completion_and_soft_limit():
+def test_legacy_budget_stop_does_not_override_supported_evidence():
     obj, plan = plan_for()
     plan = completed_required_plan(obj, plan)
     result = decide_stop(obj, plan, {}, "supported", [], model_calls=10, tool_calls=10,
                          hard_stop_reason="tool_budget_exhausted")
     assert result["should_stop"] is True
-    assert result["stop_reason"] == "tool_budget_exhausted"
+    assert result["stop_reason"] == "evidence_supported"
 
 
 def test_resume_uses_snapshotted_objective_and_soft_limits_not_current_defaults():

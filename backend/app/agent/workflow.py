@@ -234,7 +234,7 @@ def _minimal_planner(settings: Settings, state: InvestigationState, database, bu
         "invent observations. Evidence Gate independently determines support. Schema: "
         + json.dumps(minimal_output_contract(state), separators=(",", ":"))
     )
-    input_limit = ContextBudgetManager(database, settings).get(budget_id)["limits"]["max_input_tokens"]
+    input_limit = ContextBudgetManager(database, settings).input_capacity()
     result = call_json(
         database, settings, budget_id, system_prompt,
         _compact_model_context(system_prompt, context, input_limit),
@@ -299,7 +299,7 @@ def _planner(settings: Settings, state: InvestigationState, database=None, budge
              "previous_hypotheses": [compact_hypothesis(h) for h in state.get("previous_hypotheses", [])[:3]],
              "hypothesis_history": [compact_hypothesis(h) for h in state.get("hypothesis_history", [])[-4:]],
              "scope_requests": state.get("scope_requests", [])[:4]}
-        input_limit = ContextBudgetManager(database, settings).get(budget_id)["limits"]["max_input_tokens"]
+        input_limit = ContextBudgetManager(database, settings).input_capacity()
         data = call_json(database, settings, budget_id, system_prompt,
             _compact_model_context(system_prompt, context, input_limit),
             validate=lambda value: validate_report(value, state))

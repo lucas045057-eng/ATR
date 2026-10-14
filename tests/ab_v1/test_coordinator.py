@@ -82,16 +82,21 @@ def test_queue_timeout_is_terminal_without_consuming_worker(coordinator):
     assert c.claim('r0') is None
 
 
-def test_hard_deadline_survives_heartbeats(coordinator):
+def test_elapsed_time_survives_legacy_total_budget_without_timeout(coordinator):
     c, ticks = coordinator
     enlist(c)
     lease = c.claim('r0')
     ticks[0] += 599
     assert c.accept(message(lease, 1))
     ticks[0] += 1
+    assert c.accept(message(lease, 2))
     c.tick(ticks[0])
-    assert c.public('r0')['execution_status'] == 'timed_out'
+    assert c.public('r0')['execution_status'] == 'running'
     assert c.public('r0')['elapsed_seconds'] == 600
+    ticks[0] += 10
+    assert c.accept(message(lease, 3))
+    assert c.public('r0')['elapsed_seconds'] == 610
+    assert c.public('r0')['max_seconds'] is None
 
 
 def test_execution_and_diagnosis_are_orthogonal(coordinator):

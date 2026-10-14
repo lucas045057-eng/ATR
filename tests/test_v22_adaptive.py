@@ -134,13 +134,6 @@ def test_adaptive_mode_pivots_to_dependency_and_keeps_refuted_history(client, mo
 
     contexts = model_stub(monkeypatch, reply)
     result = investigate(client, profile, mode="graph_adaptive")
-    if input_limit == 12000:
-        assert result["status"] == "unresolved"
-        assert result["summary"]["model_error"]["budget_reason"] == "request_input_limit"
-        assert len(contexts) == result["context_budget"]["calls"] == 2
-        assert len(result["tool_calls"]) == 4
-        assert any(h["status"] == "refuted" and h["counter_evidence"] for h in result["summary"]["hypothesis_history"])
-        return
     assert result["status"] == "supported"
     calls = result["tool_calls"]
     assert [(c["tool_id"], json.loads(c["args_redacted_json"])["name"]) for c in calls] == [
@@ -217,27 +210,26 @@ def test_multiple_source_contexts_remain_distinct_and_static_cannot_support(clie
     assert all(u["status"] == "succeeded" for u in result["context_budget"]["usage_records"])
 
 
-@pytest.mark.parametrize("limit,stop", [(1, "tool_budget_exhausted"), (2, "tool_budget_exhausted")])
-def test_tool_budget_limits_seed_and_never_starts_model(client, monkeypatch, limit, stop):
+@pytest.mark.parametrize("limit", [1, 2])
+def test_legacy_tool_budget_does_not_prevent_model(client, monkeypatch, limit):
     profile = prepared_profile(client, monkeypatch)
     contexts = model_stub(monkeypatch, lambda context, n: report())
     get_settings().investigation_tool_calls = limit
     result = investigate(client, profile)
     assert result["status"] == "unresolved"
-    assert result["summary"]["stop_reason"] == stop
-    assert len(result["tool_calls"]) == limit
-    assert result["context_budget"]["tool_calls"] == limit
-    assert contexts == []
+    assert result["summary"]["stop_reason"] != "tool_budget_exhausted"
+    assert result["context_budget"]["calls"] > 0 and contexts
+    assert result["context_budget"]["tool_calls"] == len(result["tool_calls"])
 
 
-def test_round_limit_does_not_execute_unreviewed_followup(client, monkeypatch):
+def test_legacy_round_limit_does_not_prevent_authorized_followup(client, monkeypatch):
     profile = prepared_profile(client, monkeypatch)
     model_stub(monkeypatch, lambda context, n: report(action=proposal(candidate(context, "config.list"))))
     get_settings().investigation_model_rounds = 1
     result = investigate(client, profile)
-    assert result["summary"]["stop_reason"] == "round_limit"
-    assert len(result["tool_calls"]) == 2
-    assert result["context_budget"]["calls"] == 1
+    assert result["summary"]["stop_reason"] != "round_limit"
+    assert len(result["tool_calls"]) > 2
+    assert result["context_budget"]["calls"] > 1
 
 
 def test_unknown_action_id_and_injected_arguments_never_execute(client, monkeypatch):

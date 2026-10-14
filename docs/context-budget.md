@@ -1,62 +1,13 @@
-# Context Budget Manager
+# 模型与工具用量记录
 
-## 默认与配置
+2026-10-14 按用户最新要求，预算为只读记录，不实施预算保护或额度限制。本变更覆盖初始理解、媒体理解、原生 A+B 调查及历史调查恢复。旧方案中的预算拦截验收由本要求取代，不记作已通过。
 
-预算在 Python 工具/模型层执行，不是仅写入 Prompt。SQLite 中每个初始理解/调查预算保存限额、已用量、原子预留和停止原因。
+SQLite 持续保存每次模型请求、输入与输出、工具次数、检索字节、耗时和未完成请求的预估占用。调用不会因累计 Token、次数、检索量、总时长、目标累计调用次数或供应商 usage 高于预估而被拒绝。任务由证据完成、缺少有效授权动作、没有进展、真实错误、人工取消或等待范围确认结束。
 
-| 参数 | 默认 | .env 配置 |
-|---|---|---|
-| 初始理解每请求输入 | 8,000 | INITIAL_INPUT_TOKENS |
-| 调查每请求输入 | 12,000 | INVESTIGATION_INPUT_TOKENS |
-| 初始理解最大模型调用 | 6 | INITIAL_MODEL_CALLS |
-| 调查最大模型轮数/调用 | 8 | INVESTIGATION_MODEL_ROUNDS |
-| 调查最大工具次数 | 20 | INVESTIGATION_TOOL_CALLS |
-| 单预算总输入+输出 | 100,000 | BUDGET_TOTAL_TOKENS |
-| 单请求最大输出 | 1,500 | MODEL_MAX_OUTPUT_TOKENS |
-| 模型声明窗口 | 32,768 | MODEL_CONTEXT_WINDOW |
-| 源码检索条目 | 20 | CODE_SEARCH_LIMIT（请求值也受其约束） |
-| 单预算检索字节 | 500,000 | 通过预算 limits 修改 |
+`ContextBudgetManager` 保留旧限额快照供历史查阅，但 `GET /api/v1/businesses/{id}/budgets` 返回 `mode=accounting_only`、`enforcement_enabled=false`，当前 `stop_reason=null`。原先的停止记录通过 `historical_stop_reason` 展示，数据库历史值不清除。预算编辑入口已移除；原 PUT 接口返回 409，说明预算只用于记录，不能配置限制。重新分析与恢复继续累计原有用量。
 
-业务创建产生初始预算，模型理解复用最新初始预算及历史用量。每个调查产生独立预算。页面可修改业务已有预算；修改不会归零 calls/tokens/tools/bytes。初始理解停止后，提高预算再点击分析可继续；已经结束的调查不能从任意步骤自动断点续跑，需要新调查。
+供应商返回有效 usage 时采用实际整数计数；缺少 usage 或请求中断时明确标为估算。未配置输入与输出单价时费用为 `null/unknown`；配置单价后为 `estimate_configured_rates`，仍不是供应商账单。预估与实际数量可以不同，结算仍原子执行且拒绝重复结算。重启保留历史用量，中断请求单独记录。
 
-`.env` 的默认值在创建预算时写入数据库。修改 `INVESTIGATION_INPUT_TOKENS` 并重新加载后端配置只影响之后新建的 Run；Docker 环境需重新创建 API 容器。已处于范围审核等待状态的 Run 可以在审核有效映射后恢复，继续原预算、原 SSH 目标，不重置用量。
+单次网络请求超时、模型声明的上下文容量、输出大小、资料格式与解析边界、服务器授权和只读策略仍是实际运行能力与权限边界。上下文选择使用模型容量，不再使用旧预算输入额度；省略的源码实现仍明确标为未知。原生调查没有 600 秒总预算截止，但保留工作进程心跳、排队容量与人工取消机制。
 
-API：GET `/api/v1/businesses/{id}/budgets`，PUT `/api/v1/businesses/{id}/budgets/{budget_id}`。PUT 为 BudgetLimits 完整 JSON，例如：
-
-```json
-{
-  "max_input_tokens": 8000,
-  "max_calls": 6,
-  "max_total_tokens": 100000,
-  "max_tools": 20,
-  "max_retrieved_bytes": 500000
-}
-```
-
-## 调用前与结算
-
-请求前估算采用 UTF-8 字节数加每条消息 framing 余量与固定余量，是偏保守的 token 预算代理，不是精确 tokenizer 计费。加上最大输出预留，原子检查单输入、声明窗口、调用次数、总 token，失败则不进入 LiteLLM。工具/检索字节也在下一次动作前校验，超限保留已完成解析、证据和原因。
-
-供应商返回 prompt_tokens/completion_tokens 时记录 actual；缺少 usage 时记录 estimate，失败可能已收费因此保留保守估算。模型名、每次输入/输出、累计量、检索字节、calls、tools、stop_reason 均持久化。若实际 usage 高于预留，标记 provider_usage_exceeded_reservation 并阻止后续请求，直到操作者调整预算。不同供应商 token/额外计费方式仍须真实适配验证，不能用当前估算承诺精确账单。
-
-费用默认 null/unknown。仅当 MODEL_INPUT_COST_PER_MILLION 与 MODEL_OUTPUT_COST_PER_MILLION 均配置时按其计算，cost_kind=estimate_configured_rates，即使 token actual 也不是供应商账单金额。配置单位是每百万 token 的费用，币种由操作者确定；本版不抓取价格、不硬编码即时费率。
-
-无自动模型重试；无效 JSON/超时也记录结算。后端重启使 pending 记录 interrupted 并估算结算，不能以重启释放已可能消费的预算。
-
-## 上下文选择
-
-`estimate_model_input` 是内容的 UTF-8 字节数加每条消息 128 和固定 256 的保守估算，并非供应商 Token 计数。预算拒绝保留 `budget_reason`、`estimated_input_tokens`、`input_limit` 安全诊断，不创建已发送请求记录；已发送请求保留预检查估算，结算 usage 仍单独采用供应商实际整数计数。
-
-调查先去除与当前假设完全相同的历史摘要，模型侧省略重复权限标志和历史动作哈希；原始动作及权限校验仍保留。随后按上限压缩日志预览，证据编号、反证和结构化状态不变，完整证据仍在数据库。若最小上下文仍超限，停止请求，不自动提高上限或重试。
-
-初始理解最多选服务 25、模块 25、接口 20、已完成索引 40，优先配置/源码元数据。按预算逐项移除索引及较低优先摘要，保持完整 JSON，不截断序列化正文。始终不提供初次源码全文。
-
-调查使用当前已审核画像、选定服务链路、至多 40 节点/边摘要、有限当前观测、短日志尾部、少量相关 Pattern 与局部代码。代码通过业务限定的 search/context 工具读取，记录 file_id/digest/version/行号和预算字节。全部历史日志、原配置、旧故障记录不默认输入。
-
-大量无关文件只扩大有界本地清单，不无限扩大模型上下文。静态 AST/哈希/树/配置解析不消耗模型 calls。超低预算仍可能无法容纳最小请求，明确停止，不以脱离预算的旁路完成。
-
-## 能力与离线
-
-GET `/api/v1/model/capabilities` 返回配置声明、JSON、text、vision_declared、vision_adapter=pending、context_window、usage 策略与模型名。没有声称在线能力探测。未启用外部分析、无模型/key、不支持 JSON、返回无效结构均保留静态画像并标 pending；图片能力声明不会伪造图片结果。
-
-测试验证低预算零调用、增额恢复、原子预留、实际 usage 与估算区别、工具/字节限制、初始请求无源码正文。模型响应由测试 stub 提供，未在本机验证真实供应商计费或 usage 格式。
+本次验收直接调用原有 Docker 部署及其原模型，保留首次失败和复验记录，不启动独立测试服务，不注入虚拟供应商 usage。历史隔离测试文件随行为调整而修改，但不把未执行的测试记作通过。
