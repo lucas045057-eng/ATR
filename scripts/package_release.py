@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import subprocess
 import tarfile
@@ -75,6 +76,14 @@ def sha(path):
     return value.hexdigest()
 
 
+def collect_notices(docker, container, directory, name, destination):
+    raw = command([*docker, 'exec', container, 'tar', '-cf', '-', '-C', directory, name])
+    with tarfile.open(fileobj=io.BytesIO(raw), mode='r:') as source, tarfile.open(destination, 'w:gz') as target:
+        for member in source:
+            if member.isfile():
+                target.addfile(member, source.extractfile(member))
+
+
 def package(repo: Path, output: Path, context: str, api_sha: str, web_sha: str):
     repo = repo.resolve(strict=True)
     output = output.resolve()
@@ -123,13 +132,13 @@ def package(repo: Path, output: Path, context: str, api_sha: str, web_sha: str):
         (root/'compose.images.yaml').write_text('services:\n'+''.join(f"  {service}:\n    image: {image['tag']}\n    pull_policy: never\n" for service,image in images.items()),encoding='ascii')
         notices = root/'runtime-notices'
         notices.mkdir()
-        command([*docker, 'cp', 'atr-runtime-api-1:/usr/share/doc', str(notices/'debian')])
+        collect_notices(docker, 'atr-runtime-api-1', '/usr/share', 'doc', notices/'debian.tar.gz')
         command([*docker, 'cp', 'atr-runtime-api-1:/usr/local/lib/python3.12/LICENSE.txt', str(notices/'python-LICENSE.txt')])
         command([*docker, 'cp', 'atr-runtime-api-1:/app/third_party/licenses/node/LICENSE', str(notices/'node-LICENSE.txt')])
-        command([*docker, 'cp', 'atr-runtime-web-1:/usr/share/licenses', str(notices/'alpine')])
-        command([*docker, 'cp', 'atr-runtime-web-1:/usr/share/doc', str(notices/'nginx-docs')])
-        # Package only regular upstream notices; do not follow OS documentation symlinks.
-        files = sorted(path for path in root.rglob('*') if path.is_file() and not path.is_symlink())
+        collect_notices(docker, 'atr-runtime-web-1', '/usr/share', 'licenses', notices/'alpine.tar.gz')
+        collect_notices(docker, 'atr-runtime-web-1', '/usr/share', 'doc', notices/'nginx-docs.tar.gz')
+        # Keep Linux notice files in portable archives, excluding symlinks.
+        files = sorted(path for path in root.rglob('*') if not path.is_symlink() and path.is_file())
         (root/'SHA256SUMS').write_text(''.join(sha(path)+'  '+path.relative_to(root).as_posix()+'\n' for path in files),encoding='utf-8')
         files.append(root/'SHA256SUMS')
         manifest = {'schema_version':'atr-docker-offline-1','acceptance_status':'INCOMPLETE_PREVIEW',
