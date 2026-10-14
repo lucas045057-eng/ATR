@@ -34,7 +34,7 @@ def test_browser_discovery_review_and_same_run_resume(live_server, fake_model): 
         errors = []
         page.on("pageerror", lambda e: errors.append(str(e)))
         page.on("dialog", lambda d: d.accept("人工核验隔离服务身份及授权范围"))
-        page.get_by_role("button", name="故障调查", exact=False).first.click()
+        page.get_by_role("button", name="排查故障", exact=False).first.click()
         page.locator(".incident-row").first.click()
         page.get_by_role("button", name="开始只读调查", exact=False).click()
         expect(page.get_by_role("heading", name="自主发现与范围建议")).to_be_visible(timeout=30000)
@@ -48,7 +48,7 @@ def test_browser_discovery_review_and_same_run_resume(live_server, fake_model): 
         row = page.locator(".business-row").filter(has_text="catalog-api → catalog-api.service")
         row.get_by_role("button", name="确认", exact=True).click()
         expect(row.get_by_role("button", name="确认", exact=True)).to_have_count(0, timeout=10000)
-        page.get_by_role("button", name="故障调查", exact=False).first.click()
+        page.get_by_role("button", name="排查故障", exact=False).first.click()
         page.get_by_role("button", name="审核后继续调查", exact=True).click()
         expect(page.get_by_text("Agent 阶段：", exact=False)).to_contain_text("已完成", timeout=30000)
         expect(page.get_by_text("尚未建立根因", exact=True)).to_be_visible()
@@ -64,7 +64,7 @@ def test_browser_optional_attachment_undo_and_process_groups(live_server):  # no
         profile = onboard(api, {"favicon.png": PNG, "architecture.png": PNG})
     with sync_playwright() as p:
         browser, page = browser_page(p, base, token)
-        page.get_by_role("button", name="业务档案", exact=False).first.click()
+        page.get_by_role("button", name="业务概览", exact=False).first.click()
         page.get_by_label("选择业务").select_option(profile["business_id"])
         page.locator("summary").filter(has_text="查看文件清单").click()
         expect(page.get_by_text("可选静态附件 1 个", exact=False)).to_be_visible()

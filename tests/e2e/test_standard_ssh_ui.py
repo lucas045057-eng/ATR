@@ -28,7 +28,7 @@ def test_execution_and_auth_choices_and_docker_default(live_server, ssh_server_e
         submitted = []
         page.on("request", lambda r: submitted.append((r.url, r.post_data or "")))
         page.goto(base)
-        page.get_by_role("button", name="服务器范围", exact=False).click()
+        page.get_by_role("button", name="服务器与服务", exact=False).click()
         page.get_by_label("连接方式").select_option("ssh")
         expect(page.get_by_label("已授权受限的 Docker", exact=False)).to_be_checked()
         for mode, auth in (("standard_ssh_readonly", "private_key"), ("standard_ssh_readonly", "password"),

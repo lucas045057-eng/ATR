@@ -204,7 +204,7 @@ export function BusinessPages({
     <>
       <div className="page-heading">
         <div>
-          <span className="eyebrow">ATR V2.1</span>
+          <span className="eyebrow">业务资料</span>
           <h1>
             {page === "onboarding"
               ? "导入业务资料"

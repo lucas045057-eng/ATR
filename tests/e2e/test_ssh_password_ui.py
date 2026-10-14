@@ -29,7 +29,7 @@ def test_password_form_has_no_browser_persistence(live_server, ssh_server_enable
         submitted = []
         page.on("request", lambda r: submitted.append((r.url, r.post_data or "")))
         page.goto(base)
-        page.get_by_role("button", name="服务器范围", exact=False).click()
+        page.get_by_role("button", name="服务器与服务", exact=False).click()
         page.get_by_label("连接方式").select_option("ssh")
         page.get_by_label("认证方式").select_option("password")
         expect(page.get_by_label("凭据引用", exact=True)).to_have_count(0)
@@ -55,7 +55,7 @@ def test_password_form_has_no_browser_persistence(live_server, ssh_server_enable
         expect(page.get_by_label("重新提供 SSH 密码")).to_have_value("")
         page.screenshot(path=str(directory / "ssh-password.png"))
         page.reload()
-        page.get_by_role("button", name="服务器范围", exact=False).click()
+        page.get_by_role("button", name="服务器与服务", exact=False).click()
         expect(page.get_by_text("密码会话有效至", exact=False)).to_be_visible()
         expect(page.get_by_label("重新提供 SSH 密码")).to_have_value("")
         assert password not in page.evaluate("JSON.stringify({local: {...localStorage},session: {...sessionStorage}})")
