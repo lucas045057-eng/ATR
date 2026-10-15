@@ -14,6 +14,7 @@ from app.agent.workflow import build_workflow
 from app.api.dependencies import require_operator
 from app.domain import (
     ClarificationAnswer,
+    ConflictReviewRequest,
     EvaluationCaseCreate,
     EvaluationPairCreate,
     EvaluationTrialCreate,
@@ -1032,7 +1033,7 @@ def review_pattern(pattern_id: str, request: ReviewRequest, actor: str = Depends
 
 
 @router.post("/conflicts/{conflict_id}/review")
-def review_conflict(conflict_id: str, request: ReviewRequest,
+def review_conflict(conflict_id: str, request: ConflictReviewRequest,
                     actor: str = Depends(require_operator)) -> dict[str, Any]:
     connection = db().connect()
     try:

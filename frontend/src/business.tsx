@@ -182,8 +182,9 @@ export function BusinessPages({
     decision = "approve",
     role?: string,
   ) => {
-    const reason = window.prompt("请填写核验依据或否决原因（至少 5 个字）");
-    if (!reason || !profile) return;
+    if (!profile) return;
+    const reason = decision === "resolve_conflict" ? window.prompt("填写实际核验结果，解释这条冲突") : "";
+    if (reason === null || (decision === "resolve_conflict" && !reason.trim())) return;
     await act(() =>
       api(base + "/review", {
         method: "POST",
@@ -803,9 +804,6 @@ export function BusinessPages({
                           connector === "mock"
                             ? "mock"
                             : executionMode === "standard_ssh_readonly" ? "client_readonly" : "forced_command_gateway",
-                        boundary_attestation: String(
-                          f.get("attestation") || "",
-                        ),
                         docker_reads_enabled: f.get("docker") === "on",
                         docker_reader: connector === "ssh" && executionMode === "standard_ssh_readonly" ? (f.get("docker_reader") || "direct_cli") : "direct_cli",
                         mock_scenario: f.get("scenario") || "mixed",
@@ -842,9 +840,7 @@ export function BusinessPages({
                       <select value={executionMode} onChange={(e) => {
                         setExecutionMode(e.target.value);
                         const form = e.currentTarget.form;
-                        const declaration = form?.elements.namedItem("attestation") as HTMLTextAreaElement | null;
                         const authorized = form?.elements.namedItem("authorized") as HTMLInputElement | null;
-                        if (declaration) declaration.value = "";
                         if (authorized) authorized.checked = false;
                       }}>
                         <option value="standard_ssh_readonly">普通 SSH 只读兼容（无需安装网关）</option>
@@ -902,25 +898,14 @@ export function BusinessPages({
                         placeholder="ssh-ed25519 AAAA…（公钥）"
                       />
                     </label>
-                    <label>
-                      权限边界确认
-                      <textarea
-                        name="attestation"
-                        required
-                        minLength={10}
-                        placeholder={executionMode === "standard_ssh_readonly"
-                          ? "确认低权限账号、主机和资料授权范围，并理解客户端只读限制及 AI 调查权限"
-                          : "确认受限账号、强制只读入口和禁用转发已由服务器所有者配置"}
-                      />
-                    </label>
                     <label className="check-label">
                       <input name="authorized" type="checkbox" required />{" "}
                       已授权访问这台测试服务器
                     </label>
-                    <div className="split-input">
-                      <label>单次超时（秒）<input name="timeout_seconds" type="number" min={1} max={60} defaultValue={10} required /></label>
-                    </div>
-                    <label>输出大小上限（字节）<input name="max_output_bytes" type="number" min={1024} max={64000} defaultValue={48000} required /></label>
+                    <details><summary>连接高级设置</summary>
+                      <label>单次超时（秒）<input name="timeout_seconds" type="number" min={1} max={60} defaultValue={10} /></label>
+                      <label>输出大小上限（字节）<input name="max_output_bytes" type="number" min={1024} max={64000} defaultValue={48000} /></label>
+                    </details>
                     <small>允许 ATR 已注册的只读工具；服务、资料目录和容器仍受授权范围限制，Docker 只读默认勾选，可关闭。</small>
                   </>
                 ) : (
@@ -1181,7 +1166,6 @@ function InvestigationDefaults({defaults, target, bindings, busy, onSave}: {defa
 
 function BindingAuthorization({binding:b,busy,onReview,onUpgrade,onRevoke}: {binding:Row;busy:boolean;onReview:(value:Row)=>Promise<void>;onUpgrade:(value:Row)=>Promise<void>;onRevoke:(reason:string)=>Promise<void>}) {
   const [stable,setStable] = useState(false);
-  const [reason,setReason] = useState('');
   const candidate = b.source?.candidate;
   const supportsStable = b.kind === 'service' || (b.kind === 'container' && Boolean(candidate?.image?.trim()) && Array.isArray(candidate?.ports) && Array.isArray(candidate?.environment_keys));
   const auth = b.authorization;
@@ -1192,16 +1176,15 @@ function BindingAuthorization({binding:b,busy,onReview,onUpgrade,onRevoke}: {bin
       <p>持久授权：{valid ? '有效' : auth?.revoked_at ? '已撤销' : auth ? '已失效' : '尚未授权'}{auth && ` · ${auth.identity_mode === 'stable_object' ? '稳定业务对象' : '精确实例'} · 授权 ${auth.grant_id}`}</p>
       <p>当前运行证据：{current ? '观测身份当前有效' : '需在本轮发现后重新核验'}。运行证据过期与持久授权分别判断。</p>
       {b.kind === 'container' && !supportsStable && <small>候选缺少完整镜像、端口或环境键字段，只能精确实例授权；未采集的字段不会按空集合处理。</small>}
-      {auth && <details><summary>授权依据与身份规则</summary><p>{auth.confirmed_by} · {auth.confirmed_at}{auth.revoked_at && ` · ${auth.revoked_by} 于 ${auth.revoked_at} 撤销`}</p><pre className="code-preview">{JSON.stringify(auth.rule,null,2)}</pre></details>}
-      {!!b.authorization_history?.length && <details><summary>授权审核历史（{b.authorization_history.length} 项）</summary>{b.authorization_history.map((item:Row,i:number)=><p key={i}>{({confirm:'确认授权',reject:'拒绝',revoke:'撤销授权',upgrade:'升级身份规则'} as Row)[item.decision] || item.decision} · {item.reason} · {item.actor} · {item.created_at}</p>)}</details>}
-      {(b.status === 'pending' || (valid && current && supportsStable && auth?.identity_mode === 'exact_instance')) && <form className="form" onSubmit={event=>{event.preventDefault();void (valid ? onUpgrade({identity_mode:'stable_object',reason}) : onReview({decision:'confirm',identity_mode:stable?'stable_object':'exact_instance',reason}))}}>
+      {auth && <details><summary>授权记录与身份规则</summary><p>{auth.confirmed_by} · {auth.confirmed_at}{auth.revoked_at && ` · ${auth.revoked_by} 于 ${auth.revoked_at} 撤销`}</p><pre className="code-preview">{JSON.stringify(auth.rule,null,2)}</pre></details>}
+      {!!b.authorization_history?.length && <details><summary>授权审核历史（{b.authorization_history.length} 项）</summary>{b.authorization_history.map((item:Row,i:number)=><p key={i}>{({confirm:'确认授权',reject:'拒绝',revoke:'撤销授权',upgrade:'升级身份规则',approve_rule:'升级身份规则'} as Row)[item.decision] || item.decision} · {item.reason && `${item.reason} · `}{item.actor} · {item.created_at}</p>)}</details>}
+      {(b.status === 'pending' || (valid && current && supportsStable && auth?.identity_mode === 'exact_instance')) && <form className="form" onSubmit={event=>{event.preventDefault();void (valid ? onUpgrade({identity_mode:'stable_object'}) : onReview({decision:'confirm',identity_mode:stable?'stable_object':'exact_instance'}))}}>
         {supportsStable && <label><input type="checkbox" checked={stable} onChange={event=>setStable(event.target.checked)}/>{b.kind === 'container' ? '明确允许同一目标上的稳定容器：实际采集的名称、镜像、端口与环境键必须相同，容器 CID 可变化。' : '明确允许同一目标上的稳定 systemd 服务：单元 ID 与名称必须相同。'}</label>}
         {b.kind === 'process' && <small>普通进程只授权精确 PID 与启动身份，重启后需重新审核。</small>}
-        <label>授权依据<input required minLength={5} maxLength={2000} value={reason} onChange={event=>setReason(event.target.value)}/></label>
         <button className="btn small" disabled={busy||(valid&&!stable)}>{valid ? '明确升级为稳定对象授权' : '确认授权'}</button>
-        {!valid && <button className="btn small danger-outline" type="button" disabled={busy} onClick={()=>void onReview({decision:'reject',reason:reason||'人工判断不属于当前业务范围'})}>拒绝</button>}
+        {!valid && <button className="btn small danger-outline" type="button" disabled={busy} onClick={()=>void onReview({decision:'reject'})}>拒绝</button>}
       </form>}
-      {valid && <button className="btn small danger-outline" onClick={()=>{const value=window.prompt('撤销此对象的持久授权（调查进行中也可撤销），请填写原因（至少 5 个字）');if(value&&value.trim().length>=5)void onRevoke(value)}}>撤销授权</button>}
+      {valid && <button className="btn small danger-outline" disabled={busy} onClick={()=>{if(window.confirm('撤销此对象的持久授权？正在进行的调查也会失去对此对象的访问权限。'))void onRevoke('')}}>撤销授权</button>}
     </div>{mark(b.status)}
   </div>;
 }

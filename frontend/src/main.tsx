@@ -203,9 +203,7 @@ function App() {
   })
 
   const reviewPattern = (patternId: string, decision: 'approve' | 'reject') => void act(async () => {
-    const reason = window.prompt(decision === 'approve' ? '写下审核依据（包括复核过的适用范围）' : '写下拒绝原因', '')
-    if (!reason) return
-    await api(`/patterns/${patternId}/review`, { method: 'POST', body: JSON.stringify({ decision, reason }) })
+    await api(`/patterns/${patternId}/review`, { method: 'POST', body: JSON.stringify({ decision }) })
     setNotice(decision === 'approve' ? '排障经验已审核，可作为后续检查建议。' : '排障经验已否决。')
   })
 

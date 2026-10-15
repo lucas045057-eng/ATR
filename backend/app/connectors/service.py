@@ -27,9 +27,8 @@ class RuntimeService:
             or (request.auth_mode == "private_key" and not request.credential_ref)
             or request.permission_boundary != (
                 "client_readonly" if request.execution_mode == "standard_ssh_readonly" else "forced_command_gateway")
-            or len(request.boundary_attestation) < 10
         ):
-            raise PermissionError("SSH 需显式启用、授权、凭据引用、已确认主机公钥与受限账号声明")
+            raise PermissionError("SSH 需显式启用、授权、凭据引用、已确认主机公钥与匹配的只读执行模式")
         if request.auth_mode == "password" and request.credential_ref:
             raise PermissionError("密码凭据只能通过当前服务器的会话接口提供")
         target_id = uid()
@@ -64,8 +63,8 @@ class RuntimeService:
         if config.get("username", "").casefold() == "root":
             return {"eligible": False, "status": "invalid", "reason": "禁止使用 root 账号执行调查"}
         expected = "client_readonly" if config.get("execution_mode") == "standard_ssh_readonly" else "forced_command_gateway"
-        if config.get("permission_boundary") != expected or len(config.get("boundary_attestation", "")) < 10:
-            return {"eligible": False, "status": "invalid", "reason": "SSH 只读权限边界声明无效"}
+        if config.get("permission_boundary") != expected:
+            return {"eligible": False, "status": "invalid", "reason": "SSH 执行模式与只读边界不匹配"}
         credential_state = config.get("credential_status")
         if isinstance(credential_state, dict):
             credential_state = credential_state.get("state")
@@ -81,8 +80,7 @@ class RuntimeService:
                 or config.get("auth_mode") != "password" or config["username"].casefold() == "root"
                 or not config["access_authorized"]
                 or config["permission_boundary"] != (
-                    "client_readonly" if config.get("execution_mode") == "standard_ssh_readonly" else "forced_command_gateway")
-                or len(config["boundary_attestation"]) < 10):
+                    "client_readonly" if config.get("execution_mode") == "standard_ssh_readonly" else "forced_command_gateway")):
             raise PermissionError("此环境未授权使用 SSH 密码连接")
         try:
             with self.db.transaction() as tx:

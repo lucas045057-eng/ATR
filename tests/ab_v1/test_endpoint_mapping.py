@@ -33,7 +33,7 @@ def test_reviewed_runtime_configuration_produces_frozen_directed_endpoint_mappin
     assert 'REDACTED' not in dumps(candidates) and 'DB_PASSWORD' not in dumps(candidates)
     relation=next(row for row in profile['dependencies'] if row['relation']=='depends_on')
     payload={'expected_version':profile['profile_version'],'dependency_fact_id':relation['fact_id'],
-             'candidate_id':candidate['candidate_id'],'reason':'核对当前消费者配置与数据库运行对象'}
+             'candidate_id':candidate['candidate_id']}
     wrong=target(client,profile)
     assert client.post(base+f"/targets/{wrong['id']}/endpoint-mappings",json=payload).status_code==422
     saved=client.post(base+f"/targets/{runtime['id']}/endpoint-mappings",json=payload)

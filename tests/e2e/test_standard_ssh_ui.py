@@ -41,7 +41,7 @@ def test_execution_and_auth_choices_and_docker_default(live_server, ssh_server_e
             page.get_by_label("已核对的主机公钥").fill(f"{key.get_name()} {key.get_base64()}")
             if mode == "standard_ssh_readonly":
                 expect(page.get_by_text("允许 AI 调用已授权只读工具", exact=False).first).to_be_visible()
-            page.get_by_label("权限边界确认").fill("已核对合成账号和授权范围，并理解客户端权限边界")
+            expect(page.locator('[name="attestation"]')).to_have_count(0)
             page.get_by_label("已授权访问这台测试服务器").check()
             if auth == "password":
                 expect(page.get_by_label("凭据引用", exact=True)).to_have_count(0)
@@ -57,8 +57,9 @@ def test_execution_and_auth_choices_and_docker_default(live_server, ssh_server_e
         assert len(secret_requests) == 2 and all(url.endswith("/credential") for url, _ in secret_requests)
         target_requests = [json.loads(body) for url, body in submitted if url.endswith("/targets") and body]
         assert len(target_requests) == 4 and all(t["docker_reads_enabled"] is True for t in target_requests)
+        assert all('boundary_attestation' not in t and t['access_authorized'] for t in target_requests)
         page.get_by_label("SSH 执行方式").select_option("standard_ssh_readonly")
-        expect(page.get_by_label("权限边界确认")).to_have_value("")
+        expect(page.locator('[name="attestation"]')).to_have_count(0)
         expect(page.get_by_label("已授权访问这台测试服务器")).not_to_be_checked()
         page.evaluate("window.scrollTo(0,0)")
         page.screenshot(path=str(directory / "standard-ssh-modes.png"), full_page=True)

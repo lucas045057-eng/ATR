@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from app.domain import StrictModel
 
@@ -58,8 +58,14 @@ class BusinessReview(StrictModel):
     expected_version: int = Field(ge=1)
     subject_id: str = Field(default="profile", max_length=240)
     decision: Literal["approve", "reject", "set_role", "resolve_conflict"]
-    reason: str = Field(min_length=5, max_length=1000)
+    reason: str = Field(default="", max_length=1000)
     role: Literal["application", "proxy", "datastore", "cache", "worker", "unknown"] | None = None
+
+    @model_validator(mode='after')
+    def conflict_explanation(self):
+        if self.decision == 'resolve_conflict' and len(self.reason) < 5:
+            raise ValueError('解释冲突需要填写实际核验结果（至少 5 个字）')
+        return self
 
 
 class CodeSearch(StrictModel):
@@ -89,4 +95,4 @@ class MediaBatchReview(StrictModel):
     file_ids: list[str] = Field(min_length=1, max_length=200)
     action: Literal["optional", "restore"]
     expected_version: int = Field(ge=1)
-    reason: str = Field(default="批量审核明确静态附件分类", min_length=5, max_length=1000)
+    reason: str = Field(default="批量审核明确静态附件分类", max_length=1000)

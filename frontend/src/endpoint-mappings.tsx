@@ -22,12 +22,11 @@ export function EndpointMappings({base,targetId,profile,bindings,refreshKey,onSa
     {!candidates.length&&<p>当前没有完整、有效的配置连接候选。请使用下方的配置读取功能读取明确授权的文件。</p>}
     {!!relations.length&&!!candidates.length&&<form className="form" onSubmit={async event=>{
       event.preventDefault();const form=new FormData(event.currentTarget);setBusy(true);setError('');
-      try{await api(`${base}/targets/${targetId}/endpoint-mappings`,{method:'POST',body:JSON.stringify({expected_version:profile.profile_version,dependency_fact_id:form.get('relationship'),candidate_id:form.get('candidate'),reason:form.get('reason')})});await onSaved();}
+      try{await api(`${base}/targets/${targetId}/endpoint-mappings`,{method:'POST',body:JSON.stringify({expected_version:profile.profile_version,dependency_fact_id:form.get('relationship'),candidate_id:form.get('candidate')})});await onSaved();}
       catch(reason){setError((reason as Error).message);}finally{setBusy(false);}
     }}>
       <label>有方向的依赖<select name="relationship" required>{relations.map((row:Row)=><option key={row.fact_id} value={row.fact_id}>{row.from.replace('service:','')} → {row.to.replace('service:','')}</option>)}</select></label>
       <label>当前配置中的地址<select name="candidate" required>{candidates.map(row=><option key={row.candidate_id} value={row.candidate_id}>{row.endpoint_id} · {row.path} · 行 {row.lines.join('、')}</option>)}</select></label>
-      <label>核对依据<input name="reason" required minLength={5} maxLength={1000}/></label>
       <label><input type="checkbox" required/>我已核对所选配置是当前消费者实际使用的连接配置，地址指向所选依赖。</label>
       <button className="btn" disabled={busy}>确认这条连接关系</button>
     </form>}

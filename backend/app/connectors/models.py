@@ -133,7 +133,7 @@ class EndpointMappingReview(StrictModel):
     expected_version: int = Field(ge=1)
     dependency_fact_id: str = Field(min_length=1,max_length=80)
     candidate_id: str = Field(pattern=r'^[a-f0-9]{64}$')
-    reason: str = Field(min_length=5,max_length=1000)
+    reason: str = Field(default="", max_length=1000)
 
 
 class SSHPassword(StrictModel):
@@ -224,12 +224,12 @@ class ConfigArgs(StrictModel):
 
 class BindingReview(StrictModel):
     decision: Literal["confirm", "reject"]
-    reason: str = Field(min_length=5, max_length=1000)
+    reason: str = Field(default="", max_length=1000)
     identity_mode: Literal['exact_instance', 'stable_object'] = 'exact_instance'
 
 
 class ScopeRevocation(StrictModel):
-    reason: str = Field(min_length=5, max_length=1000)
+    reason: str = Field(default="", max_length=1000)
 
 
 class AuthorizationRuleReview(ScopeRevocation):

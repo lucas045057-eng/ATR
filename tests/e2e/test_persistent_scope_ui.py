@@ -11,6 +11,34 @@ from test_model_isolation import fake_model as loopback_model  # noqa: F401
 from test_runtime import discover, target
 
 
+def test_revoke_authorization_without_written_reason(live_server):  # noqa: F811
+    base, _ = live_server
+    token = 'browser-test-operator-' + 'x' * 40
+    with httpx.Client(base_url=base, headers={'Authorization': 'Bearer ' + token}) as api:
+        profile = onboard(api)
+        runtime = target(api, profile)
+        binding = next(row for row in discover(api, profile, runtime)['matches'] if row['kind'] == 'service')
+        endpoint = f"/api/v1/businesses/{profile['business_id']}"
+        api.post(endpoint + '/bindings/' + binding['id'] + '/review', json={'decision': 'confirm'}).raise_for_status()
+        binding = next(row for row in api.get(endpoint + '/bindings').json() if row['id'] == binding['id'])
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True, channel=os.environ.get('ATR_BROWSER_CHANNEL') or None)
+        context = browser.new_context()
+        context.add_init_script("sessionStorage.setItem('atr_operator_token'," + json.dumps(token) + ')')
+        page = context.new_page()
+        dialogs = []
+        page.on('dialog', lambda dialog: (dialogs.append(dialog.type), dialog.accept()))
+        page.goto(base)
+        page.get_by_role('button', name='服务器与服务', exact=False).click()
+        row = page.get_by_test_id('binding-authorization').filter(has_text=binding['runtime_id'])
+        with page.expect_response(lambda response: response.url.endswith('/revoke')) as revoked:
+            row.get_by_role('button', name='撤销授权', exact=True).click()
+        assert revoked.value.status == 200
+        assert dialogs == ['confirm']
+        expect(row).to_contain_text('持久授权：已撤销')
+        browser.close()
+
+
 def test_authorized_fault_submit_starts_native_run(live_server, fake_model):  # noqa: F811
     assert not os.environ.get('ATR_E2E_BASE_URL'), 'Use dedicated local fixture only'
     base, directory = live_server
@@ -51,11 +79,11 @@ def test_authorized_fault_submit_starts_native_run(live_server, fake_model):  # 
         expect(authorized.get_by_role('checkbox')).not_to_be_checked()
         expect(authorized.get_by_role('button', name='明确升级为稳定对象授权')).to_be_disabled()
         authorized.get_by_role('checkbox').check()
-        authorized.get_by_label('授权依据', exact=True).fill('Explicit isolated stable object scope')
+        expect(authorized.locator('input:not([type="checkbox"])')).to_have_count(0)
         authorized.get_by_role('button', name='明确升级为稳定对象授权').click()
         expect(authorized).to_contain_text('稳定业务对象')
         authorized.locator('summary').filter(has_text='授权审核历史').click()
-        expect(authorized).to_contain_text('Explicit isolated stable object scope')
+        expect(authorized).to_contain_text('升级身份规则')
         page.locator('summary').filter(has_text='日常调查默认设置').click()
         page.get_by_label('默认服务范围', exact=True).select_option(binding['service'])
         page.get_by_label('优先调查服务', exact=True).select_option(binding['service'])
@@ -92,7 +120,7 @@ def test_authorized_fault_submit_starts_native_run(live_server, fake_model):  # 
         unknown = page.get_by_test_id('unknown-object-approval').filter(has_text='unrelated-backup')
         unknown.locator('summary').click()
         unknown.get_by_label('本业务中的名称', exact=True).fill('catalog-backup')
-        unknown.get_by_label('审批依据', exact=True).fill('Explicit fixture backup belongs to isolated Catalog')
+        expect(unknown.locator('input[name="reason"]')).to_have_count(0)
         unknown.get_by_label('我确认此对象属于当前业务，并授权只读检查。', exact=True).check()
         with page.expect_response(lambda response: response.request.method == 'POST' and response.url.endswith('/authorize-object')) as approved_response:
             unknown.get_by_role('button', name='确认此对象授权', exact=True).click()

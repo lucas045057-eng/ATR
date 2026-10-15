@@ -213,9 +213,8 @@ def parse(tool, raw, args):
 class StandardSSHConnector(SSHConnector):
     def check_boundary(self):
         if (self.config.get("execution_mode") != "standard_ssh_readonly"
-                or self.config.get("permission_boundary") != "client_readonly"
-                or len(self.config.get("boundary_attestation", "")) < 10):
-            raise PermissionError("普通 SSH 需明确授权并声明客户端只读边界")
+                or self.config.get("permission_boundary") != "client_readonly"):
+            raise PermissionError("普通 SSH 执行模式与客户端只读边界不匹配")
 
     def read(self, tool, args):
         args = check(self.config, tool, args, self.config.get("_approved", ()))

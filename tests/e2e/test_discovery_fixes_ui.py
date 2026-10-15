@@ -51,7 +51,7 @@ def test_browser_discovery_review_and_same_run_resume(live_server, fake_model): 
         process = page.locator("details").filter(has=page.locator("summary").filter(has_text="进程线索")).last
         assert process.get_attribute("open") is None
         row = page.get_by_test_id("binding-authorization").filter(has_text="catalog-api → catalog-api.service")
-        row.get_by_label("授权依据", exact=True).fill("人工核验隔离服务身份及授权范围")
+        expect(row.locator('input:not([type="checkbox"])')).to_have_count(0)
         row.get_by_role("button", name="确认授权", exact=True).click()
         expect(row).to_contain_text("持久授权：有效", timeout=10000)
         page.get_by_role("button", name="排查故障", exact=False).first.click()

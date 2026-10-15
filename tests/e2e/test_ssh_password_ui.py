@@ -36,7 +36,7 @@ def test_password_form_has_no_browser_persistence(live_server, ssh_server_enable
         page.get_by_label("地址", exact=True).fill("127.0.0.1")
         page.get_by_label("受限用户名").fill("atrreader")
         page.get_by_label("已核对的主机公钥").fill(f"{key.get_name()} {key.get_base64()}")
-        page.get_by_label("权限边界确认").fill("已核对隔离服务器的 ForceCommand 与禁用转发")
+        expect(page.locator('[name="attestation"]')).to_have_count(0)
         page.get_by_label("已授权访问这台测试服务器").check()
         page.get_by_label("SSH 密码", exact=True).fill(password)
         page.get_by_role("button", name="保存环境关联", exact=True).click()

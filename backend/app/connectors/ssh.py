@@ -22,9 +22,8 @@ class SSHConnector:
     def check_boundary(self):
         config = self.config
         if (config.get("execution_mode", "forced_gateway") != "forced_gateway"
-                or config["permission_boundary"] != "forced_command_gateway"
-                or len(config["boundary_attestation"]) < 10):
-            raise PermissionError("需确认服务器已配置受限账号和强制只读采集入口")
+                or config["permission_boundary"] != "forced_command_gateway"):
+            raise PermissionError("SSH 网关执行模式与只读边界不匹配")
 
     def check_session(self):
         if self.config.get("auth_mode", "private_key") == "password":

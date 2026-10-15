@@ -115,7 +115,8 @@ def test_browser_complete_onboarding(live_server):
         page = context.new_page()
         errors = []
         page.on("pageerror", lambda e: errors.append(str(e)))
-        page.on("dialog", lambda d: d.accept("人工核验隔离测试资料与运行对象，允许只读探索"))
+        dialogs = []
+        page.on("dialog", lambda d: (dialogs.append(d.type), d.accept()))
         page.goto(base)
         page.get_by_role("button", name="导入业务资料", exact=False).click()
         page.get_by_label("业务名称", exact=True).fill("浏览器 Catalog")
@@ -125,7 +126,10 @@ def test_browser_complete_onboarding(live_server):
         page.get_by_label("业务资料文件").set_input_files(source)
         page.get_by_role("button", name="上传并建立索引").click()
         expect(page.get_by_text("已处理 5 文件", exact=False)).to_be_visible(timeout=20000)
-        page.get_by_role("button", name="审核并保存档案").click()
+        with page.expect_response(lambda response: response.request.method == 'POST' and response.url.endswith('/review')) as reviewed:
+            page.get_by_role("button", name="审核并保存档案").click()
+        assert reviewed.value.status == 200
+        assert not dialogs
         expect(page.get_by_role("button", name="审核并保存档案")).to_be_enabled(timeout=10000)
         page.get_by_role("button", name="业务概览", exact=False).click()
         expect(page.get_by_role("heading", name="浏览器 Catalog", exact=True)).to_be_visible()
@@ -144,7 +148,7 @@ def test_browser_complete_onboarding(live_server):
         page.get_by_role("button", name="定向轻量发现").click()
         binding = page.get_by_test_id("binding-authorization").filter(has_text="catalog-api.service")
         expect(binding.get_by_role("button", name="确认授权", exact=True)).to_be_visible(timeout=15000)
-        binding.get_by_label("授权依据", exact=True).fill("人工核验隔离服务身份与本业务范围")
+        expect(binding.locator('input:not([type="checkbox"])')).to_have_count(0)
         binding.get_by_role("button", name="确认授权", exact=True).click()
         expect(binding).to_contain_text("持久授权：有效")
         page.get_by_role("button", name="排查故障", exact=False).click()
