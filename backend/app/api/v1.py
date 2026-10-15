@@ -617,7 +617,13 @@ def start_run(incident_id: str, request: InvestigationRunRequest | None = None,
             requested_id = request.target_id if request else None
             eligible = [key for key, state in readiness.items() if state["eligible"]]
             if requested_id is None:
-                if len(rows) == 1 and len(eligible) == 1:
+                from app.system.authorization import defaults
+                configured_target = defaults(conn, business['id'])['target_id']
+                if configured_target:
+                    if configured_target not in configs or not readiness[configured_target]['eligible']:
+                        raise HTTPException(409, '默认 SSH 目标不可用于调查，请检查其授权和会话凭据；不会自动回退')
+                    target_id = configured_target
+                elif len(rows) == 1 and len(eligible) == 1:
                     target_id = eligible[0]
                 elif len(rows) > 1:
                     raise HTTPException(409, "当前业务配置了多个 SSH 目标，请明确选择目标；不可用目标不会自动回退")

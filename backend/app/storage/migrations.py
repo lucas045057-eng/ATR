@@ -120,3 +120,13 @@ def migrate(connection):
     from app.knowledge import refresh_business_ownership
     refresh_business_ownership(connection)
     connection.execute("INSERT OR IGNORE INTO schema_migrations VALUES(27,datetime('now'))")
+    columns = {r[1] for r in connection.execute('PRAGMA table_info(service_bindings)')}
+    for name, definition in {'authorization_json': "TEXT NOT NULL DEFAULT '{}'", 'verified_run_id': 'TEXT'}.items():
+        if name not in columns:
+            connection.execute(f'ALTER TABLE service_bindings ADD COLUMN {name} {definition}')
+    connection.execute('''CREATE TABLE IF NOT EXISTS investigation_defaults(
+        business_id TEXT PRIMARY KEY REFERENCES business_profiles(id),target_id TEXT NOT NULL REFERENCES runtime_targets(id),
+        services_json TEXT NOT NULL,primary_service TEXT,actor TEXT NOT NULL,updated_at TEXT NOT NULL)''')
+    from app.system.authorization import adopt_legacy_grants
+    adopt_legacy_grants(connection)
+    connection.execute("INSERT OR IGNORE INTO schema_migrations VALUES(28,datetime('now'))")

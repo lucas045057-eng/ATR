@@ -39,7 +39,7 @@ class BusinessToolRegistry:
         if action.get("target_id") != self.target_id:
             raise PermissionError("工具目标与 Run 的 SSH 目标不一致")
         with self.db.connect() as connection:
-            run = connection.execute("SELECT target_snapshot_json FROM diagnosis_runs WHERE id=? AND target_id=?",
+            run = connection.execute("SELECT target_snapshot_json,model_config_json FROM diagnosis_runs WHERE id=? AND target_id=?",
                                      (self.run_id, self.target_id)).fetchone()
             binding = connection.execute("SELECT * FROM service_bindings WHERE id=? AND business_id=? AND target_id=?",
                                          (action.get("binding_id"), self.business_id, self.target_id)).fetchone() if action.get("binding_id") else None
@@ -55,6 +55,13 @@ class BusinessToolRegistry:
         snapshot = json.loads(run["target_snapshot_json"] or "{}")
         if authorization_digest(current) != snapshot.get("authorization_digest"):
             raise PermissionError("Run 的 SSH 目标授权或执行配置已变化")
+        configuration = json.loads(run['model_config_json'])
+        if configuration.get('scope_identity_required'):
+            from app.system.authorization import authorization, authorized
+            if tool.startswith(('service.status','service.logs','container.status','container.logs','process.status','config.')) or tool in {'health.get','log.tail'}:
+                if (not binding or binding['verified_run_id'] != self.run_id or not authorized(binding, current)
+                        or configuration.get('scope_grants', {}).get(authorization(binding)['grant_id']) != digest(authorization(binding))):
+                    raise PermissionError('本次调查尚未核验原授权规则与当前运行身份')
         if action.get("binding_id"):
             if not binding or binding["status"] != "confirmed" or not binding_is_current(binding):
                 raise PermissionError("工具映射不属于 Run 的已确认有效 SSH 目标")

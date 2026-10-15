@@ -26,11 +26,11 @@ const validationTypes: Record<string, string> = {
   counterevidence_target_mismatch: '反证必须属于该假设的目标节点；依赖故障请单独建立假设',
 }
 
-function ValidationIssues({ error }: { error: Row }) {
+function ValidationIssues({ error, readonlyFallback = false }: { error: Row; readonlyFallback?: boolean }) {
   if (error.code !== 'model_schema_error' && error.error_category !== 'model_schema_error') return null
   if (!error.validation_errors?.length) return <p>此记录未保存字段级诊断，无法确认具体失败字段。</p>
   return <div data-testid="validation-fields">
-    <p>{error.validation_kind === 'decision' ? '模型决策校验失败' : '格式校验失败'}；已停止后续工具调用。</p>
+    <p>{error.validation_kind === 'decision' ? '模型决策校验失败' : '格式校验失败'}；{readonlyFallback ? '模型决策未执行，Runtime 仅继续原授权的只读检查。' : '已停止后续工具调用。'}</p>
     <ul>{error.validation_errors.map((issue: Row, index: number) => <li key={index}>
       <code>{issue.path}</code>：{validationTypes[issue.type] || '校验失败'}
       {' '}（{issue.type} · {stages[issue.stage] || '结构与引用校验'}）
@@ -39,14 +39,14 @@ function ValidationIssues({ error }: { error: Row }) {
   </div>
 }
 
-export function ModelError({ error }: { error?: Row | null }) {
+export function ModelError({ error, readonlyFallback = false }: { error?: Row | null; readonlyFallback?: boolean }) {
   if (!error) return null
   return <div className="alert error model-error" role="alert" data-testid="model-error">
     <strong>模型调用失败：{error.message}</strong>
     <p>模型：{error.model || '历史记录未提供'} · 阶段：{stages[error.stage] || error.stage || '未知'}
       {' '}· 原始异常：{error.exception_type || '未知'}
       {error.status_code != null && ` · HTTP ${error.status_code}`}</p>
-    <ValidationIssues error={error} />
+    <ValidationIssues error={error} readonlyFallback={readonlyFallback} />
     {error.code === 'model_context_capacity_exceeded' && <p>
       模型声明容量 {error.context_window} Tokens · 请求输入估算 {error.estimated_input_tokens}（按 UTF-8 字节加开销估算）。
     </p>}
@@ -59,6 +59,7 @@ export function ModelError({ error }: { error?: Row | null }) {
       </>}
     </p>}
     <p>已有证据和假设历史已保留；未执行额外未授权工具；未自动重试。</p>
+    {readonlyFallback && <p>已转为离线只读取证，当前事实、未知原因和检查结果见下方报告；模型故障不等于业务根因。</p>}
     <p>可由操作员手动重新调查，可能产生额外费用。</p>
     <small>内部尝试编号：{error.request_attempt_id || '未发起请求'}
       {' '}· 供应商请求编号：{error.provider_request_id || '未提供'}
@@ -66,7 +67,7 @@ export function ModelError({ error }: { error?: Row | null }) {
   </div>
 }
 
-export function ModelAttempt({ usage }: { usage: Row }) {
+export function ModelAttempt({ usage, readonlyFallback = false }: { usage: Row; readonlyFallback?: boolean }) {
   const audit = usage.diagnostic || {}
   return <details className="muted">
     <summary>{usage.model} · {usage.status === 'failed' ? '调用失败' : usage.status === 'interrupted' ? '已中断' : usage.status}
@@ -80,6 +81,6 @@ export function ModelAttempt({ usage }: { usage: Row }) {
       {' '}· 初始化 {audit.worker_initialize_ms ?? '未知'} ms
       {' '}· 网络请求 {audit.network_ms ?? '未知'} ms
       {' '}· 解析/校验 {audit.parse_ms ?? '未知'} ms</p> : <p>历史记录没有调用诊断信息。</p>}
-    <ValidationIssues error={audit} />
+    <ValidationIssues error={audit} readonlyFallback={readonlyFallback} />
   </details>
 }

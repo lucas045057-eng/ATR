@@ -85,19 +85,22 @@ def test_empty_pending_profile_discovers_and_releases_process(client):
     target = add_target(client, profile, 'Empty target')
     event_id, started = start(client, profile, target)
     job = wait_job(client, started['job_id'])
-    assert job['status'] == 'waiting_input', job
+    assert job['status'] == 'completed', job
     run = client.get(f"/api/v1/runs/{started['run_id']}").json()
     assert run['diagnosis_status'] == 'unresolved'
     assert not run['completion_satisfied']
-    assert run['clarification']['question_id']
+    assert not run.get('clarification') and run['summary']['scope_gaps']
     assert run['summary']['task_type'] == 'root_cause_investigation'
     assert {c['tool_id'] for c in run['tool_calls']} == {'host.info', 'service.list', 'container.list','process.list'}
     assert all(c['status'] == 'succeeded' for c in run['tool_calls'])
     assert client.get(f"/api/v1/businesses/{profile['business_id']}").json()['review_status'] == 'pending'
-    assert json.loads(run['budget_json'])['max_seconds'] == 600
+    assert json.loads(run['budget_json'])['max_seconds'] is None
+    assert run['summary']['effective_limits']['budget_mode'] == 'accounting_only'
     wait_reaped(run['id'])
     repeated = client.post(f'/api/v1/incidents/{event_id}/runs', json={'target_id': target['id'], 'decision_protocol': 'ab_v1'}).json()
-    assert repeated['reused'] and repeated['job_id'] == started['job_id']
+    assert not repeated['reused'] and repeated['job_id'] != started['job_id']
+    assert wait_job(client, repeated['job_id'])['status'] == 'completed'
+    wait_reaped(repeated['run_id'])
     stale = client.post(f"/api/v1/runs/{run['id']}/resume", json={'question_id':'stale','version':1})
     assert stale.status_code == 409
 
@@ -144,7 +147,9 @@ def test_cancel_during_model_blocks_late_evidence_and_reuses_same_job(client, mo
     assert client.post(f'/api/v1/runs/{run_id}/cancel').json()['execution_status'] == 'cancelled'
     wait_reaped(run_id)
     run = client.get(f'/api/v1/runs/{run_id}').json()
-    assert run['evidence'] == [] and run['tool_calls'] == []
+    assert len(run['evidence']) == len(run['tool_calls']) == 3
+    assert {call['tool_id'] for call in run['tool_calls']} == {'service.list', 'service.status', 'service.logs'}
+    assert all(call['status'] == 'succeeded' for call in run['tool_calls'])
     assert run['execution_status'] == 'cancelled'
     assert client.get('/api/v1/health').status_code == 200
 
@@ -156,7 +161,7 @@ def test_model_cannot_make_an_uncited_chain_authoritative():
     assert result['finish'] and 'completion_satisfied' not in result
 
 
-def test_model_outage_can_fill_one_known_gap_without_masking_execution_failure(client, monkeypatch):
+def test_model_outage_finishes_fact_collection_without_retry_or_claiming_root_cause(client, monkeypatch):
     from app.context.model import ModelUnavailable
     profile = onboard(client)
     target = add_target(client, profile, 'Existing authorized object')
@@ -167,10 +172,11 @@ def test_model_outage_can_fill_one_known_gap_without_masking_execution_failure(c
         raise ModelUnavailable('unavailable')
     monkeypatch.setattr('app.agent.ab_investigation.call_json', unavailable)
     _, begun = start(client, profile, target)
-    assert wait_job(client, begun['job_id'])['status'] == 'failed'
+    assert wait_job(client, begun['job_id'])['status'] == 'completed'
     run = client.get('/api/v1/runs/'+begun['run_id']).json()
-    assert len(attempted) == 2
-    assert len(run['tool_calls']) == 1 and run['tool_calls'][0]['tool_id'] == 'service.status'
-    assert run['execution_status'] == 'failed' and run['summary']['stop_reason'] == 'model_unavailable'
-    assert run['summary']['supplement']['executed']
+    assert len(attempted) == 1
+    assert {call['tool_id'] for call in run['tool_calls']} == {'service.list', 'service.status', 'service.logs'}
+    assert run['execution_status'] == 'completed' and run['summary']['stop_reason'] == 'offline_checks_complete'
+    assert run['summary']['model_status'] == 'failed' and run['summary']['analysis_status'] == 'offline'
+    assert not run['completion_satisfied'] and not run['repair_eligible']
     wait_reaped(run['id'])

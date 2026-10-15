@@ -195,6 +195,11 @@ class Database:
                 if not backup_path.exists():
                     with sqlite3.connect(backup_path) as backup:
                         connection.backup(backup)
+            if migrated and not connection.execute("SELECT 1 FROM schema_migrations WHERE version=28").fetchone():
+                backup_path = self.path.with_name(self.path.name + '.pre-persistent-scope.bak')
+                if not backup_path.exists():
+                    with sqlite3.connect(backup_path) as backup:
+                        connection.backup(backup)
             migrate(connection)
             connection.commit()
         finally:

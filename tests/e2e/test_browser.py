@@ -50,7 +50,8 @@ def live_server(tmp_path, request):
         _, model_settings, _, _ = request.getfixturevalue("fake_model")
         env.update(EXTERNAL_MODEL_ENABLED="true", MODEL_NAME=model_settings.model_name,
                    MODEL_API_KEY=model_settings.model_api_key.get_secret_value(),
-                   MODEL_BASE_URL=model_settings.model_base_url, MODEL_TIMEOUT_SECONDS="2")
+                   MODEL_BASE_URL=model_settings.model_base_url,
+                   MODEL_TIMEOUT_SECONDS=str(model_settings.model_timeout_seconds))
     log = (tmp_path / "server.log").open("wb")
     process = subprocess.Popen(
         [

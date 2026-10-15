@@ -53,6 +53,7 @@ export function BusinessPages({
   const [authMode, setAuthMode] = useState("private_key");
   const [executionMode, setExecutionMode] = useState("forced_gateway");
   const [chosenTarget, setChosenTarget] = useState("");
+  const [defaults, setDefaults] = useState<Row>({target_id:null,services:[],primary_service:null});
   const fileInput = useRef<HTMLInputElement>(null);
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
@@ -76,7 +77,7 @@ export function BusinessPages({
       if (bs.length) setSelected(bs[0].id);
       return;
     }
-    const [p, a, b, v, t, s, d] = await Promise.all([
+    const [p, a, b, v, t, s, d, settings] = await Promise.all([
       api(base),
       api(base + "/artifacts"),
       api(base + "/budgets"),
@@ -84,6 +85,7 @@ export function BusinessPages({
       api(base + "/targets"),
       api(base + "/bindings"),
       api(base + "/discoveries"),
+      api(base + "/investigation-defaults"),
     ]);
     if (selectedRef.current !== selected || sequence !== reloadSequence.current) return;
     setProfile(p);
@@ -93,6 +95,7 @@ export function BusinessPages({
     setTargets(t);
     setBindings(s);
     setDiscoveries(d);
+    setDefaults(settings);
     setChosenTarget(current => t.some((item: Row) => item.id === current) ? current : t[0]?.id || "");
   }, [selected, base]);
 
@@ -102,6 +105,7 @@ export function BusinessPages({
     setBindings([]);
     setDiscoveries([]);
     setChosenTarget("");
+    setDefaults({target_id:null,services:[],primary_service:null});
     setCode(null);
     setSearch([]);
     setComparison(null);
@@ -197,7 +201,7 @@ export function BusinessPages({
   const latestDiscovery = discoveries.find((d) => d.target_id === chosenTarget);
   const target = targets.find((t) => t.id === chosenTarget);
   const confirmed = bindings.filter(
-    (b) => b.target_id === chosenTarget && b.status === "confirmed",
+    (b) => b.target_id === chosenTarget && b.authorization_valid,
   );
 
   return (
@@ -1026,72 +1030,22 @@ export function BusinessPages({
               <p className="muted">
                 只采集进程名称、端口、服务和授权目录的单层清单。分数只用于排序，深入读取需要范围确认。
               </p>
-              {bindings
-                .filter(
-                  (b) => b.target_id === chosenTarget && b.status !== "stale" && (b.kind !== "process" || /^\d+:[a-f0-9-]{36}:\d+$/.test(b.runtime_id)),
-                )
-                .map((b) => (
-                  <div key={b.id} className="business-row">
-                    <div>
-                      <strong>
-                        {b.service} → {b.runtime_id.slice(0, 32)}
-                      </strong>
-                      <small>
-                        排序分 {b.score} · {b.kind}
-                      </small>
-                      <small>{b.reasons.join("；")}</small>
-                      <small>证据 {b.evidence_ids.join(", ")}</small>
-                    </div>
-                    {mark(b.status)}
-                    {b.status === "pending" && (
-                      <div>
-                        <button
-                          className="btn small"
-                          disabled={busy}
-                          onClick={() => {
-                            const reason = window.prompt("确认服务范围的依据");
-                            if (reason)
-                              void act(() =>
-                                api(base + `/bindings/${b.id}/review`, {
-                                  method: "POST",
-                                  body: JSON.stringify({
-                                    decision: "confirm",
-                                    reason,
-                                  }),
-                                }),
-                              );
-                          }}
-                        >
-                          确认
-                        </button>
-                        <button
-                          className="btn small danger-outline"
-                          disabled={busy}
-                          onClick={() =>
-                            void act(() =>
-                              api(base + `/bindings/${b.id}/review`, {
-                                method: "POST",
-                                body: JSON.stringify({
-                                  decision: "reject",
-                                  reason: "人工判断不属于当前业务范围",
-                                }),
-                              }),
-                            )
-                          }
-                        >
-                          拒绝
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                ))}
+              <InvestigationDefaults key={selected+':'+chosenTarget+':'+JSON.stringify(defaults)} defaults={defaults} target={target} bindings={confirmed} busy={busy}
+                onSave={value => act(() => api(base + '/investigation-defaults', {method:'PUT',body:JSON.stringify(value)}))}/>
+              {bindings.filter(b => b.target_id === chosenTarget).map(b =>
+                <BindingAuthorization key={b.id} binding={b} busy={busy}
+                  onReview={value => act(() => api(base + `/bindings/${b.id}/review`, {method:'POST',body:JSON.stringify(value)}))}
+                  onUpgrade={value => act(() => api(base + `/bindings/${b.id}/authorization`, {method:'PUT',body:JSON.stringify(value)}))}
+                  onRevoke={reason => act(() => api(base + `/bindings/${b.id}/revoke`, {method:'POST',body:JSON.stringify({reason})}))}/>
+              )}
               {latestDiscovery && (
                 <>
                   <p>
                     未匹配业务服务：
                     {latestDiscovery.unmatched_services?.join("、") || "无"}
                   </p>
-                  <RuntimeInventory key={latestDiscovery.id} discovery={latestDiscovery} />
+                  <RuntimeInventory key={latestDiscovery.id} discovery={latestDiscovery} busy={busy}
+                    onAuthorize={value => act(() => api(base + `/targets/${chosenTarget}/authorize-object`, {method:'POST',body:JSON.stringify(value)}))} />
                   {latestDiscovery.incomplete_tools?.map((r: Row) => <p className="alert" key={r.observation_id}>
                     {r.tool_id} · 数据不完整 · {r.message} · {r.failure_stage} · 输出 {r.output_bytes} 字节 · 异常 {r.invalid_item_count} 项
                   </p>)}
@@ -1208,6 +1162,48 @@ export function BusinessPages({
       )}
     </>
   );
+}
+
+function InvestigationDefaults({defaults, target, bindings, busy, onSave}: {defaults:Row;target?:Row;bindings:Row[];busy:boolean;onSave:(value:Row)=>Promise<void>}) {
+  const sameTarget = defaults.target_id === target?.id;
+  const [services,setServices] = useState<string[]>(sameTarget ? defaults.services || [] : []);
+  const [primary,setPrimary] = useState(sameTarget ? defaults.primary_service || '' : '');
+  const names = Array.from(new Set(bindings.map(b=>String(b.service))));
+  return <details className="business-block"><summary>日常调查默认设置</summary>
+    <p>默认目标：{defaults.target_id || '尚未配置'} · 当前目标：{target?.name || '未选择'}。只保存已授权对象，不扩大授权。</p>
+    <form className="form" onSubmit={event=>{event.preventDefault();if(target)void onSave({target_id:target.id,services,primary_service:primary||null})}}>
+      <label>默认服务范围<select multiple aria-label="默认服务范围" value={services} onChange={event=>{const values=Array.from(event.target.selectedOptions,o=>o.value);setServices(values);if(primary&&!values.includes(primary))setPrimary('')}}>{names.map(name=><option key={name} value={name}>{name}</option>)}</select><small>不选任何服务：使用此目标上所有已授权对象；最多选择 20 项。</small></label>
+      <label>优先调查服务<select aria-label="优先调查服务" value={primary} onChange={event=>setPrimary(event.target.value)}><option value="">按本次任务调查</option>{(services.length ? services : names).map(name=><option key={name} value={name}>{name}</option>)}</select></label>
+      <button className="btn" disabled={busy||!target?.investigation_readiness?.eligible||!names.length||services.length>20}>将当前目标保存为调查默认</button>
+    </form>
+  </details>;
+}
+
+function BindingAuthorization({binding:b,busy,onReview,onUpgrade,onRevoke}: {binding:Row;busy:boolean;onReview:(value:Row)=>Promise<void>;onUpgrade:(value:Row)=>Promise<void>;onRevoke:(reason:string)=>Promise<void>}) {
+  const [stable,setStable] = useState(false);
+  const [reason,setReason] = useState('');
+  const candidate = b.source?.candidate;
+  const supportsStable = b.kind === 'service' || (b.kind === 'container' && Boolean(candidate?.image?.trim()) && Array.isArray(candidate?.ports) && Array.isArray(candidate?.environment_keys));
+  const auth = b.authorization;
+  const valid = b.authorization_valid;
+  const current = b.runtime_current;
+  return <div className="business-row" data-testid="binding-authorization">
+    <div><strong>{b.service} → {b.runtime_id}</strong><small>{b.kind} · 排序分 {b.score} · {b.reasons?.join('；')}</small><small>证据 {b.evidence_ids?.join('、')}</small>
+      <p>持久授权：{valid ? '有效' : auth?.revoked_at ? '已撤销' : auth ? '已失效' : '尚未授权'}{auth && ` · ${auth.identity_mode === 'stable_object' ? '稳定业务对象' : '精确实例'} · 授权 ${auth.grant_id}`}</p>
+      <p>当前运行证据：{current ? '观测身份当前有效' : '需在本轮发现后重新核验'}。运行证据过期与持久授权分别判断。</p>
+      {b.kind === 'container' && !supportsStable && <small>候选缺少完整镜像、端口或环境键字段，只能精确实例授权；未采集的字段不会按空集合处理。</small>}
+      {auth && <details><summary>授权依据与身份规则</summary><p>{auth.confirmed_by} · {auth.confirmed_at}{auth.revoked_at && ` · ${auth.revoked_by} 于 ${auth.revoked_at} 撤销`}</p><pre className="code-preview">{JSON.stringify(auth.rule,null,2)}</pre></details>}
+      {!!b.authorization_history?.length && <details><summary>授权审核历史（{b.authorization_history.length} 项）</summary>{b.authorization_history.map((item:Row,i:number)=><p key={i}>{({confirm:'确认授权',reject:'拒绝',revoke:'撤销授权',upgrade:'升级身份规则'} as Row)[item.decision] || item.decision} · {item.reason} · {item.actor} · {item.created_at}</p>)}</details>}
+      {(b.status === 'pending' || (valid && current && supportsStable && auth?.identity_mode === 'exact_instance')) && <form className="form" onSubmit={event=>{event.preventDefault();void (valid ? onUpgrade({identity_mode:'stable_object',reason}) : onReview({decision:'confirm',identity_mode:stable?'stable_object':'exact_instance',reason}))}}>
+        {supportsStable && <label><input type="checkbox" checked={stable} onChange={event=>setStable(event.target.checked)}/>{b.kind === 'container' ? '明确允许同一目标上的稳定容器：实际采集的名称、镜像、端口与环境键必须相同，容器 CID 可变化。' : '明确允许同一目标上的稳定 systemd 服务：单元 ID 与名称必须相同。'}</label>}
+        {b.kind === 'process' && <small>普通进程只授权精确 PID 与启动身份，重启后需重新审核。</small>}
+        <label>授权依据<input required minLength={5} maxLength={2000} value={reason} onChange={event=>setReason(event.target.value)}/></label>
+        <button className="btn small" disabled={busy||(valid&&!stable)}>{valid ? '明确升级为稳定对象授权' : '确认授权'}</button>
+        {!valid && <button className="btn small danger-outline" type="button" disabled={busy} onClick={()=>void onReview({decision:'reject',reason:reason||'人工判断不属于当前业务范围'})}>拒绝</button>}
+      </form>}
+      {valid && <button className="btn small danger-outline" onClick={()=>{const value=window.prompt('撤销此对象的持久授权（调查进行中也可撤销），请填写原因（至少 5 个字）');if(value&&value.trim().length>=5)void onRevoke(value)}}>撤销授权</button>}
+    </div>{mark(b.status)}
+  </div>;
 }
 
 function Stat({ name, value }: { name: string; value: any }) {

@@ -1,18 +1,42 @@
+import json
+
 import pytest
+from app.agent.ab_investigation import InvestigationBroker, prepare_run
+from app.common import dumps
+from app.jobs import reserve_investigation
+from app.runtime.coordinator import get_coordinator
 from app.settings import get_settings
 from app.storage.database import Database
 from conftest import wait_job
-from test_investigation_broker import start, wait_reaped
-from test_run_target_binding import add_target
+from test_investigation_broker import wait_reaped
+from test_run_target_binding import add_target, incident
 
 
 def waiting(client):
+    # Persisted pre-P0.5 native runs still use the original independent approval flow.
     profile = client.post('/api/v1/businesses', json={'name':'Empty local question'}).json()
     assert profile['cognition_state'] == 'empty'
     target = add_target(client, profile, 'Authorized target')
-    _, begun = start(client, profile, target)
-    assert wait_job(client, begun['job_id'])['status'] == 'waiting_input'
-    run = client.get('/api/v1/runs/'+begun['run_id']).json()
+    database = Database(get_settings().database_path)
+    event = incident(client, profile)
+    job, _, _ = reserve_investigation(database, event, profile['business_id'], target['id'])
+    run_id = prepare_run(database, get_settings(), event, profile['business_id'], target['id'], job, 'test')
+    with database.transaction() as tx:
+        configuration = json.loads(tx.execute('SELECT model_config_json FROM diagnosis_runs WHERE id=?', (run_id,)).fetchone()[0])
+        configuration.pop('scope_identity_required')
+        configuration.pop('scope_grants')
+        tx.execute('UPDATE diagnosis_runs SET model_config_json=? WHERE id=?', (dumps(configuration), run_id))
+    coordinator = get_coordinator(database)
+    lease = coordinator.claim(run_id)
+    broker = InvestigationBroker(database, get_settings(), lease)
+    for _ in range(8):
+        if not broker.advance()['continue']:
+            break
+    else:
+        raise AssertionError('Historical independent authorization did not wait finitely')
+    coordinator.reaped(run_id, lease['lease_token'])
+    assert wait_job(client, job)['status'] == 'waiting_input'
+    run = client.get('/api/v1/runs/'+run_id).json()
     wait_reaped(run['id'])
     question = run['clarification']
     option = question['options'][0]
@@ -55,5 +79,8 @@ def test_empty_profile_confirmed_object_is_readable_without_approving_profile(cl
     profile_after = client.get('/api/v1/businesses/'+profile['business_id']).json()
     assert profile_after['review_status'] == 'pending' and profile_after['services'] == []
     assert profile_after['cognition_state'] == 'partial'
+    bindings = client.get('/api/v1/businesses/'+profile['business_id']+'/bindings').json()
+    assert all(row['authorization_valid'] and row['authorization']['identity_mode']=='exact_instance'
+               for row in bindings if row['status']=='confirmed')
     assert not final['completion_satisfied']
     wait_reaped(run['id'])

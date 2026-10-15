@@ -27,12 +27,16 @@ from app.business.source_index import SourceIndex
 from app.common import digest, dumps, now, uid
 from app.connectors.credentials import SSH_SESSIONS
 from app.connectors.models import (
+    AuthorizationRuleReview,
     BindingReview,
     DockerReaderSelection,
     EndpointMappingReview,
     HealthEndpointSelection,
+    InventoryAuthorization,
+    InvestigationDefaults,
     ProcessLogSelection,
     RuntimeTargetCreate,
+    ScopeRevocation,
     SSHPassword,
     ToolRequest,
 )
@@ -552,6 +556,7 @@ def confirm_endpoint_mapping(business_id: str,target_id: str,request: EndpointMa
 
 @router.post("/businesses/{business_id}/targets/{target_id}/discover", status_code=202)
 def discover(business_id: str, target_id: str):
+    ensure_idle(business_id)
     s = service()
     RuntimeService(s.db, s.settings).require_credentials(business_id, target_id)
     job_id = reserve(s.db, "discover", business_id)
@@ -584,6 +589,7 @@ def discoveries(business_id: str):
 
 @router.get("/businesses/{business_id}/bindings")
 def bindings(business_id: str):
+    from app.system.authorization import authorization, authorized
     from app.system.scope import binding_is_current
     s = service()
     s.get(business_id)
@@ -596,6 +602,11 @@ def bindings(business_id: str):
                 "evidence_ids": json.loads(r["evidence_ids_json"]),
                 "source": json.loads(r["source_json"]),
                 "runtime_current": binding_is_current(r),
+                'authorization': authorization(r),
+                'authorization_valid': authorized(r, RuntimeService(s.db, s.settings).get(business_id, r['target_id'])),
+                'authorization_history': [dict(review) for review in conn.execute(
+                    'SELECT decision,reason,actor,created_at FROM business_reviews WHERE business_id=? AND subject_id IN (?,?) ORDER BY created_at',
+                    (business_id, r['id'], authorization(r).get('grant_id', r['id'])))],
             }
             for r in conn.execute(
                 "SELECT * FROM service_bindings WHERE business_id=? ORDER BY score DESC",
@@ -616,8 +627,54 @@ def review_binding(
     ensure_idle(business_id)
     s = service()
     return ScopeResolver(s.db, s.settings).confirm(
-        business_id, binding_id, request.decision, redact_text(request.reason), actor
+        business_id, binding_id, request.decision, redact_text(request.reason), actor, request.identity_mode
     )
+
+
+@router.post('/businesses/{business_id}/bindings/{binding_id}/revoke')
+def revoke_binding(business_id: str, binding_id: str, request: ScopeRevocation, actor: str = Depends(require_operator)):
+    s = service()
+    return ScopeResolver(s.db, s.settings).revoke(business_id, binding_id, redact_text(request.reason), actor)
+
+
+@router.put('/businesses/{business_id}/bindings/{binding_id}/authorization')
+def approve_binding_rule(business_id: str, binding_id: str, request: AuthorizationRuleReview, actor: str = Depends(require_operator)):
+    ensure_idle(business_id)
+    s = service()
+    return ScopeResolver(s.db, s.settings).approve_rule(business_id, binding_id, request.model_copy(update={'reason':redact_text(request.reason)}), actor)
+
+
+@router.post('/businesses/{business_id}/targets/{target_id}/authorize-object')
+def authorize_inventory_object(business_id: str, target_id: str, request: InventoryAuthorization, actor: str = Depends(require_operator)):
+    ensure_idle(business_id)
+    s = service()
+    return ScopeResolver(s.db, s.settings).authorize_object(business_id, target_id, request.model_copy(update={'reason':redact_text(request.reason)}), actor)
+
+
+@router.get('/businesses/{business_id}/investigation-defaults')
+def investigation_defaults(business_id: str):
+    from app.system.authorization import defaults
+    s = service()
+    s.get(business_id)
+    with s.db.connect() as tx:
+        return defaults(tx, business_id)
+
+
+@router.put('/businesses/{business_id}/investigation-defaults')
+def save_investigation_defaults(business_id: str, request: InvestigationDefaults, actor: str = Depends(require_operator)):
+    from app.system.authorization import authorized
+    s = service()
+    target = RuntimeService(s.db, s.settings).get(business_id, request.target_id)
+    with s.db.transaction() as tx:
+        names = {row['service'] for row in tx.execute('SELECT * FROM service_bindings WHERE business_id=? AND target_id=?',
+                                                    (business_id, request.target_id)) if authorized(row, target)}
+        if not RuntimeService(s.db, s.settings).investigation_readiness(target)['eligible'] or not names:
+            raise ValueError('默认目标必须已有有效业务对象授权，不会自动批准目标')
+        if not set(request.services) <= names or request.primary_service and request.primary_service not in (set(request.services) or names):
+            raise ValueError('默认调查范围只能选择已授权业务对象')
+        tx.execute('INSERT INTO investigation_defaults VALUES(?,?,?,?,?,?) ON CONFLICT(business_id) DO UPDATE SET target_id=excluded.target_id,services_json=excluded.services_json,primary_service=excluded.primary_service,actor=excluded.actor,updated_at=excluded.updated_at',
+                   (business_id, request.target_id, dumps(request.services), request.primary_service, actor, now()))
+    return investigation_defaults(business_id)
 
 
 @router.post("/businesses/{business_id}/targets/{target_id}/tools", status_code=202)

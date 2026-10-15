@@ -62,7 +62,8 @@ class AdaptiveInvestigationPlanner:
         self.nodes = {n["id"]: n for n in graph["nodes"] if n.get("kind") == "service" and n.get("role") != "runtime"}
         self.hypotheses, self.hypothesis_history, self.scope_requests = [], [], []
 
-    def candidates(self, evidence, code_context, history, *, include_authorized_scope=False):
+    def candidates(self, evidence, code_context, history, *, include_authorized_scope=False,
+                   baseline_only=False, allowed_node_ids=None):
         active = {h["target_node_id"] for h in self.hypotheses if h["status"] != "refuted"}
         focus = {self.root_id} | active | {e.get("target_node_id") for e in evidence}
         related = set(focus)
@@ -84,6 +85,12 @@ class AdaptiveInvestigationPlanner:
         choices = {}
 
         def add(tool, node_id, arguments, target_id=None, binding_id=None):
+            if allowed_node_ids is not None and node_id not in allowed_node_ids:
+                return
+            if baseline_only:
+                from app.agent.fact_report import BASELINE_TOOLS
+                if tool not in BASELINE_TOOLS:
+                    return
             node = self.nodes.get(node_id)
             if not node:
                 return

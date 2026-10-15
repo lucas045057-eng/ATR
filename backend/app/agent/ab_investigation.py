@@ -14,6 +14,7 @@ from app.agent.decision_runtime import (
     minimal_output_contract,
 )
 from app.agent.discovery import authorization_digest
+from app.agent.fact_report import build_fact_report, evidence_quality
 from app.agent.log_events import normalize_log_events, parse_time, semantic_payload
 from app.agent.result_evaluator import evaluate_state
 from app.business.service import BusinessService
@@ -89,6 +90,20 @@ def prepare_run(database, settings, incident_id, business_id, target_id, job_id,
                                   if task.get('task_type_explicit', True) else 'root_cause_investigation')
     manager = ContextBudgetManager(database, settings)
     with database.transaction() as tx:
+        from app.system.authorization import (
+            adopt_legacy_grants,
+            authorization,
+            authorized,
+            defaults,
+        )
+        adopt_legacy_grants(tx)
+        scope_defaults = defaults(tx, business_id)
+        selected_names = set(scope_defaults['services']) if scope_defaults['target_id'] == target_id else set()
+        configuration['scope_identity_required'] = True
+        configuration['scope_defaults'] = scope_defaults if scope_defaults['target_id'] == target_id else {}
+        configuration['scope_grants'] = {authorization(row)['grant_id']: digest(authorization(row))
+            for row in tx.execute('SELECT * FROM service_bindings WHERE business_id=? AND target_id=?', (business_id, target_id))
+            if authorized(row, target) and (not selected_names or row['service'] in selected_names)}
         if not tx.execute('SELECT 1 FROM graph_nodes WHERE snapshot_id=?', (graph['id'],)).fetchone():
             previous = dict(tx.execute('SELECT * FROM graph_snapshots WHERE id=?', (graph['id'],)).fetchone())
             snapshot_id = uid()
@@ -123,6 +138,7 @@ class InvestigationBroker:
         self.cancelled = self.coordinator.cancellation(self.run_id)
         with database.connect() as tx:
             run = dict(tx.execute('SELECT * FROM diagnosis_runs WHERE id=?', (self.run_id,)).fetchone())
+            requires_scope_identity = json.loads(run['model_config_json']).get('scope_identity_required', False)
             self.summary = json.loads(run['summary_json'])
             self.incident = dict(tx.execute('SELECT * FROM incidents WHERE id=?', (run['incident_id'],)).fetchone())
             nodes = [{**dict(row), 'attributes': json.loads(row['attributes_json'])} for row in
@@ -131,7 +147,8 @@ class InvestigationBroker:
                      tx.execute('SELECT * FROM graph_edges WHERE snapshot_id=?', (run['graph_snapshot_id'],))]
             bindings = [dict(row) for row in tx.execute(
                 "SELECT * FROM service_bindings WHERE business_id=? AND target_id=? AND status='confirmed'",
-                (self.summary['business_id'], run['target_id'])) if binding_is_current(row)]
+                (self.summary['business_id'], run['target_id'])) if binding_is_current(row)
+                and (not requires_scope_identity or row['verified_run_id'] == self.run_id)]
             self.conflicts = [dict(row) for row in tx.execute(
                 "SELECT * FROM graph_conflicts WHERE snapshot_id=? AND status='open'", (run['graph_snapshot_id'],))]
             for conflict in self.conflicts:
@@ -140,6 +157,11 @@ class InvestigationBroker:
         self.business_id, self.target_id, self.snapshot = self.summary['business_id'], run['target_id'], run['graph_snapshot_id']
         from app.context.capabilities import configuration_digest
         configuration=json.loads(run['model_config_json'])
+        self.scope_identity_required = requires_scope_identity
+        self.scope_verified = not requires_scope_identity or self.summary.get('scope_validation', {}).get('stage') == 'verified'
+        self.scope_grants = configuration.get('scope_grants', {})
+        self.scope_defaults = configuration.get('scope_defaults', {})
+        self.profile_version = configuration.get('profile_version')
         if configuration.get('configuration_digest') not in {None,configuration_digest(settings)}:
             raise ValueError('模型设置与冻结调查不一致；本次调查已停止，请用所选设置重新发起')
         from app.knowledge import compatible_patterns
@@ -149,7 +171,7 @@ class InvestigationBroker:
                                       'source_experience_id':item['source_experience_id'],
                                       'is_current_evidence':False,'purpose':'historical_check_guidance'}
                                      for item in compatible_patterns(tx,self.business_id,self.snapshot)[:3]]
-        self.limits = effective_limits(settings)
+        self.limits = {**effective_limits(settings), **configuration.get('effective_limits', {})}
         self.target = RuntimeService(database, settings).get(self.business_id, self.target_id)
         if authorization_digest(self.target) != json.loads(run['target_snapshot_json'])['authorization_digest']:
             raise PermissionError('原调查授权已变化')
@@ -167,7 +189,7 @@ class InvestigationBroker:
                                                    self.symptom['text'], self.root, settings, include_processes=True)
         self.manager = ContextBudgetManager(database, settings)
         self.budget_id = self.summary['budget_id']
-        self.supervision = {'cancelled': self.cancelled, 'on_spawn': self.attach, 'authorize': self.authorize}
+        self.supervision = {'cancelled': self.cancelled, 'on_spawn': self.attach, 'authorize': self.authorize_read}
         self.registry = BusinessToolRegistry(database, settings, self.business_id, self.run_id,
                                             self.snapshot, self.budget_id, self.target_id, supervision=self.supervision)
         self.evidence = self.summary.get('evidence', [])
@@ -176,7 +198,6 @@ class InvestigationBroker:
         self.seen = set(self.summary.get('semantic_fingerprints', []))
         self.no_progress = self.summary.get('no_progress_rounds', 0)
         self.supplement = self.summary.get('supplement')
-        self.error_rounds = 0
         self.result = evaluate_state(self.state())
 
     def attach(self, owner):
@@ -187,6 +208,23 @@ class InvestigationBroker:
                          (self.run_id,)).fetchone()
         if self.cancelled.is_set() or not row or row['execution_status'] != 'running' or not row['accepting'] or row['lease_token'] != self.lease['lease_token']:
             raise InterruptedError('调查租约已失效')
+
+    def authorize_read(self, tx):
+        self.authorize(tx)
+        if self.scope_identity_required and self.scope_verified and not self.scope_authorization_current(tx):
+            raise PermissionError('业务对象授权已变化，本次读取结果不再接收')
+
+    def scope_authorization_current(self, tx):
+        from app.system.authorization import authorization, authorized
+        target = RuntimeService(self.db, self.settings).get(self.business_id, self.target_id)
+        if authorization_digest(target) != authorization_digest(self.target):
+            return False
+        for binding in self.bindings:
+            current = tx.execute('SELECT * FROM service_bindings WHERE id=?', (binding['id'],)).fetchone()
+            if (not current or not authorized(current, target) or current['verified_run_id'] != self.run_id
+                    or self.scope_grants.get(authorization(current).get('grant_id')) != digest(authorization(current))):
+                return False
+        return True
 
     def state(self, actions=None):
         self.graph=current_graph(self.graph,self.bindings,database=self.db)
@@ -206,6 +244,7 @@ class InvestigationBroker:
                                   'requirement_id': h.get('error_code') or 'runtime_read_failed'}
                                  for h in self.history if h['status'] != 'succeeded'],
                 'scope_omission_count': max(0, len(names) - 20)}
+        state['runtime_gaps'] += self.summary.get('scope_gaps', [])
         if state['scope_omission_count']:
             state['runtime_gaps'].append({'rule_id': 'runtime_read', 'target_ids': [],
                                           'requirement_id': 'scope_capacity_omissions'})
@@ -219,11 +258,15 @@ class InvestigationBroker:
         service_ids = {n['name']: n['id'] for n in self.graph['nodes'] if n['id'] in scope}
         required += [service_ids[e['service']] + ':health:' + e['endpoint_id']
                      for e in self.target.get('health_endpoints', []) if e['service'] in service_ids]
+        state['baseline_checks'] = required
         for e in self.evidence:
             node = e['target_node_id']
             kind = 'logs' if e['tool_id']=='log.tail' else e['tool_id'].rsplit('.', 1)[-1]
             payload = e['payload']
             if node not in scope or kind not in {'status', 'logs', 'get'} or any(payload.get(k) for k in ('partial', 'truncated', 'timeout')):
+                continue
+            quality, _ = evidence_quality(e, state, ssh=self.target['connector'] == 'ssh')
+            if quality != 'current':
                 continue
             if self.target['connector'] == 'ssh' and kind in {'status', 'logs'}:
                 if not payload.get('startup_cycle') or kind == 'logs' and not payload.get('cycle_verified'):
@@ -257,26 +300,32 @@ class InvestigationBroker:
                          current_evidence_ids=[e['evidence_id'] for e in self.evidence])
         return state
 
-    def persist(self):
+    def persist(self, *, stage='investigating'):
+        state = self.state()
+        self.result = evaluate_state(state)
+        fact_report = build_fact_report(state, self.result, self.history,
+                                       model_error=self.summary.get('model_error'),
+                                       ssh=self.target['connector'] == 'ssh')
+        self.report = {**self.report, 'summary': fact_report['summary'], 'fact_report': fact_report,
+                       'next_investigation': ' '.join(fact_report['next_steps'])}
         with self.db.transaction() as tx:
             self.authorize(tx)
-            self.summary.update(stage='investigating', evidence=self.evidence, action_history=self.history,
+            self.summary.update(stage=stage, evidence=self.evidence, action_history=self.history,
                                 stop_reason=None, execution_status='running', task_type=self.task_type,
                                 report=self.report, diagnosis_result=self.result,
                                 diagnosis_status=self.result['diagnosis_status'],
                                 no_progress_rounds=self.no_progress, semantic_fingerprints=sorted(self.seen),
                                 supplement=self.supplement, effective_limits=self.limits,
                                 required_gaps=self.result['required_gaps'], model_unknowns=self.result['model_unknowns'],
-                                next_action='查看当前证据和强制缺口；仅在原授权范围内补充缺失检查。')
-            self.summary['summary'] = {'root_cause_supported': '完整故障链已由当前独立证据核验，根因已定位。',
-                                       'partial': '已观察到直接异常或部分故障链，完整根因仍有证据缺口。',
-                                       'unresolved': '当前授权证据不足，根因尚未解决。',
-                                       'no_fault_observed': '已执行的授权检查中未观察到故障。'}[self.result['diagnosis_status']]
+                                next_action=' '.join(fact_report['next_steps']),
+                                analysis_status='offline' if self.summary.get('model_error') else 'runtime_facts',
+                                model_status=self.summary.get('model_status', 'not_requested'))
+            self.summary['summary'] = fact_report['summary']
             tx.execute('UPDATE diagnosis_runs SET summary_json=? WHERE id=?', (dumps(sanitize_payload(self.summary)), self.run_id))
             tx.execute('UPDATE run_executions SET result_json=? WHERE run_id=?', (dumps(self.result), self.run_id))
 
     def finish(self, reason, execution='completed'):
-        self.persist()
+        self.persist(stage='completed' if execution == 'completed' else 'stopped')
         self.coordinator.finalize(self.run_id, execution, self.result,
                                   lease_token=self.lease['lease_token'], reason=reason)
         return {'continue': False}
@@ -295,8 +344,9 @@ class InvestigationBroker:
             changed = False
         self.history.append({'action_id': action.get('action_id'), 'tool_id': action['tool_id'],
                              'target_node_id': action['target_node_id'],
+                             'arguments': action.get('arguments', {}), 'call_id': outcome.get('call_id'),
                              'status': outcome.get('status', 'succeeded'), 'new_information': changed,
-                             'error_code': outcome.get('error_code')})
+                             'error_code': outcome.get('error_code') or outcome.get('error')})
         self.no_progress = 0 if changed else self.no_progress + 1
         self.result = evaluate_state(self.state())
         self.persist()
@@ -312,26 +362,71 @@ class InvestigationBroker:
                         return gap, action
         return None
 
+    def available_actions(self, *, baseline_only=False, required_targets=None):
+        scope = set(self.state()['scope_node_ids'])
+        if required_targets is not None:
+            scope &= required_targets
+        actions = self.planner.candidates(self.evidence, [], self.history,
+                                          include_authorized_scope=self.task_type == 'root_cause_investigation',
+                                          baseline_only=baseline_only, allowed_node_ids=scope)
+        return [a for a in actions if a['target_node_id'] in scope and (
+            self.task_type != 'health_check' or a['tool_id'].endswith(('.status', '.logs'))
+            or a['tool_id'] in {'health.get', 'log.tail'})]
+
+    def offline(self):
+        self.summary['collection_phase'] = 'offline'
+        # Remaining baseline gaps cannot be satisfied by unrelated configuration reads.
+        required_targets = {node for gap in self.result['required_gaps']
+                            if 'endpoint' in gap['requirement_id'] for node in gap['target_ids']}
+        actions = self.available_actions(required_targets=required_targets)
+        candidate = self.gap_action(actions) if self.limits['supplement_enabled'] else None
+        if not candidate and self.limits['supplement_enabled']:
+            # A verified endpoint gap may require discovering a permitted config file first.
+            targets = {node for gap in self.result['required_gaps']
+                       if 'endpoint' in gap['requirement_id'] for node in gap['target_ids']}
+            candidate = next(((None, action) for action in actions
+                              if action['tool_id'] == 'config.list' and action['target_node_id'] in targets), None)
+        if not candidate:
+            return self.finish('offline_checks_complete')
+        self.collect(candidate[1])
+        return {'continue': True}
+
     def advance(self):
         with self.db.connect() as tx:
             self.authorize(tx)
+            withdrawn = self.scope_identity_required and self.scope_verified and not self.scope_authorization_current(tx)
+        if withdrawn:
+            self.summary.setdefault('scope_gaps', []).append({
+                'rule_id': 'runtime_read', 'requirement_id': 'business_authorization_changed', 'target_ids': []})
+            return self.finish('business_authorization_changed')
+        self.result = evaluate_state(self.state())
+        if any(h.get('error_code') == 'global_budget_exhausted' for h in self.history):
+            return self.finish('global_budget_exhausted')
+        if self.manager.remaining_seconds(self.budget_id) <= 0:
+            return self.finish('time_limit', 'timed_out')
+        if not self.scope_verified:
+            return self.verify_scope()
+        if not self.root and not self.scope_identity_required:
+            return self.discover()
+        baseline = self.available_actions(baseline_only=True)
+        if baseline:
+            self.summary['collection_phase'] = 'offline' if self.summary.get('model_error') else 'baseline'
+            self.collect(baseline[0])
+            return {'continue': True}
         if self.result['completion_satisfied']:
             return self.finish('complete_chain_verified')
+        if self.summary.get('model_error'):
+            return self.offline()
         if self.no_progress >= 2:
             return self.finish('no_progress')
-        if not self.root:
-            return self.discover()
-        actions = self.planner.candidates(self.evidence, [], self.history,
-                                          include_authorized_scope=self.task_type == 'root_cause_investigation')
-        scope = set(self.state()['scope_node_ids'])
-        actions = [a for a in actions if a['target_node_id'] in scope]
-        if self.task_type == 'health_check':
-            actions = [a for a in actions if a['tool_id'].endswith(('.status', '.logs')) or a['tool_id'] in {'health.get','log.tail'}]
+        self.summary['collection_phase'] = 'model'
+        actions = self.available_actions()
         if not actions:
             return self.finish('no_authorized_actions')
         if self.supplement and self.supplement.get('executed'):
             return self.finish('supplement_complete')
         state = self.state(actions)
+        scope = set(self.state()['scope_node_ids'])
         context = {'symptom': self.symptom['text'], 'window_start': self.incident['window_start'],
                    'historical_check_guidance':self.experience_guidance,
                    'task': self.task_type, 'effective_limits': self.limits,
@@ -357,8 +452,8 @@ class InvestigationBroker:
             decision = call_json(self.db, configured, self.budget_id, prompt,
                                  _compact_model_context(prompt, context, self.manager.input_capacity()),
                                  validate=lambda value: adapt_minimal_decision(value, state), supervision=self.supervision)
-            self.error_rounds = 0
             self.report = decision['report']
+            self.summary['model_status'] = 'completed'
             if decision['finish']:
                 return self.supplement_once(actions, self.manager.get(self.budget_id), 'model_finish_with_gaps')
             identifier = self.report['action']['action_id']
@@ -368,16 +463,95 @@ class InvestigationBroker:
         except Exception as exc:
             if self.cancelled.is_set():
                 raise InterruptedError('调查已终止') from None
-            self.error_rounds += 1
-            self.summary['model_error'] = getattr(exc, 'diagnostic', {'code': type(exc).__name__})
+            self.summary['model_error'] = getattr(exc, 'diagnostic', {
+                'code': type(exc).__name__, 'message': '模型不可用，已停止模型请求并转入只读取证。',
+                'stage': 'prepare', 'retry_count': 0})
+            self.summary['model_status'] = 'failed'
+            self.summary['model_failed_at_call'] = self.manager.get(self.budget_id)['calls']
+            self.summary['collection_phase'] = 'offline'
             self.persist()
-            if self.error_rounds >= 2:
-                return self.supplement_once(actions, self.manager.get(self.budget_id), 'model_unavailable', execution='failed')
             return {'continue': True}
         self.collect(action)
         if self.result['completion_satisfied']:
             return self.finish('complete_chain_verified')
         return {'continue': True}
+
+    def verify_scope(self):
+        from app.system.authorization import authorization, authorized
+        from app.system.scope import ScopeResolver
+        self.summary['collection_phase'] = 'automatic_discovery'
+        with self.db.connect() as tx:
+            grants = [dict(row) for row in tx.execute('SELECT * FROM service_bindings WHERE business_id=? AND target_id=?',
+                      (self.business_id, self.target_id)) if authorized(row, self.target)
+                      and self.scope_grants.get(authorization(row)['grant_id']) == digest(authorization(row))]
+        tools = [kind + '.list' for kind in ('service', 'container', 'process') if any(b['kind'] == kind for b in grants)]
+        if not self.scope_grants:
+            tools = ['host.info', 'service.list', 'container.list', 'process.list']
+        for tool in tools:
+            if any(h['tool_id'] == tool for h in self.history):
+                continue
+            if tool == 'container.list' and not self.target.get('docker_reads_enabled'):
+                continue
+            names = [json.loads(b['source_json']).get('runtime_name', b['service']) for b in grants if b['kind'] + '.list' == tool]
+            hints = [name for name in names if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.@-]{0,127}', name)][:8]
+            action = {'tool_id': tool, 'target_id': self.target_id, 'target_node_id': self.graph['nodes'][0]['id'],
+                      'arguments': {'limit': 100, 'name_hints': hints} if tool.endswith('.list') else {}}
+            action['action_id'] = digest(action)
+            self.collect(action)
+            return {'continue': True}
+        if BusinessService(self.db, self.settings).get(self.business_id)['profile_version'] != self.profile_version:
+            self.summary['scope_gaps'] = [{'rule_id':'runtime_read','requirement_id':'profile_changed','target_ids':[]}]
+            return self.finish('profile_changed')
+        result = ScopeResolver(self.db, self.settings).discover(self.business_id, self.target_id,
+            observations=[e for e in self.evidence if e['tool_id'] in tools], verification_run_id=self.run_id,
+            allowed_grants=self.scope_grants)
+        self.summary['discovery_ids'] = [result['id']]
+        self.summary['unauthorized_objects'] = [{key: item.get(key) for key in ('id','kind','name','observation_id','evidence_id','classification')}
+                                                for item in result['runtime_objects'] if item['classification'] != 'confirmed']
+        with self.db.transaction() as tx:
+            self.authorize(tx)
+            bindings = [dict(row) for row in tx.execute('SELECT * FROM service_bindings WHERE business_id=? AND target_id=? AND verified_run_id=?',
+                       (self.business_id, self.target_id, self.run_id)) if binding_is_current(row)
+                       and authorized(row, self.target) and self.scope_grants.get(authorization(row)['grant_id']) == digest(authorization(row))]
+            snapshot = tx.execute('SELECT id FROM graph_snapshots WHERE system_id=? ORDER BY version DESC LIMIT 1', (self.incident['system_id'],)).fetchone()[0]
+            nodes = [{**dict(row), 'attributes': json.loads(row['attributes_json'])} for row in tx.execute('SELECT * FROM graph_nodes WHERE snapshot_id=?', (snapshot,))]
+            edges = [{**dict(row), 'attributes': json.loads(row['attributes_json'])} for row in tx.execute('SELECT * FROM graph_edges WHERE snapshot_id=?', (snapshot,))]
+            self.conflicts = [dict(row) for row in tx.execute("SELECT * FROM graph_conflicts WHERE snapshot_id=? AND status='open'", (snapshot,))]
+            for conflict in self.conflicts:
+                conflict['related_node_ids'] = [row[0] for claim_id in json.loads(conflict['claim_ids_json']) for row in
+                                               tx.execute('SELECT subject_node_id FROM fact_claims WHERE id=?', (claim_id,))]
+            tx.execute('UPDATE diagnosis_runs SET graph_snapshot_id=? WHERE id=?', (snapshot, self.run_id))
+        self.summary['scope_version_delta'] = {'from_snapshot': self.snapshot, 'to_snapshot': snapshot, 'reason':'current_identity_verified'}
+        self.snapshot = self.registry.sid = snapshot
+        self.graph = current_graph({'nodes': nodes, 'edges': edges}, bindings, database=self.db)
+        self.bindings = bindings
+        verified = {authorization(b)['grant_id'] for b in bindings}
+        self.summary['scope_gaps'] = [{'rule_id':'runtime_read','requirement_id':'authorized_identity_not_verified','target_ids':[],
+                                      'grant_id': identifier} for identifier in self.scope_grants if identifier not in verified]
+        if not bindings:
+            self.summary['scope_gaps'].append({'rule_id':'runtime_read','requirement_id':'business_object_authorization_required','target_ids':[]})
+        self.summary['scope_validation'] = {'stage':'verified','verified_count':len(bindings),
+                                          'unknown_count':len(self.summary['unauthorized_objects']), 'observed_at':now()}
+        self.scope_verified = True
+        service_nodes = {n['name']: n for n in self.graph['nodes'] if n['kind'] == 'service' and n['role'] != 'runtime'}
+        usable = [b for b in bindings if b['service'] in service_nodes]
+        named = [b for b in usable if b['service'].casefold() in self.symptom['text'].casefold()]
+        primary = [b for b in usable if b['service'] == self.scope_defaults.get('primary_service')]
+        applications = [b for b in usable if service_nodes[b['service']]['role'] == 'application']
+        chosen = named if len(named) == 1 else primary
+        if not chosen and len(applications) == 1:
+            chosen = applications
+        if not chosen and len(usable) == 1:
+            chosen = usable
+        self.root = service_nodes[chosen[0]['service']]['id'] if chosen else None
+        if usable and not self.root:
+            self.summary['scope_gaps'].append({'rule_id':'runtime_read','requirement_id':'task_service_ambiguous','target_ids':[]})
+        self.planner = AdaptiveInvestigationPlanner(self.graph, bindings, {self.target_id:self.target}, self.symptom['text'], self.root,
+                                                   self.settings, include_processes=True)
+        self.no_progress = 0
+        self.summary['collection_phase'] = 'identity_verified'
+        self.persist()
+        return {'continue': True} if bindings else self.finish('no_verified_authorized_objects')
 
     def supplement_once(self, actions, budget, reason, *, execution='completed'):
         candidate = self.gap_action(actions)
@@ -475,6 +649,7 @@ def default_window():
 
 
 def confirm_runtime_options(database, settings, run_id, business_id, target_id, question, answer, actor):
+    from app.system.authorization import create_grant
     if not answer.confirm_owned:
         raise ValueError('选择运行对象后，还需明确确认对象属于本业务且允许只读检查')
     options = {row['option_id']: row for row in question.get('options', []) if row.get('option_id')}
@@ -484,6 +659,10 @@ def confirm_runtime_options(database, settings, run_id, business_id, target_id, 
     semantic = {row['name']: row['role'] for row in profile['services']}
     selected = []
     with database.transaction() as tx:
+        target = RuntimeService(database, settings).get(business_id, target_id)
+        frozen = json.loads(tx.execute('SELECT target_snapshot_json FROM diagnosis_runs WHERE id=?', (run_id,)).fetchone()[0])
+        if authorization_digest(target) != frozen['authorization_digest']:
+            raise PermissionError('原发现目标的授权已变化，不能沿用旧问题批准对象')
         discovery_id = uid()
         tx.execute("INSERT INTO discovery_runs VALUES(?,?,?,'completed',?,?)",
                    (discovery_id, business_id, target_id, dumps({'run_id': run_id, 'question_id': question['question_id'],
@@ -510,7 +689,7 @@ def confirm_runtime_options(database, settings, run_id, business_id, target_id, 
             if candidate is None:
                 raise ValueError('运行身份未出现在原发现观测中')
             source = {'run_id': run_id, 'question_id': question['question_id'], 'question_version': question['version'],
-                      'runtime_scope_confirmation': True, 'runtime_name': candidate['name'],
+                      'runtime_scope_confirmation': True, 'runtime_name': candidate['name'], 'candidate': candidate,
                       'observation_id': observed['request_id'], 'evidence_id': option['evidence_id'],
                       'role': semantic.get(service, selection.role), 'actor': actor, 'confirmed_at': now()}
             binding_id = uid()
@@ -521,6 +700,8 @@ def confirm_runtime_options(database, settings, run_id, business_id, target_id, 
                         dumps(['操作者确认当前发现对象属于本业务，作用未知时未推断语义']), dumps([observed['request_id']]),
                         discovery_id, observed['observed_at'], (stamp + timedelta(seconds=BINDING_TTL_SECONDS)).isoformat(),
                         dumps(source), candidate_digest(candidate)))
+            tx.execute('UPDATE service_bindings SET authorization_json=? WHERE id=?',
+                       (dumps(create_grant(binding_id, target, candidate, actor)), binding_id))
             tx.execute('INSERT INTO business_reviews VALUES(?,?,?,?,?,?,?,?,?)',
                        (uid(), business_id, profile['profile_version'], binding_id, digest(source), 'confirm',
                         '仅确认当前问题的运行身份与只读检查；未批准整个业务档案', actor, now()))

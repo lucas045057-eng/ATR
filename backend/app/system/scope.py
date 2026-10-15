@@ -14,7 +14,9 @@ from app.connectors.service import RuntimeService
 from app.connectors.unit_names import valid_service_name
 from app.context.budget import BudgetExceeded, ContextBudgetManager
 
-BINDING_TTL_SECONDS = 86400
+RUNTIME_IDENTITY_TTL_SECONDS = 86400
+# Compatibility for old clarification answers; this is not an authorization expiry.
+BINDING_TTL_SECONDS = RUNTIME_IDENTITY_TTL_SECONDS
 
 
 def binding_is_current(binding, at=None):
@@ -123,7 +125,9 @@ class ScopeResolver:
         self.runtime = RuntimeService(database, settings)
         self.business = BusinessService(database, settings)
 
-    def discover(self, business_id, target_id, observations=None):
+    def discover(self, business_id, target_id, observations=None, *, verification_run_id=None, allowed_grants=None):
+        from app.system.authorization import authorization, authorized
+        from app.system.authorization import matches as matches_rule
         profile = self.business.get(business_id)
         target = self.runtime.get(business_id, target_id)
         discovery_id = uid()
@@ -171,8 +175,16 @@ class ScopeResolver:
         by_id = {o["observation_id"]: o for o in observations if o.get("observation_id")}
         with self.db.transaction() as tx:
             existing = [dict(r) for r in tx.execute(
-                "SELECT * FROM service_bindings WHERE target_id=? AND status IN ('pending','confirmed','rejected')",
-                (target_id,))]
+                "SELECT * FROM service_bindings WHERE business_id=? AND target_id=? AND status IN ('pending','confirmed','rejected')",
+                (business_id, target_id))]
+            grants = [b for b in existing if authorized(b, target)
+                      and (allowed_grants is None or allowed_grants.get(authorization(b)['grant_id']) == digest(authorization(b)))]
+            ambiguous = {b['id'] for b in grants if len({(c['kind'], c['id']) for c, _ in candidates
+                         if matches_rule(authorization(b), c)}) > 1}
+            for identifier in ambiguous:
+                tx.execute("UPDATE service_bindings SET freshness_status='stale' WHERE id=?", (identifier,))
+                changes.append({'binding_id': identifier, 'reason': 'identity_conflict', 'review_required': True})
+            grants = [b for b in grants if b['id'] not in ambiguous]
             for old in existing:
                 if old['status'] == 'rejected':
                     continue
@@ -196,10 +208,18 @@ class ScopeResolver:
                 if complete and old['runtime_id'] not in observed_ids:
                     tx.execute("UPDATE service_bindings SET freshness_status='stale' WHERE id=?", (old['id'],))
                     changes.append({"binding_id": old['id'], "reason": "absent_in_complete_snapshot", "review_required": True})
-            for service in profile["services"]:
+            services = list(profile['services'])
+            for grant in grants:
+                if not any(s['name'] == grant['service'] for s in services):
+                    services.append({'name': grant['service'], 'role': json.loads(grant['source_json']).get('role', 'unknown')})
+            for service in services:
+                if allowed_grants is not None and not any(b['service'] == service['name'] for b in grants):
+                    continue
                 for candidate, observation_id in candidates:
+                    owners = [b for b in grants if b['kind'] == candidate['kind'] and matches_rule(authorization(b), candidate)]
+                    approved = next((b for b in owners if b['service'] == service['name']), None) if len(owners) == 1 else None
                     score, reasons = match_service(service, candidate)
-                    if not reasons:
+                    if not reasons and not approved:
                         continue
                     observation = by_id[observation_id]
                     stamp = observation.get("observed_at", now())
@@ -210,11 +230,15 @@ class ScopeResolver:
                         continue
                     source = {"discovery_id": discovery_id, "observation_id": observation_id,
                               "tool_id": observation['tool_id'], "connector": target['connector'],
-                              "runtime_name": candidate['name']}
+                              "runtime_name": candidate['name'], 'candidate': candidate}
                     same = next((b for b in existing if b['service'] == service['name']
                                  and b['runtime_id'] == candidate['id'] and b['kind'] == candidate['kind']
                                  and b['candidate_digest'] == signature
-                                 and (b['status'] == 'pending' or binding_is_current(b))), None)
+                                 and (b['status'] == 'pending' or approved and b['id'] == approved['id'])), None)
+                    if approved:
+                        source = {**json.loads(approved['source_json']), **source, 'identity_verified_at': stamp,
+                                  'identity_verification_run_id': verification_run_id,
+                                  'authorization_grant_id': authorization(approved)['grant_id']}
                     binding_id = same['id'] if same else uid()
                     if same:
                         tx.execute("UPDATE service_bindings SET observed_at=?,expires_at=?,source_json=?,evidence_ids_json=?,discovery_id=?,freshness_status=? WHERE id=?",
@@ -242,6 +266,15 @@ class ScopeResolver:
                             "unverified", stamp, expires, dumps(source), signature,
                         ),
                         )
+                    if approved:
+                        tx.execute("UPDATE service_bindings SET status='superseded' WHERE business_id=? AND target_id=? AND service=? AND status='confirmed' AND id<>?",
+                                   (business_id, target_id, service['name'], binding_id))
+                        tx.execute("UPDATE service_bindings SET status='confirmed',freshness_status='confirmed',authorization_json=?,verified_run_id=COALESCE(?,verified_run_id) WHERE id=?",
+                                   (approved['authorization_json'], verification_run_id, binding_id))
+                        if approved['id'] != binding_id:
+                            tx.execute('INSERT INTO business_reviews VALUES(?,?,?,?,?,?,?,?,?)',
+                                (uid(), business_id, profile['profile_version'], binding_id, digest(source), 'identity_verified',
+                                 '仅复用原授权选择规则验证新实例，未新增业务授权', 'runtime', stamp))
                     matches.append(
                         {
                             "id": binding_id,
@@ -249,7 +282,7 @@ class ScopeResolver:
                             "runtime_candidate": candidate["id"],
                             "kind": candidate["kind"],
                             "match_score": score,
-                            "verification_status": same['status'] if same else "pending",
+                            "verification_status": 'confirmed' if approved else same['status'] if same else "pending",
                             "reasons": reasons,
                             "evidence_ids": [observation_id],
                         }
@@ -290,7 +323,7 @@ class ScopeResolver:
                 "collection_status": "failed" if not any('payload' in o for o in observations) else "partial" if any(collection_incomplete(o) for o in observations) else "completed",
                 "binding_changes": changes,
                 "collection_states": [{"tool_id": o['tool_id'], "status": o.get('status', 'succeeded'), **{k:o.get('payload', {}).get(k, False) for k in ('partial','truncated','timeout')}} for o in observations],
-                "warning": "分数只用于排序，候选均需人工确认；未递归扫描目录",
+                "warning": "原长期授权对象自动核验；未知对象仍需独立审批；未递归扫描目录",
             }
             tx.execute(
                 "UPDATE discovery_runs SET status=?,summary_json=? WHERE id=?",
@@ -323,7 +356,8 @@ class ScopeResolver:
                      dumps(proposal["reasons"]), dumps([candidate["observation_id"]]), discovery_id, stamp, expires, dumps(source), signature))
         return {"binding_id": binding_id, "state": "awaiting_review", "runtime_candidate": candidate["id"], "target_id": candidate["target_id"], **proposal}
 
-    def confirm(self, business_id, binding_id, decision, reason, actor):
+    def confirm(self, business_id, binding_id, decision, reason, actor, identity_mode='exact_instance'):
+        from app.system.authorization import create_grant
         with self.db.transaction() as tx:
             binding = tx.execute(
                 "SELECT * FROM service_bindings WHERE id=? AND business_id=?",
@@ -334,10 +368,24 @@ class ScopeResolver:
             if decision == "confirm":
                 if binding['freshness_status'] == 'stale' or not binding['expires_at'] or datetime.fromisoformat(binding['expires_at']) <= datetime.now(timezone.utc):
                     raise ValueError("候选观测已过期，需要重新发现并审核")
+                source = json.loads(binding['source_json'])
+                candidate = source.get('candidate')
+                if not candidate:
+                    observed = tx.execute('SELECT payload_json FROM runtime_observations WHERE id=? AND target_id=?',
+                                          (source.get('observation_id'), binding['target_id'])).fetchone()
+                    field = INVENTORY_FIELDS.get(binding['kind'] + '.list')
+                    candidate = next((row for row in json.loads(observed[0]).get(field, []) if row.get('id') == binding['runtime_id']), None) if observed else None
+                if not candidate or candidate_digest(candidate) != binding['candidate_digest']:
+                    raise ValueError('原候选的完整身份依据缺失，请重新发现')
+                target = self.runtime.get(business_id, binding['target_id'])
+                self.observed_candidate(tx, target, source.get('observation_id'), binding['runtime_id'], binding['kind'],
+                                        require_signature=identity_mode == 'stable_object')
+                grant = create_grant(binding_id, target, candidate, actor, identity_mode)
+                tx.execute('UPDATE service_bindings SET authorization_json=? WHERE id=?', (dumps(grant), binding_id))
                 # One approved runtime object per business service per target.
                 tx.execute(
-                    "UPDATE service_bindings SET status='superseded' WHERE target_id=? AND service=? AND status='confirmed'",
-                    (binding["target_id"], binding["service"]),
+                    "UPDATE service_bindings SET status='superseded' WHERE business_id=? AND target_id=? AND service=? AND status='confirmed'",
+                    (business_id, binding["target_id"], binding["service"]),
                 )
             tx.execute(
                 "UPDATE service_bindings SET status=?,freshness_status=? WHERE id=?",
@@ -363,6 +411,87 @@ class ScopeResolver:
         from app.system.business_graph import fuse_business_graph
 
         return fuse_business_graph(self.db, self.business.get(business_id))
+
+    def observed_candidate(self, tx, target, observation_id, runtime_id, kind, *, require_signature=True):
+        from app.agent.discovery import authorization_digest
+        row = tx.execute('SELECT * FROM runtime_observations WHERE id=? AND target_id=? AND tool_id=? AND status=\'succeeded\'',
+                         (observation_id, target['id'], kind + '.list')).fetchone()
+        if not row:
+            raise ValueError('缺少当前目标的成功发现依据，请重新发现')
+        stamp = datetime.fromisoformat(row['observed_at'])
+        instant = datetime.now(timezone.utc)
+        if stamp.tzinfo is None or not stamp <= instant < stamp + timedelta(seconds=RUNTIME_IDENTITY_TTL_SECONDS):
+            raise ValueError('发现依据已过期，请重新发现后授权')
+        signature = json.loads(row['diagnostics_json']).get('target_authorization_signature')
+        if (signature or require_signature) and signature != authorization_digest(target):
+            raise ValueError('发现时的目标授权已变化或身份依据不足，请重新发现')
+        candidate = next((c for c in json.loads(row['payload_json']).get(INVENTORY_FIELDS[kind + '.list'], [])
+                          if c.get('id') == runtime_id and valid_candidate(c, kind + '.list')), None)
+        if not candidate:
+            raise ValueError('只能授权实际发现的运行对象')
+        if kind == 'container' and not re.fullmatch(r'[a-f0-9]{12,64}', runtime_id):
+            raise ValueError('容器缺少精确实例身份')
+        if kind == 'process' and not re.fullmatch(r'[1-9][0-9]*:[a-f0-9-]{36}:[0-9]{1,20}', runtime_id):
+            raise ValueError('进程缺少 PID、主机启动和进程启动身份')
+        return candidate, stamp
+
+    def authorize_object(self, business_id, target_id, request, actor):
+        from app.system.authorization import identity_rule
+        target = self.runtime.get(business_id, target_id)
+        profile = self.business.get(business_id)
+        configured = next((s for s in profile['services'] if s['name'] == request.service), None)
+        if configured and request.role != 'unknown' and request.role != configured.get('role', 'unknown'):
+            raise ValueError('运行对象授权不能覆盖已经审核的业务作用')
+        binding_id, discovery_id = uid(), uid()
+        with self.db.transaction() as tx:
+            candidate, stamp = self.observed_candidate(tx, target, request.observation_id, request.runtime_id, request.kind)
+            identity_rule(candidate, request.identity_mode)
+            source = {'observation_id': request.observation_id, 'runtime_name': candidate['name'], 'candidate': candidate,
+                      'runtime_scope_confirmation': True, 'role': (configured or {}).get('role', request.role)}
+            tx.execute("INSERT INTO discovery_runs VALUES(?,?,?,'completed',?,?)",
+                       (discovery_id, business_id, target_id, dumps({'source':'operator_inventory_authorization'}), now()))
+            tx.execute("INSERT INTO service_bindings(id,business_id,target_id,service,runtime_id,kind,score,reasons_json,evidence_ids_json,status,discovery_id,freshness_status,observed_at,expires_at,source_json,candidate_digest) VALUES(?,?,?,?,?,?,0,?,?,'pending',?,'unverified',?,?,?,?)",
+                       (binding_id, business_id, target_id, request.service, request.runtime_id, request.kind,
+                        dumps(['操作者独立授权实际发现对象']), dumps([request.observation_id]), discovery_id,
+                        stamp.isoformat(), (stamp + timedelta(seconds=RUNTIME_IDENTITY_TTL_SECONDS)).isoformat(),
+                        dumps(source), candidate_digest(candidate)))
+        self.confirm(business_id, binding_id, 'confirm', request.reason, actor, request.identity_mode)
+        return {'binding_id': binding_id, 'authorization_status': 'confirmed'}
+
+    def approve_rule(self, business_id, binding_id, request, actor):
+        from app.system.authorization import authorized, create_grant
+        with self.db.transaction() as tx:
+            binding = tx.execute('SELECT * FROM service_bindings WHERE id=? AND business_id=?', (binding_id, business_id)).fetchone()
+            if not binding:
+                raise ValueError('业务对象授权不存在')
+            target = self.runtime.get(business_id, binding['target_id'])
+            if not authorized(binding, target) or not binding_is_current(binding):
+                raise ValueError('请先重新发现并核验当前实例，再审核身份规则')
+            source = json.loads(binding['source_json'])
+            candidate, _ = self.observed_candidate(tx, target, source.get('observation_id'), binding['runtime_id'], binding['kind'])
+            grant = create_grant(binding_id, target, candidate, actor, request.identity_mode)
+            tx.execute('UPDATE service_bindings SET authorization_json=?,verified_run_id=NULL WHERE id=?', (dumps(grant), binding_id))
+            version = tx.execute('SELECT current_version FROM business_profiles WHERE id=?', (business_id,)).fetchone()[0]
+            tx.execute('INSERT INTO business_reviews VALUES(?,?,?,?,?,?,?,?,?)',
+                       (uid(), business_id, version, binding_id, digest(grant), 'approve_rule', request.reason, actor, now()))
+        return {'binding_id': binding_id, 'authorization_status': 'confirmed'}
+
+    def revoke(self, business_id, binding_id, reason, actor):
+        from app.system.authorization import authorization
+        with self.db.transaction() as tx:
+            binding = tx.execute('SELECT * FROM service_bindings WHERE id=? AND business_id=?', (binding_id, business_id)).fetchone()
+            if not binding or not authorization(binding).get('grant_id'):
+                raise ValueError('长期授权记录不存在')
+            identifier = authorization(binding)['grant_id']
+            for row in tx.execute('SELECT * FROM service_bindings WHERE business_id=?', (business_id,)).fetchall():
+                grant = authorization(row)
+                if grant.get('grant_id') == identifier:
+                    grant.update(revoked_at=now(), revoked_by=actor, revocation_reason=reason)
+                    tx.execute("UPDATE service_bindings SET authorization_json=?,status='revoked',freshness_status='unverified' WHERE id=?", (dumps(grant), row['id']))
+            version = tx.execute('SELECT current_version FROM business_profiles WHERE id=?', (business_id,)).fetchone()[0]
+            tx.execute('INSERT INTO business_reviews VALUES(?,?,?,?,?,?,?,?,?)',
+                       (uid(), business_id, version, binding_id, digest(authorization(binding)), 'revoke', reason, actor, now()))
+        return {'binding_id': binding_id, 'authorization_status': 'revoked'}
 
     def reconcile(self, business_id, observation):
         if "payload" not in observation:

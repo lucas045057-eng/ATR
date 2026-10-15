@@ -1,13 +1,15 @@
 import json
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 import pytest
-from app.agent.ab_investigation import prepare_run
+from app.agent.ab_investigation import InvestigationBroker, prepare_run
 from app.common import dumps, now, uid
 from app.jobs import reserve_investigation
 from app.runtime.coordinator import get_coordinator
 from app.settings import get_settings
 from app.storage.database import Database
+from app.system.scope import candidate_digest
 from test_business import SAMPLE, onboard
 from test_result_evaluator import complete_state, evaluate
 from test_runtime import target
@@ -19,14 +21,24 @@ def native_run(client,status='root_cause_supported',mode='graph_adaptive'):
     runtime=target(client,profile)
     assert client.patch(f"/api/v1/businesses/{profile['business_id']}/targets/{runtime['id']}/health-endpoints",json={'health_endpoints':[{'endpoint_id':'proxy-health','url':'http://127.0.0.1:18000/health','service':'edge-proxy'}]}).status_code==200
     database=Database(get_settings().database_path)
+    candidate={'kind':'service','id':'edge-proxy.service','name':'edge-proxy'}
     with database.transaction() as tx:
-        tx.execute("INSERT INTO service_bindings(id,business_id,target_id,service,runtime_id,kind,score,reasons_json,evidence_ids_json,status,discovery_id,freshness_status,observed_at,expires_at,source_json,candidate_digest) VALUES(?,?,?,?,?,'service',1,'[]','[]','confirmed',?,'confirmed',?,?,'{}','synthetic-fixture')",
-                   (uid(),profile['business_id'],runtime['id'],'edge-proxy','edge-proxy.service',uid(),now(),(datetime.now(timezone.utc)+timedelta(days=1)).isoformat()))
+        tx.execute("INSERT INTO service_bindings(id,business_id,target_id,service,runtime_id,kind,score,reasons_json,evidence_ids_json,status,discovery_id,freshness_status,observed_at,expires_at,source_json,candidate_digest) VALUES(?,?,?,?,?,'service',1,'[]','[]','confirmed',?,'confirmed',?,?,'{}',?)",
+                   (uid(),profile['business_id'],runtime['id'],'edge-proxy','edge-proxy.service',uid(),now(),(datetime.now(timezone.utc)+timedelta(days=1)).isoformat(),candidate_digest(candidate)))
     event=client.post('/api/v1/incidents',json={'system_id':profile['system_id'],'symptom':'catalog-api unavailable','mode':mode}).json()['id']
     job,_,_=reserve_investigation(database,event,profile['business_id'],runtime['id'])
     run_id=prepare_run(database,get_settings(),event,profile['business_id'],runtime['id'],job,'synthetic-operator')
     coordinator=get_coordinator(database)
     lease=coordinator.claim(run_id)
+    # Keep this synthetic result-consumer fixture behind the real identity preflight.
+    from app.connectors.mock import MockConnector
+    original=MockConnector.read
+    def inventory(self,tool,args):
+        return {'connector':'mock','services':[candidate],'partial':False} if tool=='service.list' else original(self,tool,args)
+    with patch.object(MockConnector,'read',inventory):
+        broker=InvestigationBroker(database,get_settings(),lease)
+        while not broker.scope_verified:
+            assert broker.advance()['continue']
     state,assessments=complete_state()
     result=evaluate(state,assessments)
     with database.transaction() as tx:

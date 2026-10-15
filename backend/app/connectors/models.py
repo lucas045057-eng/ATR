@@ -225,6 +225,29 @@ class ConfigArgs(StrictModel):
 class BindingReview(StrictModel):
     decision: Literal["confirm", "reject"]
     reason: str = Field(min_length=5, max_length=1000)
+    identity_mode: Literal['exact_instance', 'stable_object'] = 'exact_instance'
+
+
+class ScopeRevocation(StrictModel):
+    reason: str = Field(min_length=5, max_length=1000)
+
+
+class AuthorizationRuleReview(ScopeRevocation):
+    identity_mode: Literal['exact_instance', 'stable_object'] = 'exact_instance'
+
+
+class InventoryAuthorization(AuthorizationRuleReview):
+    observation_id: str = Field(min_length=1, max_length=80)
+    runtime_id: str = Field(min_length=1, max_length=255)
+    kind: Literal['service', 'container', 'process']
+    service: str = Field(min_length=1, max_length=255)
+    role: Literal['unknown', 'proxy', 'application', 'datastore', 'cache', 'worker', 'queue'] = 'unknown'
+
+
+class InvestigationDefaults(StrictModel):
+    target_id: str = Field(min_length=1, max_length=80)
+    services: list[str] = Field(default_factory=list, max_length=20)
+    primary_service: str | None = Field(default=None, max_length=255)
 
 
 class DockerReaderSelection(StrictModel):

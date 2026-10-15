@@ -153,6 +153,8 @@ class RuntimeService:
 
     def execute(self, business_id, target_id, request: ToolRequest, timeout_cap=None, *, supervision=None, read_protocol=None, expected_authorization_digest=None):
         config = self.get(business_id, target_id)
+        scope_target = dict(config)
+        from app.agent.discovery import authorization_digest
         # Check the exact immutable copy passed to the connector, before overriding limits.
         if expected_authorization_digest is not None:
             from app.agent.discovery import authorization_digest
@@ -167,13 +169,14 @@ class RuntimeService:
         with self.db.transaction() as tx:
             if supervision is not None:
                 supervision['authorize'](tx)
+            from app.system.authorization import authorization, authorized
             from app.system.scope import binding_is_current
             approved = {
                 (r["kind"], r["runtime_id"])
                 for r in tx.execute(
                     "SELECT * FROM service_bindings WHERE target_id=? AND status='confirmed'",
                     (target_id,),
-                ) if binding_is_current(r)
+                ) if binding_is_current(r) and (not authorization(r) or authorized(r, scope_target))
             }
             tx.execute(
                 "INSERT INTO runtime_observations(id,target_id,tool_id,args_json,status,payload_json,content_digest,observed_at,bytes,error) VALUES(?,?,?,?,?,?,?,?,?,?)",
@@ -230,6 +233,7 @@ class RuntimeService:
                     next(iter(payload.get("invalid_line_numbers", [])), None),
                     payload.get("output_bytes", len(serialized.encode())), payload.get("invalid_records", 0),
                     partial=True, observation_id=observation_id).public()
+            diagnostic['target_authorization_signature'] = authorization_digest(scope_target)
             stamp = now()  # Local acquisition time, remote clock is untrusted.
             with self.db.transaction() as tx:
                 if supervision is not None:
