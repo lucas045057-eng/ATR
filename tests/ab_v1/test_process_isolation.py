@@ -75,3 +75,45 @@ def test_cancelled_result_cannot_be_accepted_after_child_exit(tmp_path):
     code = "import pathlib,sys; sys.stdin.buffer.read(); pathlib.Path(sys.argv[1]).write_text('cancelled'); print('result')"
     with pytest.raises(InterruptedError):
         runner()([sys.executable, "-c", code, str(marker)], b"{}", timeout=3, cancelled=Cancellation())
+
+
+def test_exchange_has_an_operation_deadline_even_with_live_heartbeats():
+    import threading
+    cancelled = threading.Event()
+    received = []
+    code = ("import json,sys,time,threading; sys.stdin.buffer.readline(); "
+            "print(json.dumps({'type':'progress','sequence':1}),flush=True); "
+            "exec('def beat():\\n while True:\\n  time.sleep(0.02)\\n  print(json.dumps({\"type\":\"heartbeat\"}),flush=True)'); "
+            "threading.Thread(target=beat,daemon=True).start(); sys.stdin.buffer.readline()")
+    def exchange(value):
+        if value['type'] == 'heartbeat':
+            received.append(value)
+            return None
+        cancelled.wait(2)
+        return {'continue':True}
+    with pytest.raises(TimeoutError) as caught:
+        runner()([sys.executable, '-c', code], b'{}\n', timeout=None,
+                 operation_timeout=0.15, cancelled=cancelled, exchange=exchange)
+    assert received
+    assert caught.value.code == 'operation_timeout'
+    assert caught.value.stage == 'exchange' and caught.value.check_id == 'step:1'
+    assert cancelled.is_set()
+
+
+def test_process_failure_has_safe_stage_category_and_check_identifier():
+    code = "import sys,time; sys.stdin.buffer.read(); time.sleep(120)"
+    with pytest.raises(TimeoutError) as caught:
+        runner()([sys.executable, '-c', code], b'password=synthetic-secret', timeout=0.1)
+    error = caught.value
+    assert error.code == 'process_timeout' and error.stage == 'execute'
+    assert error.check_id == 'process' and error.diagnostic['error_category'] == 'deadline'
+    assert 'synthetic-secret' not in str(error.diagnostic)
+
+
+def test_malformed_worker_message_is_not_misclassified_as_output_limit():
+    command = [sys.executable, '-c', "import sys,time; sys.stdin.buffer.readline(); print('password=synthetic-secret',flush=True); time.sleep(5)"]
+    with pytest.raises(ValueError) as caught:
+        runner()(command, b'{}\n', timeout=2, exchange=lambda value: None)
+    assert caught.value.code == 'worker_message_invalid'
+    assert caught.value.stage == 'receive'
+    assert 'synthetic-secret' not in str(caught.value.diagnostic)

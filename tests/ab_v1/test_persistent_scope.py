@@ -44,7 +44,8 @@ def test_old_approval_survives_restart_and_daily_run_revalidates_identity(client
     assert job['status'] == 'completed', job
     assert not run.get('clarification') and run['execution_status'] != 'waiting_input'
     tools = [call['tool_id'] for call in run['tool_calls']]
-    assert tools.index('service.list') < tools.index('service.status') < tools.index('service.logs')
+    assert tools.index('service.list') < tools.index('service.status')
+    assert 'service.logs' not in tools  # A stopped instance already satisfies the direct goal.
     assert all(call['status'] == 'succeeded' for call in run['tool_calls'] if call['tool_id'] in {'service.status','service.logs'})
     assert current_binding(client, profile, binding)['authorization']['confirmed_at'] == old['authorization']['confirmed_at']
     assert run['summary']['scope_validation']['verified_count'] == 1
@@ -296,7 +297,7 @@ def test_manual_discovery_during_a_run_cannot_clear_its_identity_marker(client, 
     assert job['status']=='completed'
     assert attempts and all(r.status_code==409 for r in attempts)
     assert run['summary']['stop_reason']!='business_authorization_changed'
-    assert any(call['tool_id']=='service.logs' and call['status']=='succeeded' for call in run['tool_calls'])
+    assert any(call['tool_id']=='service.status' and call['status']=='succeeded' for call in run['tool_calls'])
 
 
 def test_internal_identity_refresh_preserves_the_current_run_marker(client, monkeypatch):
@@ -315,4 +316,4 @@ def test_internal_identity_refresh_preserves_the_current_run_marker(client, monk
     job, run = start_native(client, profile, runtime)
     assert job['status']=='completed'
     assert current_binding(client, profile, binding)['verified_run_id']==run['id']
-    assert any(call['tool_id']=='service.logs' and call['status']=='succeeded' for call in run['tool_calls'])
+    assert any(call['tool_id']=='service.status' and call['status']=='succeeded' for call in run['tool_calls'])

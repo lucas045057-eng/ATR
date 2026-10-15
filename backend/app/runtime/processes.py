@@ -15,6 +15,14 @@ from pathlib import Path
 ENVIRONMENT_KEYS = {"PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "HOME", "LANG", "LC_ALL", "SSL_CERT_FILE", "SSL_CERT_DIR"}
 
 
+def process_failure(kind, message, code, stage, check_id='process', category='protocol'):
+    error = kind(message)
+    error.code, error.stage, error.check_id = code, stage, check_id
+    error.diagnostic = {'code': code, 'failure_stage': stage, 'stage': stage,
+                        'error_category': category, 'check_id': check_id, 'exception_type': kind.__name__}
+    return error
+
+
 def child_environment() -> dict[str, str]:
     env = {key: value for key, value in os.environ.items() if key.upper() in ENVIRONMENT_KEYS}
     env.update(PYTHONUTF8="1", PYTHONPATH=str(Path(__file__).resolve().parents[2]),
@@ -59,32 +67,38 @@ def _windows_job(process):
 
 def run_bounded(arguments: list[str], request: bytes, *, timeout: float | None, max_output: int = 2 * 1024 * 1024,
                 cancelled: threading.Event | None = None, on_spawn=None, exchange=None, on_message=None,
-                on_progress=None) -> dict:
-    if (timeout is not None and timeout <= 0) or len(request) > 2 * 1024 * 1024:
-        raise ValueError("Invalid process request bounds")
+                on_progress=None, operation_timeout: float = 90) -> dict:
+    if (timeout is not None and timeout <= 0) or operation_timeout <= 0 or len(request) > 2 * 1024 * 1024:
+        raise process_failure(ValueError, "Invalid process request bounds", 'process_request_invalid', 'validate')
     if cancelled is not None and cancelled.is_set():
-        raise InterruptedError("Process request cancelled")
+        raise process_failure(InterruptedError, "Process request cancelled", 'process_cancelled', 'dispatch', category='cancellation')
     deadline = time.monotonic() + timeout if timeout is not None else float('inf')
     if sys.platform == "linux":
         arguments = [sys.executable, "-m", "app.runtime.process_bootstrap", *arguments]
     owner_cookie = uuid.uuid4().hex
     environment = {**child_environment(), 'ATR_PROCESS_OWNER': owner_cookie}
-    process = subprocess.Popen(arguments, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE, env=environment,
-                               start_new_session=sys.platform != "win32")
+    try:
+        process = subprocess.Popen(arguments, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, env=environment,
+                                   start_new_session=sys.platform != "win32")
+    except OSError:
+        raise process_failure(OSError, 'Process spawn failed', 'process_spawn_failed', 'spawn', category='execution') from None
     job = None
     buffers = {"stdout": bytearray(), "stderr": bytearray()}
     exceeded = threading.Event()
+    read_failure = {'code': 'process_output_limit', 'category': 'output_limit'}
     readers = []
     buffer_lock = threading.Lock()
     incoming, outgoing = queue.Queue(maxsize=64), queue.Queue(maxsize=2)
     dispatch = None
     write_lock = threading.Lock()
+    operation_deadline = time.monotonic() + operation_timeout
+    operation_check = 'step:0'
 
     def send(value):
         encoded = json.dumps(value, ensure_ascii=False).encode() + b'\n'
         if len(encoded) > max_output:
-            raise ValueError('Process reply limit exceeded')
+            raise process_failure(ValueError, 'Process reply limit exceeded', 'process_reply_limit', 'exchange', operation_check, 'output_limit')
         with write_lock:
             process.stdin.write(encoded)
             process.stdin.flush()
@@ -117,7 +131,14 @@ def run_bounded(arguments: list[str], request: bytes, *, timeout: float | None, 
                         break
             if exchange is not None and pending:
                 exceeded.set()
-        except (OSError, ValueError, queue.Full):
+        except (ValueError, UnicodeError):
+            read_failure.update(code='worker_message_invalid', category='protocol')
+            exceeded.set()
+        except queue.Full:
+            read_failure.update(code='worker_queue_limit', category='protocol')
+            exceeded.set()
+        except OSError:
+            read_failure.update(code='process_channel_failed', category='transport')
             exceeded.set()
 
     def write():
@@ -135,11 +156,14 @@ def run_bounded(arguments: list[str], request: bytes, *, timeout: float | None, 
 
     try:
         if sys.platform == "win32":
-            job = _windows_job(process)
+            try:
+                job = _windows_job(process)
+            except OSError:
+                raise process_failure(OSError, 'Process supervision unavailable', 'process_containment_unavailable', 'containment', category='containment') from None
         if on_spawn is not None:
             on_spawn({'platform': sys.platform, 'pid': process.pid, 'cookie': owner_cookie})
         if (cancelled is not None and cancelled.is_set()) or time.monotonic() >= deadline:
-            raise InterruptedError("Process dispatch no longer authorized")
+            raise process_failure(InterruptedError, "Process dispatch no longer authorized", 'process_cancelled', 'dispatch', category='cancellation')
         for name in buffers:
             thread = threading.Thread(target=read, args=(getattr(process, name), name), daemon=True)
             thread.start()
@@ -148,26 +172,33 @@ def run_bounded(arguments: list[str], request: bytes, *, timeout: float | None, 
         writer.start()
         while process.poll() is None:
             if cancelled is not None and cancelled.is_set():
-                raise InterruptedError("Process request cancelled")
+                raise process_failure(InterruptedError, "Process request cancelled", 'process_cancelled', 'execute', category='cancellation')
             if exceeded.is_set():
-                raise ValueError("Process output limit exceeded")
+                raise process_failure(ValueError, "Process output limit exceeded" if read_failure['category'] == 'output_limit'
+                                      else 'Invalid worker output channel', read_failure['code'], 'receive', category=read_failure['category'])
             if time.monotonic() >= deadline:
-                raise TimeoutError("Process request deadline exceeded")
+                raise process_failure(TimeoutError, "Process request deadline exceeded", 'process_timeout', 'execute', category='deadline')
             if exchange is not None:
+                if time.monotonic() >= operation_deadline:
+                    raise process_failure(TimeoutError, 'Process operation deadline exceeded', 'operation_timeout',
+                                          'exchange' if dispatch is not None else 'receive', operation_check, 'deadline')
                 try:
                     item = incoming.get_nowait()
                 except queue.Empty:
                     item = None
                 if item is not None:
                     if not isinstance(item, dict):
-                        raise ValueError('Invalid worker message')
+                        raise process_failure(ValueError, 'Invalid worker message', 'worker_message_invalid', 'receive', operation_check)
                     if on_message is not None and not on_message(item):
-                        raise InterruptedError('Worker message rejected')
+                        raise process_failure(InterruptedError, 'Worker message rejected', 'worker_message_rejected', 'receive', operation_check, 'authorization')
                     if item.get('type') == 'heartbeat':
                         exchange(item)
                     else:
                         if dispatch is not None and dispatch.is_alive():
-                            raise ValueError('Concurrent worker requests rejected')
+                            raise process_failure(ValueError, 'Concurrent worker requests rejected', 'worker_concurrent_requests', 'exchange', operation_check)
+                        sequence = item.get('sequence', 0)
+                        operation_check = f"step:{sequence if type(sequence) is int and 0 <= sequence <= 10**12 else 0}"
+                        operation_deadline = time.monotonic() + operation_timeout
 
                         def handle(message=item):
                             try:
@@ -184,25 +215,29 @@ def run_bounded(arguments: list[str], request: bytes, *, timeout: float | None, 
                 else:
                     if not ok:
                         raise value
+                    if time.monotonic() >= operation_deadline:
+                        raise process_failure(TimeoutError, 'Process operation deadline exceeded', 'operation_timeout', 'exchange', operation_check, 'deadline')
                     send(value)
+                    operation_deadline = time.monotonic() + operation_timeout
             time.sleep(min(0.01, max(0, deadline - time.monotonic())))
         # A finished child's output must drain promptly even without a total investigation deadline.
         drain_deadline = min(deadline, time.monotonic() + 1)
         for thread in readers:
             while thread.is_alive() and time.monotonic() < drain_deadline:
                 if cancelled is not None and cancelled.is_set():
-                    raise InterruptedError("Process request cancelled")
+                    raise process_failure(InterruptedError, "Process request cancelled", 'process_cancelled', 'drain', category='cancellation')
                 thread.join(timeout=min(0.05, max(0, drain_deadline - time.monotonic())))
         if cancelled is not None and cancelled.is_set():
-            raise InterruptedError("Process request cancelled")
+            raise process_failure(InterruptedError, "Process request cancelled", 'process_cancelled', 'drain', category='cancellation')
         if time.monotonic() >= deadline:
-            raise TimeoutError("Process request deadline exceeded")
+            raise process_failure(TimeoutError, "Process request deadline exceeded", 'process_timeout', 'execute', category='deadline')
         if any(thread.is_alive() for thread in readers):
-            raise TimeoutError("Process descendant retained output channel")
+            raise process_failure(TimeoutError, "Process descendant retained output channel", 'process_output_retained', 'drain', category='containment')
         if exceeded.is_set():
-            raise ValueError("Process output limit exceeded")
+            raise process_failure(ValueError, "Process output limit exceeded" if read_failure['category'] == 'output_limit'
+                                  else 'Invalid worker output channel', read_failure['code'], 'receive', category=read_failure['category'])
         if process.returncode == 72:
-            raise RuntimeError("Process containment unavailable")
+            raise process_failure(RuntimeError, "Process containment unavailable", 'process_containment_unavailable', 'containment', category='containment')
         return {"returncode": process.returncode, "stdout": bytes(buffers["stdout"]),
                 "stderr": bytes(buffers["stderr"]), "pid": process.pid}
     finally:
@@ -227,7 +262,7 @@ def run_bounded(arguments: list[str], request: bytes, *, timeout: float | None, 
         if dispatch is not None:
             dispatch.join(timeout=10)
             if dispatch.is_alive():
-                raise RuntimeError('Process broker cleanup pending')
+                raise process_failure(RuntimeError, 'Process broker cleanup pending', 'process_cleanup_pending', 'cleanup', operation_check, 'containment')
 
 
 def reap_owned_process(owner: dict) -> bool:

@@ -6,7 +6,10 @@ import httpx
 import pytest
 from conftest import wait_job
 from playwright.sync_api import expect, sync_playwright
-from test_browser import live_server  # noqa: F401 - pytest fixture
+from test_browser import (
+    legacy_run_requests,
+    live_server,  # noqa: F401 - pytest fixture
+)
 from test_business import onboard
 from test_model_isolation import fake_model  # noqa: F401 - pytest fixture
 from test_runtime import discover, target
@@ -38,7 +41,7 @@ def test_browser_model_failure_is_visible_and_next_request_recovers(live_server,
         page.get_by_role("button", name="导入业务资料", exact=False).click()
         page.get_by_label("业务名称", exact=True).fill("模型失败恢复 Mock")
         page.get_by_role("button", name="创建并保存", exact=True).click()
-        analyze = page.get_by_role("button", name="按预算进行模型理解", exact=True)
+        analyze = page.get_by_role("button", name="进行模型理解", exact=True)
         expect(analyze).to_be_enabled(timeout=10000)
         analyze.click()
         expect(page.get_by_text("模型调用失败", exact=True)).to_be_visible(timeout=20000)
@@ -76,7 +79,7 @@ def test_browser_usage_is_read_only_despite_small_legacy_budget(low_input_budget
         symptom = '预算预检查验收 ' + profile['business_id'][:8]
         incident = api.post('/api/v1/incidents', json={'system_id': profile['system_id'],
                             'symptom': symptom, 'mode': 'graph_adaptive'}).json()
-        task = api.post('/api/v1/incidents/' + incident['id'] + '/runs').json()
+        task = api.post('/api/v1/incidents/' + incident['id'] + '/runs', json={'decision_protocol': 'legacy_v22'}).json()
         job = wait_job(api, task['job_id'])
         result = api.get('/api/v1/runs/' + job['result']['id']).json()
         assert result['context_budget']['mode'] == 'accounting_only'
@@ -90,6 +93,7 @@ def test_browser_usage_is_read_only_despite_small_legacy_budget(low_input_budget
         page.goto(base)
         page.get_by_role('button', name='排查故障', exact=False).click()
         page.locator('.incident-list').get_by_text(symptom, exact=True).click()
+        page.get_by_test_id('evidence-audit').locator('summary').first.click()
         expect(page.get_by_text('预算只读，不限制调用', exact=False)).to_be_visible()
         expect(page.get_by_test_id('budget-error-details')).to_have_count(0)
         browser.close()
@@ -111,7 +115,7 @@ def test_browser_529_investigation_history_and_manual_recovery(live_server, fake
         state['status'] = 529
         symptom = 'catalog-api startup failure ' + profile['business_id'][:8]
         incident = api.post('/api/v1/incidents', json={"system_id": profile['system_id'], "symptom": symptom, "mode": "graph_adaptive"}).json()
-        task = api.post('/api/v1/incidents/' + incident['id'] + '/runs').json()
+        task = api.post('/api/v1/incidents/' + incident['id'] + '/runs', json={'decision_protocol': 'legacy_v22'}).json()
         job = wait_job(api, task['job_id'], timeout=20)
         result = api.get('/api/v1/runs/' + job['result']['id']).json()
         assert result['summary']['model_error']['status_code'] == 529
@@ -120,12 +124,14 @@ def test_browser_529_investigation_history_and_manual_recovery(live_server, fake
         context = browser.new_context(viewport={"width": 1440, "height": 1000})
         context.add_init_script("sessionStorage.setItem('atr_operator_token'," + json.dumps(token) + ")")
         page = context.new_page()
+        legacy_run_requests(page)
         errors, responses = [], []
         page.on('pageerror', lambda e: errors.append(str(e)))
         page.on('response', lambda r: responses.append(r.url))
         page.goto(base)
         page.get_by_role('button', name='排查故障', exact=False).click()
         page.locator('.incident-list').get_by_text(symptom, exact=True).click()
+        page.get_by_test_id('evidence-audit').locator('summary').first.click()
         panel = page.get_by_test_id('model-error')
         expect(panel).to_contain_text('模型服务暂时不可用', timeout=10000)
         expect(panel).to_contain_text('HTTP 529')
@@ -140,7 +146,15 @@ def test_browser_529_investigation_history_and_manual_recovery(live_server, fake
         state['reply'] = lambda c, _: report([hypothesis(c, 'catalog-api', failure='startup_failure', all_evidence=True)])
         page.get_by_role('button', name='开始只读调查', exact=False).click()
         expect(panel).to_have_count(0, timeout=20000)
-        expect(page.get_by_text('证据门通过', exact=True)).to_be_visible(timeout=20000)
+        page.get_by_test_id('evidence-audit').locator('summary').first.click()
+        expect(page.locator('.run-status-line strong')).to_have_text('证据核验通过', timeout=20000)
+        latest = httpx.get(base + '/api/v1/incidents/' + incident['id'] + '/runs',
+                           headers={'Authorization': 'Bearer ' + token}).json()
+        assert len(latest) == 2
+        recovered = httpx.get(base + '/api/v1/runs/' + latest[0]['id'],
+                              headers={'Authorization': 'Bearer ' + token}).json()
+        assert recovered['summary']['gate']['status'] == 'supported'
+        assert recovered['summary']['gate']['hypotheses'][0]['verification']['passed'] is True
         expect(page.get_by_role('button', name='开始只读调查', exact=False)).to_be_enabled(timeout=10000)
         # Allow the final one-shot refresh to finish before checking recurring polls.
         page.wait_for_timeout(500)
@@ -185,7 +199,7 @@ def test_browser_schema_error_shows_safe_field_path(live_server, fake_model, inv
         state['reply'] = reply
         symptom = '安全字段诊断 ' + profile['business_id'][:8]
         incident = api.post('/api/v1/incidents', json={'system_id': profile['system_id'], 'symptom': symptom, 'mode': 'graph_adaptive'}).json()
-        task = api.post('/api/v1/incidents/' + incident['id'] + '/runs').json()
+        task = api.post('/api/v1/incidents/' + incident['id'] + '/runs', json={'decision_protocol': 'legacy_v22'}).json()
         job = wait_job(api, task['job_id'], timeout=20)
         result = api.get('/api/v1/runs/' + job['result']['id']).json()
         if invalid_reference == 'counter':
@@ -205,6 +219,7 @@ def test_browser_schema_error_shows_safe_field_path(live_server, fake_model, inv
         page.goto(base)
         page.get_by_role('button', name='排查故障', exact=False).click()
         page.locator('.incident-list').get_by_text(symptom, exact=True).click()
+        page.get_by_test_id('evidence-audit').locator('summary').first.click()
         panel = page.get_by_test_id('model-error')
         if invalid_reference == 'counter':
             warning = page.get_by_text('局部证据关系已隔离', exact=False)

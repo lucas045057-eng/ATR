@@ -15,7 +15,7 @@ from test_result_evaluator import complete_state, evaluate
 from test_runtime import target
 
 
-def native_run(client,status='root_cause_supported',mode='graph_adaptive'):
+def native_run(client,status='root_cause_supported',mode='graph_adaptive',single_rule=None):
     files={**SAMPLE,'compose.yaml':'services:\n  catalog-api: {build: ., depends_on: [store]}\n  store: {image: mysql:8.4}\n  edge-proxy: {image: nginx, depends_on: [catalog-api]}\n'}
     profile=onboard(client,files)
     runtime=target(client,profile)
@@ -41,10 +41,30 @@ def native_run(client,status='root_cause_supported',mode='graph_adaptive'):
             assert broker.advance()['continue']
     state,assessments=complete_state()
     result=evaluate(state,assessments)
+    if single_rule in {'dependency_unavailable_at_startup', 'upstream_unavailable'}:
+        state.update(investigation_goal='trigger_cause', required_rule_ids=[single_rule])
+        result = evaluate(state, [a for a in assessments if a['rule_id'] == single_rule])
+        assert result['diagnosis_status'] == 'root_cause_supported'
+    elif single_rule:
+        from app.agent.mechanisms import MechanismRegistry
+        from app.agent.result_evaluator import ResultEvaluator
+        state = {'investigation_goal':'trigger_cause', 'focus_node_id':'proxy', 'required_rule_ids':[single_rule],
+                 'investigation_scope':{'target_node_ids':['proxy'], 'current_cycles':{'proxy':'boot'}},
+                 'graph':{'edges':[]}, 'facts':[
+                     {'fact_id':'state', 'kind':'service_state', 'value':'failed', 'target_node_id':'proxy',
+                      'evidence_id':'single-state', 'call_id':'single-status', 'freshness':'current', 'startup_cycle':'boot'},
+                     {'fact_id':'log', 'kind':'log_observation', 'value':{'mechanisms':[single_rule], 'endpoint_ids':[], 'terminal_failure':True},
+                      'target_node_id':'proxy', 'evidence_id':'single-log', 'call_id':'single-read-log',
+                      'freshness':'current', 'startup_cycle':'boot'}]}
+        assessment = MechanismRegistry().verify(single_rule, state['facts'], [], state['investigation_scope'])
+        result = ResultEvaluator().evaluate(state, [assessment])
+        assert result['diagnosis_status'] == 'root_cause_supported'
     with database.transaction() as tx:
         run=dict(tx.execute('SELECT * FROM diagnosis_runs WHERE id=?',(run_id,)).fetchone())
         nodes={row['name']:row['id'] for row in tx.execute("SELECT * FROM graph_nodes WHERE snapshot_id=? AND kind='service'",(run['graph_snapshot_id'],))}
         mapping={'app':nodes['catalog-api'],'db':nodes['store'],'proxy':nodes['edge-proxy']}
+        if single_rule == 'dependency_unavailable_at_startup':
+            mapping['app'] = nodes['edge-proxy']
         for segment in result['verified_segments']:
             segment['participants']={role:mapping[node] for role,node in segment['participants'].items()}
             for citation in segment['supports']:
@@ -61,6 +81,10 @@ def native_run(client,status='root_cause_supported',mode='graph_adaptive'):
             result.update(diagnosis_status=status,completion_satisfied=status=='no_fault_observed',verified_segments=[],required_gaps=[] if status=='no_fault_observed' else [{'requirement_id':'current_logs','target_ids':[mapping['app']]}])
             if status=='no_fault_observed':
                 result['direct_faults']=[]
+            if status=='direct_cause_supported':
+                result.update(completion_satisfied=True, required_gaps=[], verified_segments=[{
+                    'rule_id':'instance_stopped', 'status':'supported', 'participants':{'instance':mapping['app']},
+                    'supports':[]}])
         summary['diagnosis_result']=result
         tx.execute('UPDATE diagnosis_runs SET summary_json=? WHERE id=?',(dumps(summary),run_id))
     coordinator.finalize(run_id,'completed',result,lease_token=lease['lease_token'])
@@ -93,6 +117,61 @@ def test_native_healthy_completion_is_counted_separately_and_cannot_capture_root
     metrics=client.get('/api/v1/metrics').json()
     assert metrics['runs_completed']==1 and metrics['healthy_runs']==1 and metrics['supported_runs']==0
     assert metrics['tt_rca_seconds_median'] is None and not run['repair_eligible']
+
+
+def test_direct_completion_has_its_own_metrics_and_never_gains_repair_knowledge(client):
+    from app.evaluation import run_metrics
+    run, database, _, _ = native_run(client, 'direct_cause_supported')
+    assert run['diagnosis_status'] == 'direct_cause_supported' and run['completion_satisfied']
+    assert not run['repair_eligible'] and not run['verification_endpoints']
+    metrics = client.get('/api/v1/metrics').json()
+    assert metrics['direct_cause_runs'] == metrics['goal_completed_runs'] == 1
+    assert metrics['supported_runs'] == metrics['healthy_runs'] == metrics['unresolved_runs'] == 0
+    assert metrics['tt_rca_seconds_median'] is None
+    listed = next(row for row in client.get('/api/v1/runs').json() if row['id'] == run['id'])
+    assert listed['diagnosis_status'] == 'direct_cause_supported' and listed['completion_satisfied']
+    response = client.post(f"/api/v1/incidents/{run['incident_id']}/repair", json={
+        'summary':'manual repair', 'operator_verified':True, 'verification_summary':'checked',
+        'verification_endpoint_id':'proxy-health'})
+    assert response.status_code == 409
+    with database.connect() as tx:
+        assert tx.execute('SELECT COUNT(*) FROM experiences').fetchone()[0] == 0
+        assert tx.execute("SELECT COUNT(*) FROM tool_calls WHERE purpose='verification'").fetchone()[0] == 0
+        persisted = tx.execute('SELECT * FROM diagnosis_runs WHERE id=?', (run['id'],)).fetchone()
+        measured = run_metrics(tx, persisted)
+    assert measured['run_status'] == measured['diagnosis_status'] == 'direct_cause_supported'
+    assert measured['completion_satisfied'] and measured['tt_rca_seconds'] is None
+    assert all(row['run_id'] != run['id'] for row in client.get('/api/v1/knowledge-counterexamples').json())
+
+
+def test_direct_evaluation_compares_explicit_scoped_truth_without_root_credit(client):
+    from app.evaluation import assess_truth
+    run, database, _, _ = native_run(client, 'direct_cause_supported')
+    with database.transaction() as tx:
+        row = tx.execute('SELECT * FROM diagnosis_runs WHERE id=?', (run['id'],)).fetchone()
+        result = json.loads(tx.execute('SELECT result_json FROM run_executions WHERE run_id=?', (run['id'],)).fetchone()[0])
+        node = next(n[0] for n in tx.execute("SELECT id FROM graph_nodes WHERE snapshot_id=? AND name='catalog-api'", (row['graph_snapshot_id'],)))
+        result.update(verified_segments=[], direct_explanations=[{'kind':'instance_unavailable', 'target_node_id':node, 'scope':'instance', 'evidence_ids':['status']}])
+        tx.execute('UPDATE run_executions SET result_json=? WHERE run_id=?', (dumps(result), run['id']))
+        case = {'ground_truth_json':dumps({'direct_explanations':[{'kind':'instance_unavailable','target_service':'catalog-api','scope':'instance'}]})}
+        assessed = assess_truth(tx, case, row)
+        assert assessed['expected_verdict'] == 'correct' and not assessed['false_positive']
+        assert assessed['truth_schema'] == 'ab-direct-1'
+        case['ground_truth_json'] = dumps({'segments':[]})
+        assert assess_truth(tx, case, row)['expected_verdict'] == 'incorrect'
+
+
+def test_historical_partial_is_not_reevaluated_as_direct_success(client):
+    from app.run_outcomes import outcome
+    run, database, _, _ = native_run(client, 'partial')
+    with database.transaction() as tx:
+        # Historical anomaly evidence remains historical; consumers read persisted grades only.
+        tx.execute('DELETE FROM run_executions WHERE run_id=?', (run['id'],))
+        old = dict(tx.execute('SELECT * FROM diagnosis_runs WHERE id=?', (run['id'],)).fetchone())
+        measured = outcome(tx, old)
+    assert not measured['root_supported'] and not measured.get('direct_supported')
+    assert measured['status'] == 'unresolved'
+    assert client.get('/api/v1/metrics').json()['direct_cause_runs'] == 0
 
 
 def test_native_adaptive_trial_uses_typed_segment_truth_and_persisted_arm(client):

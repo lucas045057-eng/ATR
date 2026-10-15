@@ -5,7 +5,10 @@ import os
 import httpx
 from playwright.sync_api import expect, sync_playwright
 from test_autonomous_discovery import mapping, unbound
-from test_browser import live_server  # noqa: F401
+from test_browser import (
+    legacy_run_requests,
+    live_server,  # noqa: F401
+)
 from test_business import onboard
 from test_media_optional import PNG
 from test_model_isolation import fake_model  # noqa: F401
@@ -31,12 +34,14 @@ def test_browser_discovery_review_and_same_run_resume(live_server, fake_model): 
         api.post("/api/v1/incidents", json={"system_id": profile["system_id"], "symptom": "catalog-api discovery UI"}).raise_for_status()
     with sync_playwright() as p:
         browser, page = browser_page(p, base, token)
+        legacy_run_requests(page)
         errors = []
         page.on("pageerror", lambda e: errors.append(str(e)))
         page.on("dialog", lambda d: d.accept("人工核验隔离服务身份及授权范围"))
         page.get_by_role("button", name="排查故障", exact=False).first.click()
         page.locator(".incident-row").first.click()
         page.get_by_role("button", name="开始只读调查", exact=False).click()
+        page.get_by_test_id("evidence-audit").locator("summary").first.click()
         expect(page.get_by_role("heading", name="自主发现与范围建议")).to_be_visible(timeout=30000)
         expect(page.get_by_text("Agent 阶段：", exact=False)).to_contain_text("等待范围审核")
         expect(page.get_by_text("反证或冲突：", exact=False)).to_be_visible()
@@ -45,9 +50,10 @@ def test_browser_discovery_review_and_same_run_resume(live_server, fake_model): 
         expect(page.get_by_role("heading", name="发现的运行对象")).to_be_visible()
         process = page.locator("details").filter(has=page.locator("summary").filter(has_text="进程线索")).last
         assert process.get_attribute("open") is None
-        row = page.locator(".business-row").filter(has_text="catalog-api → catalog-api.service")
-        row.get_by_role("button", name="确认", exact=True).click()
-        expect(row.get_by_role("button", name="确认", exact=True)).to_have_count(0, timeout=10000)
+        row = page.get_by_test_id("binding-authorization").filter(has_text="catalog-api → catalog-api.service")
+        row.get_by_label("授权依据", exact=True).fill("人工核验隔离服务身份及授权范围")
+        row.get_by_role("button", name="确认授权", exact=True).click()
+        expect(row).to_contain_text("持久授权：有效", timeout=10000)
         page.get_by_role("button", name="排查故障", exact=False).first.click()
         page.get_by_role("button", name="审核后继续调查", exact=True).click()
         expect(page.get_by_text("Agent 阶段：", exact=False)).to_contain_text("已完成", timeout=30000)
@@ -68,7 +74,9 @@ def test_browser_optional_attachment_undo_and_process_groups(live_server):  # no
         page.get_by_label("选择业务").select_option(profile["business_id"])
         page.locator("summary").filter(has_text="查看文件清单").click()
         expect(page.get_by_text("可选静态附件 1 个", exact=False)).to_be_visible()
-        expect(page.locator(".business-row").filter(has_text="architecture.png")).to_contain_text("待人工录入")
+        architecture = page.locator(".business-row").filter(has_text="architecture.png")
+        expect(architecture.get_by_role("button", name="人工录入", exact=True)).to_be_visible()
+        expect(architecture.get_by_role("checkbox")).to_have_count(0)
         page.get_by_role("button", name="撤销静态附件分类", exact=False).click()
         expect(page.get_by_text("可选静态附件 0 个", exact=False)).to_have_count(1, timeout=10000)
         page.locator("summary").filter(has_text="查看文件清单").click()

@@ -29,7 +29,10 @@ def run_metrics(connection, run):
     return {
         "diagnostic_tool_calls": len(calls),
         "failed_or_denied_calls": sum(c["status"] in {"failed", "denied", "timed_out"} for c in calls),
-        "diagnostic_steps": steps, "tt_rca_seconds": seconds(run["supported_at"]),
+        "diagnostic_steps": steps, "tt_rca_seconds": seconds(run["supported_at"]) if measured['root_supported'] else None,
+        "diagnosis_status": measured.get('diagnosis_status'),
+        "completion_satisfied": measured['completion_satisfied'],
+        "root_cause_supported": measured['root_supported'], "direct_cause_supported": measured['direct_supported'],
         "elapsed_seconds": seconds(run["ended_at"]), "run_status": measured['status'],
         'execution_status':measured.get('execution_status',run['status']),
         "stop_reason": summary.get("stop_reason") if isinstance(summary, dict) else None,
@@ -45,17 +48,32 @@ def assess_truth(connection, case, run):
     registered=json.loads(case['ground_truth_json'])
     measured=outcome(connection,run)
     if measured['native']:
+        names={row['id']:row['name'] for row in connection.execute('SELECT id,name FROM graph_nodes WHERE snapshot_id=?',(run['graph_snapshot_id'],))}
+        if 'direct_explanations' in registered:
+            truth = registered['direct_explanations']
+            fields = {'kind', 'target_service', 'scope'}
+            if (not isinstance(truth, list) or not truth or any(not isinstance(item, dict) or set(item) != fields
+                    or any(not isinstance(item[key], str) or not item[key] for key in fields) for item in truth)):
+                raise ValueError('Direct truth requires kind, target_service and scope')
+            diagnosed = [{'kind': item.get('kind'), 'target_service': names.get(item.get('target_node_id')),
+                          'scope': item.get('scope')} for item in measured['result'].get('direct_explanations', [])]
+            actual = {json.dumps(item, sort_keys=True) for item in diagnosed}
+            expected = {json.dumps(item, sort_keys=True) for item in truth}
+            return {'expected_verdict': 'unresolved' if measured['status'] == 'unresolved' else
+                    'correct' if actual == expected else 'incorrect', 'false_positive': bool(actual - expected),
+                    'partial_diagnosis': bool(actual and actual < expected),
+                    'diagnosed_direct_explanations': diagnosed, 'truth_schema': 'ab-direct-1'}
         truth=registered.get('segments')
         if not isinstance(truth,list) or any(not isinstance(item,dict) or set(item)!={'rule_id','participants'}
                 or not isinstance(item['rule_id'],str) or not isinstance(item['participants'],dict)
                 or any(not isinstance(role,str) or not isinstance(service,str) for role,service in item['participants'].items()) for item in truth):
             raise ValueError('原生 AB 验收需要明确的 segments 真值；不能把旧 failure_mode 自动改写为因果链')
-        names={row['id']:row['name'] for row in connection.execute('SELECT id,name FROM graph_nodes WHERE snapshot_id=?',(run['graph_snapshot_id'],))}
         diagnosed=[{'rule_id':segment['rule_id'],'participants':{role:names.get(identifier) for role,identifier in segment['participants'].items()}}
                    for segment in measured['result'].get('verified_segments',[]) if segment.get('status')=='supported']
         actual={json.dumps(item,sort_keys=True) for item in diagnosed}
         expected={json.dumps(item,sort_keys=True) for item in truth}
-        verdict='unresolved' if measured['status']=='unresolved' else 'correct' if actual==expected else 'incorrect'
+        verdict=('unresolved' if measured['status']=='unresolved' else 'correct'
+                 if actual==expected and not measured['direct_supported'] else 'incorrect')
         return {'expected_verdict':verdict,'false_positive':bool(actual-expected),
                 'partial_diagnosis':bool(actual and actual<=expected and actual!=expected),
                 'diagnosed_segments':diagnosed,'truth_schema':'ab-segments-1'}

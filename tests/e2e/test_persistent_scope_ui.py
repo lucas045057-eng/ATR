@@ -69,16 +69,20 @@ def test_authorized_fault_submit_starts_native_run(live_server, fake_model):  # 
         page.get_by_role('button', name='排查故障', exact=False).click()
         page.locator('select[name="system_id"]').select_option(profile['system_id'])
         page.locator('textarea[name="symptom"]').fill(symptom)
+        expect(page.locator('select[name="task_type"]')).to_have_value('focused_diagnosis')
         page.locator('.incident-panel form').get_by_role('button', name='提交故障并开始调查', exact=False).click()
+        expect(page.get_by_test_id('investigation-conclusion')).to_contain_text('直接故障定位目标已完成', timeout=30000)
+        page.get_by_test_id('evidence-audit').locator('summary').first.click()
         expect(page.get_by_role('heading', name='只读故障事实报告', exact=True)).to_be_visible(timeout=30000)
         expect(page.get_by_test_id('ab-fact-report')).to_contain_text('已确认事实')
-        expect(page.get_by_test_id('model-error')).to_contain_text('HTTP 529')
+        expect(page.get_by_test_id('model-error')).to_have_count(0)
+        expect(page.locator('.repair-form')).to_have_count(0)
         expect(page.get_by_role('button', name='确认所选对象并继续')).to_have_count(0)
         expect(page.get_by_test_id('unknown-object-review')).to_contain_text('未知对象待独立审批，不阻断当前授权调查')
         expect(page.locator('.run-view')).to_contain_text('本轮运行身份核验')
         assert len(starts) == 1 and starts[0]['decision_protocol'] == 'ab_v1'
         assert starts[0]['target_id'] == runtime['id']
-        assert model['requests'] - before == 1
+        assert model['requests'] - before == 0
         assert not errors
         page.screenshot(path=str(directory / 'p05-one-submit.png'), full_page=True)
         page.get_by_role('button', name='到服务器与服务独立审批').click()
@@ -96,7 +100,7 @@ def test_authorized_fault_submit_starts_native_run(live_server, fake_model):  # 
         with httpx.Client(base_url=base, headers={'Authorization': 'Bearer ' + token}) as api:
             rows = api.get(endpoint + '/bindings').json()
             assert any(row['service'] == 'catalog-backup' and row['authorization_valid'] for row in rows)
-        assert len(starts) == 1 and model['requests'] - before == 1
+        assert len(starts) == 1 and model['requests'] - before == 0
         assert not errors
         browser.close()
 

@@ -15,7 +15,7 @@ from app.agent.decision_runtime import (
 )
 from app.agent.discovery import authorization_digest
 from app.agent.fact_report import build_fact_report, evidence_quality
-from app.agent.log_events import normalize_log_events, parse_time, semantic_payload
+from app.agent.log_events import normalize_log_events, parse_time
 from app.agent.result_evaluator import evaluate_state
 from app.business.service import BusinessService
 from app.common import digest, dumps, now, uid
@@ -35,6 +35,27 @@ def effective_limits(settings):
               'max_seconds': None, 'model_timeout_seconds': min(45, settings.model_timeout_seconds),
               'ssh_timeout_seconds': 10}
     return limits
+
+
+def investigation_task(task):
+    if task.get('task_type_explicit', False):
+        return task.get('task_type', 'focused_diagnosis')
+    text = task.get('text', '').casefold()
+    deep = ('完整原因', '完整根因', '深入调查', '追查', '深层原因', 'root cause')
+    explicit_trigger = re.search(r'(?:为什么|为何).{0,24}(?:退出|停止|崩溃)|why.{0,40}(?:exit|crash|stopped)', text)
+    return 'root_cause_investigation' if explicit_trigger or any(term in text for term in deep) else 'focused_diagnosis'
+
+
+def investigation_root(graph, bindings, symptom, defaults):
+    nodes = {n['name']: n for n in graph['nodes'] if n['kind'] == 'service' and n['role'] != 'runtime'}
+    usable = {b['service'] for b in bindings if b['kind'] in {'service', 'container', 'process'} and b['service'] in nodes}
+    named = [name for name in nodes if name.casefold() in symptom.casefold()]
+    desired = named[0] if len(named) == 1 else defaults.get('primary_service')
+    if desired:
+        return nodes[desired]['id'] if desired in usable else None
+    applications = [name for name in usable if nodes[name]['role'] == 'application']
+    selected = applications[0] if len(applications) == 1 else next(iter(usable)) if len(usable) == 1 else None
+    return nodes[selected]['id'] if selected else None
 
 
 def clarification_candidates(evidence, previous=(), hints=(), limit=20):
@@ -86,8 +107,10 @@ def prepare_run(database, settings, incident_id, business_id, target_id, job_id,
     mode=task.get('mode','normal')
     if mode not in {'normal','graph_adaptive'}:
         raise ValueError('原生 AB 调查仅支持已执行的 normal 或 graph_adaptive 模式')
-    configuration['task_type'] = (task.get('task_type', 'root_cause_investigation')
-                                  if task.get('task_type_explicit', True) else 'root_cause_investigation')
+    configuration['task_type'] = investigation_task(task)
+    configuration['investigation_goal'] = {'focused_diagnosis': 'direct_fault',
+                                          'root_cause_investigation': 'trigger_cause',
+                                          'health_check': 'scoped_health'}[configuration['task_type']]
     manager = ContextBudgetManager(database, settings)
     with database.transaction() as tx:
         from app.system.authorization import (
@@ -180,16 +203,20 @@ class InvestigationBroker:
         self.bindings = bindings
         self.symptom = json.loads(self.incident['symptom_json'])
         self.task_type = self.summary.get('task_type', self.symptom.get('task_type', 'root_cause_investigation'))
+        self.goal = configuration.get('investigation_goal')
+        self.investigation_nodes = set(self.summary.get('investigation_node_ids', []))
         service_nodes = {n['name']: n for n in self.graph['nodes'] if n['kind'] == 'service' and n['role'] != 'runtime'}
         usable = [b for b in bindings if b['kind'] in {'service', 'container','process'} and b['service'] in service_nodes]
         usable.sort(key=lambda b: (b['service'].casefold() not in self.symptom['text'].casefold(),
                                   service_nodes[b['service']]['role'] != 'application', b['service']))
-        self.root = service_nodes[usable[0]['service']]['id'] if usable else None
+        self.root = (investigation_root(self.graph, bindings, self.symptom['text'], self.scope_defaults) if self.goal else
+                     service_nodes[usable[0]['service']]['id'] if usable else None)
         self.planner = AdaptiveInvestigationPlanner(self.graph, bindings, {self.target_id: self.target},
                                                    self.symptom['text'], self.root, settings, include_processes=True)
         self.manager = ContextBudgetManager(database, settings)
         self.budget_id = self.summary['budget_id']
-        self.supervision = {'cancelled': self.cancelled, 'on_spawn': self.attach, 'authorize': self.authorize_read}
+        self.supervision = {'cancelled': self.cancelled, 'on_spawn': self.attach, 'authorize': self.authorize_read,
+                            'authorize_failure': self.authorize}
         self.registry = BusinessToolRegistry(database, settings, self.business_id, self.run_id,
                                             self.snapshot, self.budget_id, self.target_id, supervision=self.supervision)
         self.evidence = self.summary.get('evidence', [])
@@ -230,8 +257,11 @@ class InvestigationBroker:
         self.graph=current_graph(self.graph,self.bindings,database=self.db)
         names = {b['service'] for b in self.bindings}
         scope = [node['id'] for node in self.graph['nodes'] if node['kind'] == 'service'
-                 and node['role'] != 'runtime' and node['name'] in names][:20]
-        if self.task_type in {'health_check', 'focused_diagnosis'} and self.root:
+                 and node['role'] != 'runtime' and node['name'] in names]
+        if self.goal and self.root:
+            self.investigation_nodes.add(self.root)
+            scope = [node for node in scope if node in self.investigation_nodes]
+        elif self.task_type in {'health_check', 'focused_diagnosis'} and self.root:
             scope = [self.root]
         # Unknown material outside this scope cannot block an authorized runtime read.
         scope_keys = {n['canonical_key'] for n in self.graph['nodes'] if n['id'] in scope}
@@ -241,10 +271,21 @@ class InvestigationBroker:
                 'scope_node_ids': scope, 'critical_ambiguities': conflicts,
                 'evidence': self.evidence, 'report': self.report, 'available_actions': actions or [],
                 'runtime_gaps': [{'rule_id': 'runtime_read', 'target_ids': [h['target_node_id']],
+                                  'tool_id': h['tool_id'], 'check_id': h.get('action_id'),
                                   'requirement_id': h.get('error_code') or 'runtime_read_failed'}
                                  for h in self.history if h['status'] != 'succeeded'],
-                'scope_omission_count': max(0, len(names) - 20)}
-        state['runtime_gaps'] += self.summary.get('scope_gaps', [])
+                'scope_omission_count': max(0, len(scope) - 20)}
+        scope = scope[:20]
+        state['scope_node_ids'] = scope
+        if self.goal:
+            root_name = next((n['name'] for n in self.graph['nodes'] if n['id'] == self.root), None)
+            state.update(investigation_goal=self.goal, focus_node_id=self.root,
+                         focus_instance_count=len({(b['target_id'], b['kind'], b['runtime_id'])
+                                                   for b in self.bindings if b['service'] == root_name}))
+            state['runtime_gaps'] = [g for g in state['runtime_gaps'] if set(g['target_ids']) & set(scope)]
+        scoped_names = {n['name'] for n in self.graph['nodes'] if n['id'] in scope}
+        state['runtime_gaps'] += [g for g in self.summary.get('scope_gaps', [])
+                                 if not self.goal or not g.get('service') or g['service'] in scoped_names or not self.root]
         if state['scope_omission_count']:
             state['runtime_gaps'].append({'rule_id': 'runtime_read', 'target_ids': [],
                                           'requirement_id': 'scope_capacity_omissions'})
@@ -255,9 +296,27 @@ class InvestigationBroker:
         checks = []
         present = set()
         required = [node + ':' + kind for node in scope for kind in ('status', 'logs')]
+        if self.goal == 'direct_fault':
+            # The current goal, not the authorization inventory, determines missing checks.
+            required = [node + ':status' for node in scope]
         service_ids = {n['name']: n['id'] for n in self.graph['nodes'] if n['id'] in scope}
+        state['authorized_endpoints'] = [{**e, 'target_node_id': service_ids[e['service']]}
+                                         for e in self.target.get('health_endpoints', []) if e['service'] in service_ids]
+        if self.goal:
+            connection_failures = [f for f in facts if f['kind'] == 'log_observation' and f['freshness'] == 'current'
+                                   and f['value'].get('endpoint_ids')]
+            for fact in connection_failures:
+                unmapped = [e for e in self.graph['edges'] if e.get('relation') == 'depends_on'
+                            and e['from_node_id'] == fact['target_node_id'] and not e.get('attributes', {}).get('endpoint_id')]
+                if unmapped:
+                    state['runtime_gaps'].append({'rule_id': 'runtime_mapping', 'target_ids': [fact['target_node_id']],
+                                                 'requirement_id': 'verified_endpoint_mapping'})
         required += [service_ids[e['service']] + ':health:' + e['endpoint_id']
                      for e in self.target.get('health_endpoints', []) if e['service'] in service_ids]
+        if self.goal and state['focus_instance_count'] == 1 and any(f['kind'] == 'service_state' and f['value'] in {'exited', 'dead', 'failed', 'inactive', 'restarting'}
+                             and (f.get('startup_cycle') or f.get('runtime_identity_verified'))
+                             and f['freshness'] == 'current' for f in facts):
+            required = [check for check in required if ':health:' not in check]
         state['baseline_checks'] = required
         for e in self.evidence:
             node = e['target_node_id']
@@ -269,7 +328,8 @@ class InvestigationBroker:
             if quality != 'current':
                 continue
             if self.target['connector'] == 'ssh' and kind in {'status', 'logs'}:
-                if not payload.get('startup_cycle') or kind == 'logs' and not payload.get('cycle_verified'):
+                if ((not payload.get('startup_cycle') and not (self.goal and kind == 'status' and e.get('runtime_identity_verified')))
+                        or kind == 'logs' and not payload.get('cycle_verified')):
                     state['runtime_gaps'].append({'rule_id': 'runtime_read', 'target_ids': [node],
                                                   'requirement_id': 'verified_current_startup_cycle'})
                     continue
@@ -295,7 +355,10 @@ class InvestigationBroker:
         state['runtime_gaps'] += [{'rule_id': 'runtime_read', 'target_ids': [check.split(':', 1)[0]],
                                   'requirement_id': 'current_' + check.split(':', 1)[1].split(':', 1)[0]}
                                  for check in required if check not in present]
-        if required and set(required) <= {c['check_id'] for c in checks} and not has_faults and not self.planner.scope_requests:
+        has_entry_check = any(':health:' in check for check in required)
+        if (required and (has_entry_check or self.goal == 'scoped_health' or not self.goal)
+                and set(required) <= {c['check_id'] for c in checks}
+                and not has_faults and (self.goal or not self.planner.scope_requests)):
             state.update(required_rule_ids=[], required_health_checks=required, health_checks=checks,
                          current_evidence_ids=[e['evidence_id'] for e in self.evidence])
         return state
@@ -312,6 +375,7 @@ class InvestigationBroker:
             self.authorize(tx)
             self.summary.update(stage=stage, evidence=self.evidence, action_history=self.history,
                                 stop_reason=None, execution_status='running', task_type=self.task_type,
+                                investigation_goal=self.goal, investigation_node_ids=sorted(self.investigation_nodes),
                                 report=self.report, diagnosis_result=self.result,
                                 diagnosis_status=self.result['diagnosis_status'],
                                 no_progress_rounds=self.no_progress, semantic_fingerprints=sorted(self.seen),
@@ -331,25 +395,55 @@ class InvestigationBroker:
         return {'continue': False}
 
     def collect(self, action):
+        before = self.judgment_fingerprint()
+        question, alternatives, changes = self.check_question(action)
         outcome = self.registry.execute(action)
         if outcome.get('evidence_id'):
-            payload = semantic_payload(outcome['payload'])
-            if (action['tool_id'].endswith('.logs') or action['tool_id']=='log.tail') and isinstance(payload.get('text'), str):
-                payload = {**payload, 'text': [e.message for e in normalize_log_events(payload['text'], outcome)]}
-            fingerprint = digest({'target': action['target_node_id'], 'tool': action['tool_id'], 'payload': payload})
-            changed = fingerprint not in self.seen
-            self.seen.add(fingerprint)
+            if action.get('binding_id'):
+                binding = next((b for b in self.bindings if b['id'] == action['binding_id']), None)
+                if binding:
+                    outcome['runtime_id'] = binding['runtime_id']
+                    outcome['runtime_identity_verified'] = self.scope_verified
             self.evidence.append(outcome)
-        else:
-            changed = False
+        changed = before != self.judgment_fingerprint()
         self.history.append({'action_id': action.get('action_id'), 'tool_id': action['tool_id'],
                              'target_node_id': action['target_node_id'],
                              'arguments': action.get('arguments', {}), 'call_id': outcome.get('call_id'),
                              'status': outcome.get('status', 'succeeded'), 'new_information': changed,
-                             'error_code': outcome.get('error_code') or outcome.get('error')})
+                             'error_code': outcome.get('error_code') or outcome.get('error'),
+                             'failure_stage': 'runtime_read' if not outcome.get('evidence_id') else None,
+                             'diagnostic': outcome.get('diagnostic'),
+                             'question': question, 'distinguishes': alternatives, 'changes_judgment': changes})
         self.no_progress = 0 if changed else self.no_progress + 1
         self.result = evaluate_state(self.state())
         self.persist()
+
+    def judgment_fingerprint(self):
+        state = self.state()
+        facts = facts_from_state(state)
+        observations = []
+        for fact in facts:
+            value = fact['value']
+            if isinstance(value, dict):
+                value = {k: value[k] for k in ('failure_signal', 'mechanisms', 'endpoint_ids') if k in value}
+            observations.append(dumps([fact['target_node_id'], fact['kind'], value, fact['freshness']]))
+        result = evaluate_state(state)
+        return digest({'observations': sorted(set(observations)),
+                       'gaps': sorted(dumps(g) for g in result['required_gaps']),
+                       'segments': [(s['rule_id'], s['participants']) for s in result['verified_segments']]})
+
+    @staticmethod
+    def check_question(action):
+        tool = action['tool_id']
+        if tool.endswith('.list') and tool.split('.')[0] in {'service', 'container', 'process'} or tool == 'host.info':
+            return ('授权对象的当前运行身份是否一致？', ['身份一致', '消失或已替换'], '决定是否允许读取该对象')
+        if tool.endswith('.status'):
+            return ('相关实例是否运行？', ['运行', '停止或失败'], '确认直接异常或继续验证入口')
+        if tool == 'health.get':
+            return ('授权入口是否响应？', ['入口响应正常', '入口失败'], '验证症状并保留与实例状态的反证')
+        if tool.endswith('.logs') or tool == 'log.tail':
+            return ('当前启动是否记录可解释症状的失败？', ['当前失败机制', '无当前失败证据'], '支持或排除当前候选机制')
+        return ('当前候选解释是否符合实际配置或实现？', ['实际配置匹配', '配置不匹配或不足'], '验证候选关系并决定下一项检查')
 
     def gap_action(self, actions):
         for gap in self.result['required_gaps']:
@@ -363,15 +457,29 @@ class InvestigationBroker:
         return None
 
     def available_actions(self, *, baseline_only=False, required_targets=None):
+        if self.goal == 'trigger_cause' or self.goal == 'direct_fault':
+            # Expand only along relationships implicated by a current connection failure.
+            endpoints = {endpoint for fact in facts_from_state(self.state())
+                         if fact['kind'] == 'log_observation' and fact['freshness'] == 'current'
+                         for endpoint in fact['value'].get('endpoint_ids', [])}
+            for edge in self.graph['edges']:
+                if (edge['from_node_id'] in self.investigation_nodes and edge.get('relation') == 'depends_on'
+                        and edge.get('attributes', {}).get('endpoint_id') in endpoints):
+                    self.investigation_nodes.add(edge['to_node_id'])
         scope = set(self.state()['scope_node_ids'])
         if required_targets is not None:
             scope &= required_targets
         actions = self.planner.candidates(self.evidence, [], self.history,
-                                          include_authorized_scope=self.task_type == 'root_cause_investigation',
+                                          include_authorized_scope=not self.goal and self.task_type == 'root_cause_investigation',
                                           baseline_only=baseline_only, allowed_node_ids=scope)
-        return [a for a in actions if a['target_node_id'] in scope and (
+        actions = [a for a in actions if a['target_node_id'] in scope and (
             self.task_type != 'health_check' or a['tool_id'].endswith(('.status', '.logs'))
             or a['tool_id'] in {'health.get', 'log.tail'})]
+        if self.goal:
+            actions.sort(key=lambda a: (0 if a['tool_id'].endswith('.status') else
+                                        1 if a['tool_id'] == 'health.get' else
+                                        2 if a['tool_id'].endswith('.logs') or a['tool_id'] == 'log.tail' else 3))
+        return actions
 
     def offline(self):
         self.summary['collection_phase'] = 'offline'
@@ -408,6 +516,25 @@ class InvestigationBroker:
             return self.verify_scope()
         if not self.root and not self.scope_identity_required:
             return self.discover()
+        if self.goal and not self.root:
+            return self.finish('task_service_ambiguous')
+        if self.result['completion_satisfied']:
+            if self.goal == 'direct_fault' and self.result['diagnosis_status'] == 'direct_cause_supported':
+                # A configured socket alone cannot rule out another instance taking over its port.
+                mapped = any(e['tool_id'] == 'container.status' and e['target_node_id'] == self.root
+                             and e['payload'].get('published_endpoints') for e in self.evidence)
+                if mapped:
+                    probe = next((a for a in self.available_actions(baseline_only=True)
+                                  if a['tool_id'] == 'health.get' and a['target_node_id'] == self.root), None)
+                    if probe:
+                        self.collect(probe)
+                        return {'continue': True}
+            return self.finish('direct_fault_verified' if self.result['diagnosis_status'] == 'direct_cause_supported'
+                               else 'complete_chain_verified' if self.result['diagnosis_status'] == 'root_cause_supported'
+                               else 'scoped_checks_complete')
+        if self.goal == 'direct_fault' and self.result.get('direct_faults') and any(
+                f['kind'] == 'http_status' and f['value'] < 500 for f in self.result.get('counterevidence', [])):
+            return self.finish('entry_healthy_instance_fault')
         baseline = self.available_actions(baseline_only=True)
         if baseline:
             self.summary['collection_phase'] = 'offline' if self.summary.get('model_error') else 'baseline'
@@ -429,7 +556,7 @@ class InvestigationBroker:
         scope = set(self.state()['scope_node_ids'])
         context = {'symptom': self.symptom['text'], 'window_start': self.incident['window_start'],
                    'historical_check_guidance':self.experience_guidance,
-                   'task': self.task_type, 'effective_limits': self.limits,
+                   'task': self.task_type, 'investigation_goal': self.goal, 'effective_limits': self.limits,
                    'allowed_hypothesis_targets': [{'node_id': n['id'], 'service': n['name'], 'role': n['role']}
                                                    for n in self.graph['nodes'] if n['id'] in scope],
                    'graph_edges': [{k: e.get(k) for k in ('from_node_id', 'to_node_id', 'relation', 'certainty')}
@@ -445,13 +572,16 @@ class InvestigationBroker:
                   'A direct anomaly does not prove the complete cause. Only the backend evaluator decides completion. '
                   'A finish suggestion cannot remove required gaps. Missing information is advisory. '
                   'Historical guidance suggests checks only; re-observe all current causes and never cite history as current evidence. '
-                  'Check current status and logs before code. Schema: ' + dumps(minimal_output_contract(state)))
+                  'Each check must distinguish a candidate explanation; do not collect unrelated evidence. '
+                  'A stopped instance explains its unavailability, not its trigger or an entire replicated entry. Schema: '
+                  + dumps(minimal_output_contract(state)))
         from app.agent.workflow import _compact_model_context
         try:
             configured = self.settings.model_copy(update={'model_timeout_seconds': self.limits['model_timeout_seconds']})
             decision = call_json(self.db, configured, self.budget_id, prompt,
                                  _compact_model_context(prompt, context, self.manager.input_capacity()),
-                                 validate=lambda value: adapt_minimal_decision(value, state), supervision=self.supervision)
+                                 validate=lambda value: adapt_minimal_decision(value, state),
+                                 supervision={k: v for k, v in self.supervision.items() if k != 'authorize_failure'})
             self.report = decision['report']
             self.summary['model_status'] = 'completed'
             if decision['finish']:
@@ -464,8 +594,9 @@ class InvestigationBroker:
             if self.cancelled.is_set():
                 raise InterruptedError('调查已终止') from None
             self.summary['model_error'] = getattr(exc, 'diagnostic', {
-                'code': type(exc).__name__, 'message': '模型不可用，已停止模型请求并转入只读取证。',
-                'stage': 'prepare', 'retry_count': 0})
+                'code': 'model_timeout' if isinstance(exc, TimeoutError) else 'model_analysis_unavailable',
+                'message': '模型不可用，已停止模型请求并转入只读取证。',
+                'stage': 'model_decision', 'error_type': type(exc).__name__, 'retry_count': 0})
             self.summary['model_status'] = 'failed'
             self.summary['model_failed_at_call'] = self.manager.get(self.budget_id)['calls']
             self.summary['collection_phase'] = 'offline'
@@ -527,7 +658,9 @@ class InvestigationBroker:
         self.bindings = bindings
         verified = {authorization(b)['grant_id'] for b in bindings}
         self.summary['scope_gaps'] = [{'rule_id':'runtime_read','requirement_id':'authorized_identity_not_verified','target_ids':[],
-                                      'grant_id': identifier} for identifier in self.scope_grants if identifier not in verified]
+                                      'grant_id': identifier,
+                                      'service': next((b['service'] for b in grants if authorization(b)['grant_id'] == identifier), None)}
+                                     for identifier in self.scope_grants if identifier not in verified]
         if not bindings:
             self.summary['scope_gaps'].append({'rule_id':'runtime_read','requirement_id':'business_object_authorization_required','target_ids':[]})
         self.summary['scope_validation'] = {'stage':'verified','verified_count':len(bindings),
@@ -543,7 +676,8 @@ class InvestigationBroker:
             chosen = applications
         if not chosen and len(usable) == 1:
             chosen = usable
-        self.root = service_nodes[chosen[0]['service']]['id'] if chosen else None
+        self.root = (investigation_root(self.graph, bindings, self.symptom['text'], self.scope_defaults) if self.goal else
+                     service_nodes[chosen[0]['service']]['id'] if chosen else None)
         if usable and not self.root:
             self.summary['scope_gaps'].append({'rule_id':'runtime_read','requirement_id':'task_service_ambiguous','target_ids':[]})
         self.planner = AdaptiveInvestigationPlanner(self.graph, bindings, {self.target_id:self.target}, self.symptom['text'], self.root,
@@ -610,8 +744,19 @@ class InvestigationBroker:
         except InterruptedError:
             pass
         except Exception as exc:
+            failure = getattr(exc, 'diagnostic', None) or {
+                'code': 'investigation_step_timeout' if isinstance(exc, TimeoutError) else 'investigation_step_failed',
+                'stage': 'investigation_step', 'error_type': type(exc).__name__,
+                'check_id': self.history[-1].get('action_id') if self.history else None}
+            with self.db.transaction() as tx:
+                row = tx.execute('SELECT execution_status,lease_token FROM run_executions WHERE run_id=?',
+                                 (self.run_id,)).fetchone()
+                if row and row['execution_status'] == 'running' and row['lease_token'] == self.lease['lease_token']:
+                    self.summary['execution_error'] = failure
+                    tx.execute('UPDATE diagnosis_runs SET summary_json=? WHERE id=?',
+                               (dumps(sanitize_payload(self.summary)), self.run_id))
             self.coordinator.finalize(self.run_id, 'timed_out' if isinstance(exc, TimeoutError) else 'failed',
-                                      self.result, lease_token=self.lease['lease_token'], reason=type(exc).__name__)
+                                      self.result, lease_token=self.lease['lease_token'], reason=failure['code'])
             if str(exc) == 'Process broker cleanup pending':
                 return
         finally:

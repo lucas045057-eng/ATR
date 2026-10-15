@@ -143,7 +143,7 @@ class BusinessToolRegistry:
                     action["target_id"],
                     ToolRequest(tool_id=tool, arguments=action["arguments"]),
                     timeout_cap=10 if purpose=='verification' else min(10, self.manager.remaining_seconds(self.bid)) if self.supervision else self.manager.remaining_seconds(self.bid),
-                    **({'supervision': self.supervision} if self.supervision else {}),
+                    **({'supervision': {key: value for key, value in self.supervision.items() if key != 'authorize_failure'}} if self.supervision else {}),
                     **({'read_protocol': 'ab_v1'} if self.supervision or purpose=='verification' else {}),
                     expected_authorization_digest=expected_authorization,
                 )
@@ -156,17 +156,20 @@ class BusinessToolRegistry:
                     status = observation.get("status", "failed")
                     if status not in {"denied", "timed_out", "failed"}:
                         status = "failed"
-                    error = observation.get("error", "runtime_read_failed")
+                    diagnostic = {**observation.get('diagnostic', {}), 'call_id': call_id, 'tool_id': tool}
+                    error = observation.get('error_code') or diagnostic.get('error_code') or 'runtime_read_failed'
                     with self.db.transaction() as tx:
+                        if self.supervision is not None:
+                            self.supervision.get('authorize_failure', self.supervision['authorize'])(tx)
                         tx.execute(
                             "UPDATE tool_calls SET status=?,ended_at=?,error_code=? WHERE id=?",
-                            (status, now(), "ssh_credential_unavailable" if observation.get("error_code") == "ssh_credential_unavailable" else error, call_id),
+                            (status, now(), error, call_id),
                         )
                     return {
                         "call_id": call_id, "tool_id": tool, "status": status,
                         "error": error, "observation_id": observation["observation_id"],
                     "target_id": self.target_id,
-                        "error_code": observation.get("error_code"), "diagnostic": observation.get("diagnostic", {}),
+                        "error_code": error, "failure_stage": diagnostic.get('failure_stage', 'request'), "diagnostic": diagnostic,
                     }
                 payload = {
                     **observation["payload"],
@@ -209,24 +212,28 @@ class BusinessToolRegistry:
         except Exception as exc:
             if self.supervision is not None and self.supervision['cancelled'].is_set():
                 raise InterruptedError('调查已终止') from None
+            from app.connectors.diagnostics import failure
+            from app.context.budget import BudgetExceeded
+            stage = 'budget' if isinstance(exc, BudgetExceeded) else 'authorization' if isinstance(exc, PermissionError) else 'request'
+            diagnostic = failure(exc, tool, 'business', '', stage)
+            if isinstance(exc, BudgetExceeded):
+                diagnostic.update(error_code='global_budget_exhausted', message='Investigation budget exhausted')
+            diagnostic.update(call_id=call_id, tool_id=tool)
+            code, status = diagnostic['error_code'], diagnostic['status']
             with self.db.transaction() as tx:
+                if self.supervision is not None:
+                    self.supervision.get('authorize_failure', self.supervision['authorize'])(tx)
                 tx.execute(
                     "UPDATE tool_calls SET status=?,ended_at=?,error_code=? WHERE id=?",
-                    (
-                        "timed_out"
-                        if isinstance(exc, TimeoutError)
-                        else "denied"
-                        if isinstance(exc, PermissionError)
-                        else "failed",
-                        now(),
-                        type(exc).__name__,
-                        call_id,
-                    ),
+                    (status, now(), code, call_id),
                 )
-            return {"call_id": call_id, "tool_id": tool, "error": type(exc).__name__,
-                    "error_code": "global_budget_exhausted" if type(exc).__name__ == "BudgetExceeded" else None,
-                    "status": "timed_out" if isinstance(exc, TimeoutError) else "denied"
-                    if isinstance(exc, PermissionError) else "failed"}
+                system = tx.execute('SELECT system_id FROM graph_snapshots WHERE id=?', (self.sid,)).fetchone()
+                sequence = tx.execute('SELECT COALESCE(MAX(sequence_no),0)+1 FROM events WHERE run_id=?', (self.run_id,)).fetchone()[0]
+                tx.execute('INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?,?)',
+                           (uid(), system['system_id'], self.run_id, sequence, 'tool_call', call_id,
+                            'tool_' + status, 'runtime', dumps(diagnostic), now()))
+            return {'call_id': call_id, 'tool_id': tool, 'error': code, 'error_code': code, 'status': status,
+                    'failure_stage': diagnostic['failure_stage'], 'diagnostic': diagnostic}
         finally:
             if purpose=='diagnosis':
                 self.manager.record_time(self.bid, time.monotonic() - started)

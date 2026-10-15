@@ -67,7 +67,7 @@ def test_failed_direction_is_not_repeated_forever(client, monkeypatch):
     calls = [call for call in result["tool_calls"] if "store.service" in call["args_redacted_json"]]
     assert len(calls) == 1
     assert calls[0]["status"] == "timed_out"
-    assert calls[0]["error_code"] == "TimeoutError"
+    assert calls[0]["error_code"] == "tool_timeout"
 
 
 def test_model_cannot_replace_candidate_arguments(client, monkeypatch):

@@ -17,6 +17,18 @@ from test_business import SAMPLE, archive
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def legacy_run_requests(page):
+    """Exercise saved legacy flows against the real API; the daily UI uses ab_v1."""
+    def select_protocol(route):
+        if route.request.method == "POST":
+            payload = {**route.request.post_data_json, "decision_protocol": "legacy_v22"}
+            route.continue_(post_data=json.dumps(payload))
+        else:
+            route.continue_()
+
+    page.route("**/api/v1/incidents/*/runs", select_protocol)
+
+
 @pytest.fixture
 def live_server(tmp_path, request):
     external = os.environ.get("ATR_E2E_BASE_URL")
@@ -130,9 +142,11 @@ def test_browser_complete_onboarding(live_server):
         page.get_by_role("button", name="保存环境关联").click()
         expect(page.get_by_role("button", name="定向轻量发现")).to_be_enabled()
         page.get_by_role("button", name="定向轻量发现").click()
-        expect(page.get_by_role("button", name="确认", exact=True).first).to_be_visible(timeout=15000)
-        page.get_by_role("button", name="确认", exact=True).first.click()
-        expect(page.get_by_text("已确认", exact=True)).to_be_visible()
+        binding = page.get_by_test_id("binding-authorization").filter(has_text="catalog-api.service")
+        expect(binding.get_by_role("button", name="确认授权", exact=True)).to_be_visible(timeout=15000)
+        binding.get_by_label("授权依据", exact=True).fill("人工核验隔离服务身份与本业务范围")
+        binding.get_by_role("button", name="确认授权", exact=True).click()
+        expect(binding).to_contain_text("持久授权：有效")
         page.get_by_role("button", name="排查故障", exact=False).click()
         expect(page.get_by_label("目标系统")).to_contain_text("浏览器 Catalog")
         expect(page.get_by_label("目标系统").locator("option:checked")).to_have_text("浏览器 Catalog")
@@ -140,20 +154,25 @@ def test_browser_complete_onboarding(live_server):
         expect(target_selector).to_be_visible()
         expect(target_selector.locator("option:checked")).to_contain_text("隔离测试环境")
         page.get_by_label("故障现象", exact=True).fill("catalog-api startup failure")
-        page.get_by_role("button", name="保存现象，准备调查", exact=False).click()
-        expect(page.get_by_role("button", name="开始只读调查", exact=False)).to_be_visible()
-        page.get_by_role("button", name="开始只读调查", exact=False).click()
-        expect(page.get_by_text("尚未建立根因", exact=True)).to_be_visible(timeout=20000)
+        expect(page.locator('select[name="task_type"]')).to_have_value("focused_diagnosis")
+        starts = []
+        page.on("request", lambda request: starts.append(request.post_data_json)
+                if request.method == "POST" and "/incidents/" in request.url and request.url.endswith("/runs") else None)
+        page.get_by_role("button", name="提交故障并开始调查", exact=False).click()
+        expect(page.get_by_test_id("investigation-conclusion")).to_contain_text("直接故障定位目标已完成", timeout=20000)
+        assert len(starts) == 1 and starts[0]["decision_protocol"] == "ab_v1"
         expect(page.locator(".target-binding")).to_contain_text("隔离测试环境")
         expect(page.locator(".target-binding")).to_contain_text("forced_gateway")
-        expect(page.get_by_text("未解决原因：", exact=False)).to_be_visible()
+        expect(page.locator(".repair-form")).to_have_count(0)
         page.evaluate("window.scrollTo(0,0)")
         page.screenshot(path=str(directory / "investigation.png"), full_page=False)
         page.get_by_role("button", name="排障经验", exact=False).click()
         expect(page.get_by_role("heading", name="待复核提醒与失败反例")).to_be_visible()
-        expect(page.get_by_text("项未验证反例", exact=False).first).to_be_visible()
+        expect(page.locator(".pattern-card")).to_have_count(0)
+        expect(page.get_by_text("暂无失败反例。", exact=True)).to_be_visible()
         page.get_by_role("button", name="效果与成本", exact=False).click()
         expect(page.get_by_role("heading", name="三模式完整对比")).to_be_visible()
-        expect(page.get_by_role("cell", name="按当前证据逐步排查", exact=True)).to_be_visible()
+        expect(page.locator(".metric-card").filter(has_text="完整根因确认").locator("strong")).to_have_text("0")
+        expect(page.get_by_text("直接原因定位 1 次", exact=True)).to_be_visible()
         assert errors == []
         browser.close()

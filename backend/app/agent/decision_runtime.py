@@ -31,6 +31,7 @@ from app.context.model_errors import (
 _HYPOTHESIS_FIELDS = frozenset({
     "target_node_id", "failure_mode", "reasoning", "missing_information", "confidence",
 })
+_CANDIDATE_FIELDS = frozenset({'cited_evidence_ids', 'testable_prediction'})
 _IGNORED_LEGACY_FIELDS = frozenset({
     "evidence_links", "verification_predictions", "target_role", "causal_chain", "prediction", "status",
 })
@@ -55,6 +56,8 @@ class _Hypothesis(_StrictModel):
     reasoning: str = Field(min_length=20, max_length=1200)
     missing_information: list[Annotated[str, StringConstraints(min_length=1, max_length=300)]] = Field(max_length=8)
     confidence: float = Field(ge=0, le=1)
+    cited_evidence_ids: list[str] = Field(default_factory=list, max_length=8)
+    testable_prediction: str | None = Field(default=None, min_length=1, max_length=500)
 
     @field_validator("confidence", mode="before")
     @classmethod
@@ -123,6 +126,15 @@ def minimal_output_contract(state: dict[str, Any]) -> dict[str, Any]:
         "Reasoning only; it is never parsed as a command or tool argument."
     )
     schema["properties"]["finish"]["description"] = "A suggestion; Runtime and Evidence Gate determine the outcome."
+    if state.get('investigation_goal'):
+        properties = schema['properties']['hypotheses']['items']['properties']
+        properties['failure_mode'] = {
+            'type': 'string', 'minLength': 1, 'maxLength': 120,
+            'description': 'A candidate mechanism, including new mechanisms. Runtime verifies registered causal claims only.'}
+        properties['cited_evidence_ids'] = {'type': 'array', 'maxItems': 8, 'items':
+                                           _enum([e['evidence_id'] for e in state.get('evidence', [])])}
+        properties['testable_prediction'] = {'type': 'string', 'minLength': 1, 'maxLength': 500,
+                                             'description': 'A falsifiable prediction, never an executable command.'}
     return schema
 
 
@@ -139,7 +151,7 @@ def facts_from_state(state: dict[str, Any]) -> list[dict[str, Any]]:
         fact_key = json.dumps([evidence.get("evidence_id"), target_id, kind, value], sort_keys=True)
         payload = evidence.get('payload', {})
         incomplete = any(payload.get(k) for k in ('partial', 'truncated', 'timeout'))
-        wrong_observer = (state.get('decision_protocol') == 'ab_v1' and kind == 'http_status'
+        wrong_observer = (state.get('decision_protocol') == 'ab_v1' and kind in {'http_status', 'endpoint_reachability'}
                           and (payload.get('observation_location') != 'remote_ssh' or not payload.get('endpoint_id')))
         facts.append({
             "fact_id": hashlib.sha256(fact_key.encode()).hexdigest()[:24],
@@ -155,6 +167,9 @@ def facts_from_state(state: dict[str, Any]) -> list[dict[str, Any]]:
             "observed_on": target_id,
             "startup_cycle": evidence.get("startup_cycle") or evidence.get("payload", {}).get("startup_cycle")
                              or evidence.get("payload", {}).get("started_at"),
+            **({'runtime_id': evidence.get('runtime_id') or payload.get('runtime_id') or payload.get('container_id') or payload.get('name'),
+                'runtime_identity_verified': evidence.get('runtime_identity_verified', False)}
+               if state.get('investigation_goal') else {}),
         })
 
     for evidence in state.get("evidence", []):
@@ -180,6 +195,9 @@ def facts_from_state(state: dict[str, Any]) -> list[dict[str, Any]]:
             add(evidence, direct, "service_state", payload["state"].casefold())
         if evidence.get("tool_id") == "health.get" and direct in nodes and type(payload.get("status_code")) is int:
             add(evidence, direct, "http_status", payload["status_code"])
+        if (state.get('investigation_goal') and evidence.get('tool_id') == 'health.get' and direct in nodes
+                and payload.get('reachable') is False and payload.get('failure_kind') == 'connection_refused'):
+            add(evidence, direct, 'endpoint_reachability', False)
         if evidence.get("tool_id") not in LOG_TOOLS:
             continue
         text = payload.get("text")
@@ -199,6 +217,9 @@ def facts_from_state(state: dict[str, Any]) -> list[dict[str, Any]]:
                 if failure_signal or mechanisms:
                     add(evidence, target_id, "log_observation",
                         {"failure_signal": failure_signal, "mechanisms": sorted(mechanisms),
+                         'terminal_failure': bool(not re.search(r'\b(?:request|GET|POST|PUT|PATCH|DELETE)\s+\S*[/]', line, re.I)
+                                                  and re.search(r'\b(?:startup|initializ\w*)\b.{0,100}\b(?:failed|abort\w*|permission denied|address already in use)\b'
+                                                                r'|\b(?:fatal|failed to start|failed at step|exit\w* because)\b', line, re.I)),
                          "endpoint_ids": connection_endpoints(line), "event_id": event_fingerprint(event),
                          "event_time_utc": stamp.isoformat()})
     return facts
@@ -277,7 +298,8 @@ def adapt_minimal_decision(value: dict[str, Any], state: dict[str, Any]) -> dict
         node = nodes.get(node_id) if isinstance(node_id, str) else None
         if node is None:
             raise ModelDecisionError(("hypotheses", index, "target_node_id"), "unknown_target")
-        extra_fields = set(raw) - _HYPOTHESIS_FIELDS - _IGNORED_LEGACY_FIELDS
+        fields = _HYPOTHESIS_FIELDS | (_CANDIDATE_FIELDS if state.get('investigation_goal') else frozenset())
+        extra_fields = set(raw) - fields - _IGNORED_LEGACY_FIELDS
         if extra_fields:
             error = ModelCallError({"code": "model_schema_error", "exception_type": "ValidationError",
                                     "stage": "validate", "validation_kind": "format",
@@ -287,21 +309,29 @@ def adapt_minimal_decision(value: dict[str, Any], state: dict[str, Any]) -> dict
             rejected.append({"path": f"hypotheses[{index}].non_authoritative_fields",
                              "type": "ignored_legacy_reasoning"})
         mode = raw.get("failure_mode")
-        if not isinstance(mode, str) or mode not in MECHANISMS:
+        if (not isinstance(mode, str) or not mode or len(mode) > 120
+                or not state.get('investigation_goal') and mode not in MECHANISMS):
             rejected.append({"path": f"hypotheses[{index}].failure_mode", "type": "invalid_mechanism"})
             continue
         try:
-            parsed = _Hypothesis.model_validate({key: raw[key] for key in _HYPOTHESIS_FIELDS if key in raw})
+            parsed = _Hypothesis.model_validate({key: raw[key] for key in fields if key in raw})
         except ValidationError as exc:
             rejected.extend({"path": item["path"], "type": item["type"]}
                             for item in safe_validation_errors(
                                 exc.errors(include_url=False, include_context=False), ("hypotheses", index)))
             continue
+        citations = {e['evidence_id'] for e in state.get('evidence', []) if e.get('target_node_id') == node_id}
+        if not set(parsed.cited_evidence_ids) <= citations:
+            raise ModelDecisionError(('hypotheses', index, 'cited_evidence_ids'), 'unknown_evidence')
         hypotheses.append({
             "target_node_id": parsed.target_node_id, "target_role": node.get("role", "unknown"),
             "failure_mode": parsed.failure_mode,
             "causal_chain": ["候选故障机制由 Runtime 限定", "因果关系须由当前证据和 Evidence Gate 核验"],
-            "prediction": "当前故障窗口应同时满足目标服务失败状态与对应机制日志的确定性校验。",
+            **({'cited_evidence_ids': parsed.cited_evidence_ids, 'candidate_status': 'unverified'}
+               if state.get('investigation_goal') else {}),
+            "prediction": (parsed.testable_prediction or (parsed.missing_information[0] if parsed.missing_information else
+                           "提出可区分当前候选解释的检查。") if state.get('investigation_goal') else
+                           "当前故障窗口应同时满足目标服务失败状态与对应机制日志的确定性校验。"),
             "rationale": parsed.reasoning, "missing_evidence": parsed.missing_information,
             "confidence": parsed.confidence, "verification_predictions": [],
         })
@@ -337,7 +367,8 @@ def classify_outcome(state: dict[str, Any], gate: dict[str, Any], decision: dict
         complete = result["completion_satisfied"]
         actions = state.get("available_actions", [])
         return {**result, "finding_level": {
-                    "root_cause_supported": "root_cause_confirmed", "partial": "direct_fault_cause_unknown",
+                    "root_cause_supported": "root_cause_confirmed", 'direct_cause_supported': 'direct_fault_located',
+                    "partial": "direct_fault_cause_unknown",
                     "unresolved": "evidence_insufficient", "no_fault_observed": "no_fault_observed_in_scope",
                 }[result["diagnosis_status"]],
                 "root_cause_confirmed": result["diagnosis_status"] == "root_cause_supported",

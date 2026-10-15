@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 
+from app.agent.mechanisms import RULES
 from app.agent.result_evaluator import REQUIRED_CHAIN
 
 
@@ -15,9 +16,18 @@ def root_supported(result):
     if not isinstance(items,list):
         return False
     segments={segment.get('rule_id'):segment for segment in items if isinstance(segment,dict)}
-    if not set(REQUIRED_CHAIN)<=segments.keys():
+    complete_chain = set(REQUIRED_CHAIN) <= segments.keys()
+    # Frozen goals opt into scoped contracts; historical results retain their original chain.
+    scoped = bool(result.get('investigation_goal'))
+    if scoped:
+        contracts = {rule.rule_id: rule.roles for rule in RULES}
+        if (not items or len(items) != len(segments)
+                or not {*REQUIRED_CHAIN, 'bind_failure', 'permission_denied'} & segments.keys()
+                or not segments.keys() <= contracts.keys()):
+            return False
+    elif not complete_chain:
         return False
-    for rule in REQUIRED_CHAIN:
+    for rule in segments if scoped else REQUIRED_CHAIN:
         segment=segments[rule]
         participants=segment.get('participants',{})
         citations=segment.get('supports',[])
@@ -26,9 +36,34 @@ def root_supported(result):
         if any(not isinstance(item,dict) or not all(isinstance(item.get(key),str) and item[key] for key in ('fact_id','call_id','evidence_id','observed_on'))
                or item.get('asserts_about')!=rule or item['observed_on'] not in participants.values() for item in citations):
             return False
+        if scoped:
+            roles = contracts[rule]
+            if (set(participants) != set(roles) or any(not isinstance(node, str) or not node for node in participants.values())
+                    or len(set(participants.values())) != len(roles)
+                    or segment.get('required_gaps') or segment.get('counterevidence')
+                    or {item['observed_on'] for item in citations} != set(participants.values())):
+                return False
+            anchor = participants[roles[0]]
+            anchor_citations = [item for item in citations if item['observed_on'] == anchor]
+            if any(len({item[key] for item in anchor_citations}) < 2 for key in ('call_id', 'evidence_id')):
+                return False
+    if not complete_chain:
+        if not any(rule in segments for rule in REQUIRED_CHAIN):
+            return len({segment['participants']['target'] for segment in segments.values()}) == 1
+        return True
     first,last=(segments[rule]['participants'] for rule in REQUIRED_CHAIN)
     return (all(isinstance(item,str) and item for item in [first.get('consumer'),first.get('dependency'),last.get('proxy'),last.get('upstream')])
             and first['consumer']==last['upstream'] and first['consumer']!=first['dependency'] and last['proxy']!=last['upstream'])
+
+
+def verification_node_ids(result):
+    if not root_supported(result):
+        return set()
+    if not result.get('investigation_goal'):
+        return {segment['participants']['proxy'] for segment in result['verified_segments']
+                if segment['rule_id'] == 'upstream_unavailable'}
+    return {node for segment in result['verified_segments'] for role, node in segment['participants'].items()
+            if role in {'target', 'consumer', 'proxy', 'upstream'}}
 
 
 def outcome(connection,run):
@@ -42,7 +77,8 @@ def outcome(connection,run):
     execution=connection.execute('SELECT execution_status,result_json FROM run_executions WHERE run_id=?',(run['id'],)).fetchone()
     if configuration.get('decision_protocol')!='ab_v1' and not execution:
         return {'native':False,'status':run['status'],'completed':run['status'] in {'supported','unresolved'},
-                'root_supported':run['status']=='supported','healthy':False,'result':None}
+                'root_supported':run['status']=='supported','direct_supported':False,
+                'completion_satisfied':run['status']=='supported','healthy':False,'result':None}
     try:
         result=json.loads(execution['result_json']) if execution else {}
     except (ValueError,TypeError):
@@ -51,10 +87,14 @@ def outcome(connection,run):
         result={}
     completed=bool(execution and execution['execution_status']=='completed')
     supported=completed and root_supported(result)
+    direct=(completed and result.get('diagnosis_status')=='direct_cause_supported'
+            and result.get('completion_satisfied') is True
+            and not any(result.get(key) for key in ('required_gaps','counterevidence','critical_ambiguities')))
     healthy=(completed and result.get('diagnosis_status')=='no_fault_observed' and result.get('completion_satisfied') is True
              and not any(result.get(key) for key in ('required_gaps','counterevidence','critical_ambiguities','direct_faults')))
-    return {'native':True,'completed':completed,'root_supported':supported,'healthy':healthy,
-            'status':'supported' if supported else 'no_fault_observed' if healthy else 'unresolved',
+    return {'native':True,'completed':completed,'root_supported':supported,'direct_supported':direct,'healthy':healthy,
+            'completion_satisfied':bool(supported or direct or healthy),
+            'status':'supported' if supported else 'direct_cause_supported' if direct else 'no_fault_observed' if healthy else 'unresolved',
             'execution_status':execution['execution_status'] if execution else run['status'],
             'diagnosis_status':result.get('diagnosis_status','unresolved'),'result':result}
 
@@ -85,6 +125,8 @@ def supported_checks(connection,run,result):
 def native_verification_valid(connection,run,call_id,expected_endpoint=None):
     if not isinstance(expected_endpoint,dict) or not expected_endpoint.get('endpoint_id') or not expected_endpoint.get('url'):
         return False
+    if not isinstance(expected_endpoint.get('service'), str) or not expected_endpoint['service']:
+        return False
     row=connection.execute("""SELECT t.tool_id,t.status,t.purpose,t.target_id,t.args_redacted_json,t.snapshot_id,
         e.target_node_id,e.payload_redacted_json,o.target_id AS observation_target,o.status AS observation_status,
         o.payload_json FROM tool_calls t JOIN evidence e ON e.tool_call_id=t.id
@@ -95,9 +137,16 @@ def native_verification_valid(connection,run,call_id,expected_endpoint=None):
     observed=json.loads(row['payload_json'])
     args=json.loads(row['args_redacted_json'])
     measured=outcome(connection,run)
-    proxies={segment['participants'].get('proxy') for segment in measured['result'].get('verified_segments',[]) if segment.get('rule_id')=='upstream_unavailable'}
+    if not measured['root_supported']:
+        return False
+    if any(call_id == citation['call_id'] for segment in measured['result']['verified_segments'] for citation in segment['supports']):
+        return False
+    verification_nodes = verification_node_ids(measured['result'])
+    node = connection.execute('SELECT name FROM graph_nodes WHERE id=? AND snapshot_id=?',
+                              (row['target_node_id'], run['graph_snapshot_id'])).fetchone()
     return (row['target_id']==row['observation_target']==run['target_id'] and row['observation_status']=='succeeded'
-            and row['target_node_id'] in proxies and payload.get('endpoint_id')==args.get('endpoint_id')
+            and row['target_node_id'] in verification_nodes and node and node['name']==expected_endpoint['service']
+            and payload.get('endpoint_id')==args.get('endpoint_id')
             and payload.get('endpoint_id')==expected_endpoint['endpoint_id'] and payload.get('url')==expected_endpoint['url']
             and payload.get('endpoint_id')==observed.get('endpoint_id') and payload.get('url')==observed.get('url')
             and payload.get('status_code')==observed.get('status_code')==200

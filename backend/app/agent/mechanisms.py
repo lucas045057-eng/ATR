@@ -52,6 +52,8 @@ class MechanismRegistry:
         facts = [fact for fact in facts if fact.get("target_node_id") in authorized
                  and fact.get("freshness") == "current" and fact.get("evidence_id") and fact.get("call_id")]
         role_names = {rule.rule_id: rule.roles for rule in RULES}[rule_id]
+        if len(role_names) == 1:
+            return self._single_target(rule_id, facts, scope)
         candidates = []
         for edge in relations:
             left, right = edge.get("from_node_id"), edge.get("to_node_id")
@@ -124,3 +126,31 @@ class MechanismRegistry:
         return {"rule_id": rule_id, "registry_version": self.version, "status": "unresolved",
                 "participants": {}, "supports": [], "counterevidence": [],
                 "required_gaps": [{"rule_id": rule_id, "target_ids": [], "requirement_id": "authorized_directed_relationship"}]}
+
+    def _single_target(self, rule_id, facts, scope):
+        candidates = []
+        for target in scope.get('target_node_ids', []):
+            states = [f for f in facts if f['target_node_id'] == target and f['kind'] == 'service_state']
+            cycle = scope.get('current_cycles', {}).get(target)
+            failed = [f for f in states if f['value'] in FAILED and cycle and f.get('startup_cycle') == cycle]
+            logs = [f for f in facts if f['target_node_id'] == target and f['kind'] == 'log_observation'
+                    and rule_id in f.get('value', {}).get('mechanisms', []) and cycle
+                    and f.get('value', {}).get('terminal_failure') is True
+                    and f.get('startup_cycle') == cycle]
+            counter = [f for f in states if f['value'] in HEALTHY]
+            pair = next(((s, log) for s in failed for log in logs
+                         if s['call_id'] != log['call_id'] and not (
+                             s.get('observation_id') and s.get('observation_id') == log.get('observation_id'))), None)
+            supports = [{'fact_id': f.get('fact_id'), 'evidence_id': f['evidence_id'],
+                         'call_id': f['call_id'], 'observed_on': target, 'asserts_about': rule_id}
+                        for f in pair or []]
+            candidates.append({'rule_id': rule_id, 'registry_version': self.version,
+                               'participants': {'target': target},
+                               'status': 'supported' if pair and not counter else 'unresolved',
+                               'supports': supports, 'counterevidence': counter,
+                               'required_gaps': [] if pair else [{'rule_id': rule_id, 'target_ids': [target],
+                                   'requirement_id': 'independent_current_state_and_mechanism_log'}]})
+        return next((c for c in candidates if c['status'] == 'supported'), candidates[0] if candidates else {
+            'rule_id': rule_id, 'registry_version': self.version, 'participants': {}, 'status': 'unresolved',
+            'supports': [], 'counterevidence': [], 'required_gaps': [{'rule_id': rule_id, 'target_ids': [],
+                                                                  'requirement_id': 'authorized_target'}]})

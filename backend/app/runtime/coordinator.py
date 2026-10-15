@@ -16,7 +16,8 @@ from app.tools.registry import sanitize_payload
 
 ACTIVE = {'queued', 'running', 'waiting_input'}
 TERMINAL = {'completed', 'failed', 'cancelled', 'timed_out', 'interrupted'}
-DIAGNOSES = {'root_cause_supported', 'partial', 'unresolved', 'no_fault_observed'}
+DIAGNOSES = {'root_cause_supported', 'direct_cause_supported', 'partial', 'unresolved', 'no_fault_observed'}
+COMPLETIONS = {'root_cause_supported', 'direct_cause_supported', 'no_fault_observed'}
 
 
 def unresolved_result():
@@ -25,10 +26,64 @@ def unresolved_result():
 
 
 class RunCoordinator:
-    def __init__(self, database, *, clock=time.monotonic, max_workers=3):
+    def __init__(self, database, *, clock=time.monotonic, max_workers=3, stagnation_seconds=180, operation_seconds=90):
         self.db, self.clock, self.max_workers = database, clock, max_workers
+        self.stagnation_seconds = stagnation_seconds
+        self.operation_seconds = operation_seconds
         self._signals: dict[str, threading.Event] = {}
+        self._progress: dict[str, dict] = {}
+        self._operations: dict[str, dict] = {}
         self._lock = threading.RLock()
+
+    def _observe_progress(self, tx, row, stamp):
+        # Only persisted backend assessments can certify progress, never worker prose or evidence counts.
+        result = json.loads(row['result_json'])
+        summary = json.loads(tx.execute('SELECT summary_json FROM diagnosis_runs WHERE id=?', (row['run_id'],)).fetchone()[0])
+        milestones = {('diagnosis', result.get('diagnosis_status', 'unresolved'))}
+        for segment in result.get('verified_segments', []):
+            if segment.get('status') in {'supported', 'refuted'}:
+                milestones.add(('segment', segment.get('rule_id'), segment['status'],
+                                dumps(segment.get('participants', {}))))
+        for fault in result.get('direct_faults', []):
+            milestones.add(('fault', fault.get('kind'), fault.get('target_node_id'), dumps(fault.get('value'))))
+        if summary.get('scope_validation', {}).get('stage') == 'verified':
+            milestones.add(('scope', 'verified'))
+        gaps = {dumps({key: gap.get(key) for key in ('rule_id', 'target_ids', 'requirement_id')})
+                for gap in result.get('required_gaps', [])}
+        previous = self._progress.get(row['run_id'])
+        if previous is None or previous['epoch'] != row['epoch']:
+            self._progress[row['run_id']] = {'epoch': row['epoch'], 'seen': milestones, 'gaps': gaps}
+            return
+        milestones.update(('resolved_gap', gap) for gap in previous['gaps'] - gaps)
+        if milestones - previous['seen']:
+            tx.execute('UPDATE run_executions SET progress_at=? WHERE run_id=?', (stamp, row['run_id']))
+            row['progress_at'] = stamp
+        previous['seen'].update(milestones)
+        previous['gaps'] = gaps
+
+    def _timeout_reason(self, row, stamp):
+        if row['execution_status'] == 'queued' and stamp - row['queued_since'] >= 30:
+            return 'queue_timeout'
+        if row['execution_status'] == 'running':
+            if stamp - row['heartbeat_at'] >= 15:
+                return 'worker_liveness_timeout'
+            operation = self._operations.get(row['run_id'])
+            if operation and operation['epoch'] == row['epoch'] and stamp >= operation['deadline']:
+                return 'operation_timeout'
+            if stamp - row['progress_at'] >= self.stagnation_seconds:
+                return 'step_stagnation_timeout'
+        return None
+
+    def _expire(self, tx, row, stamp):
+        reason = self._timeout_reason(row, stamp)
+        if row['execution_status'] == 'running' and reason in {None, 'step_stagnation_timeout'}:
+            self._observe_progress(tx, row, stamp)
+            reason = self._timeout_reason(row, stamp)
+        if reason:
+            result = (self._operations[row['run_id']]['result'] if reason == 'operation_timeout'
+                      else json.loads(row['result_json']))
+            self._finish(tx, row, 'timed_out', result, reason, stamp)
+        return bool(reason)
 
     def cancellation(self, run_id):
         with self._lock:
@@ -95,6 +150,7 @@ class RunCoordinator:
             tx.execute("UPDATE diagnosis_runs SET status='running',ended_at=NULL WHERE id=?", (run_id,))
             tx.execute("UPDATE jobs SET status='running',ended_at=NULL WHERE id=?", (row['job_id'],))
             self.cancellation(run_id).clear()
+            self._observe_progress(tx, {**row, 'epoch': row['epoch'] + 1}, stamp)
             self._event(tx, run_id, 'run_claimed', {'epoch': row['epoch'] + 1})
             return {'run_id': run_id, 'lease_token': token, 'remaining_seconds': None,
                     'epoch': row['epoch'] + 1}
@@ -114,11 +170,16 @@ class RunCoordinator:
                     or row['lease_token'] != message['lease_token'] or row['last_sequence'] + 1 != message['sequence']):
                 return False
             stamp = self.clock()
+            if self._expire(tx, row, stamp):
+                return False
             tx.execute('UPDATE run_executions SET last_sequence=?,heartbeat_at=?,elapsed_seconds=?,segment_started=?,last_seen_wall=? WHERE run_id=?',
                        (message['sequence'], stamp, self._elapsed(row, stamp), stamp, time.time(), row['run_id']))
             if message['type'] != 'heartbeat':
-                tx.execute('UPDATE run_executions SET progress_at=? WHERE run_id=?', (stamp, row['run_id']))
                 self._event(tx, row['run_id'], 'worker_' + message['type'], sanitize_payload(message['payload']))
+            if message['type'] == 'progress' and message['payload'] == {'operation': 'advance'}:
+                self._operations[row['run_id']] = {'epoch': row['epoch'], 'deadline': stamp + self.operation_seconds,
+                                                   'check_id': f"step:{message['sequence']}",
+                                                   'result': json.loads(row['result_json'])}
             return True
 
     def _close_pending(self, tx, run_id, reason):
@@ -132,11 +193,30 @@ class RunCoordinator:
         from app.run_outcomes import root_supported
         elapsed = self._elapsed(row, stamp)
         result = sanitize_payload(result)
+        pending_tool = tx.execute("SELECT id FROM tool_calls WHERE run_id=? AND status='pending' ORDER BY started_at DESC LIMIT 1", (row['run_id'],)).fetchone()
+        pending_model = tx.execute("SELECT u.id FROM model_usage_records u JOIN context_budgets b ON b.id=u.budget_id WHERE b.run_id=? AND u.status='pending' ORDER BY u.created_at DESC LIMIT 1", (row['run_id'],)).fetchone()
         self._close_pending(tx, row['run_id'], reason)
         tx.execute('UPDATE run_executions SET execution_status=?,accepting=0,elapsed_seconds=?,segment_started=NULL,result_json=?,stop_reason=?,clarification_json=? WHERE run_id=?',
                    (execution, elapsed, dumps(result), reason, dumps(clarification or {}), row['run_id']))
         current = tx.execute('SELECT summary_json FROM diagnosis_runs WHERE id=?', (row['run_id'],)).fetchone()
         summary = json.loads(current['summary_json'])
+        if execution in {'failed', 'cancelled', 'timed_out', 'interrupted'}:
+            pending = pending_tool or pending_model
+            summary['runtime_error'] = {
+                'error_code': reason, 'failure_stage': 'tool' if pending_tool else 'model' if pending_model else 'supervision',
+                'error_category': ('stagnation' if reason == 'step_stagnation_timeout' else
+                                   'liveness' if reason == 'worker_liveness_timeout' else
+                                   'deadline' if execution == 'timed_out' else
+                                   'cancellation' if execution == 'cancelled' else 'interruption'),
+                'check_id': pending['id'] if pending else self._operations.get(row['run_id'], {}).get('check_id', f"step:{row['last_sequence']}")}
+            diagnostic = summary.get('execution_error')
+            if isinstance(diagnostic, dict):
+                summary['runtime_error'].update(sanitize_payload({key: diagnostic[key] for key in
+                    ('code', 'stage', 'failure_stage', 'error_category', 'check_id', 'exception_type')
+                    if isinstance(diagnostic.get(key), str) and diagnostic[key]}))
+                summary['runtime_error']['error_code'] = diagnostic.get('code') or reason
+            failure_stage = summary['runtime_error'].get('stage') or summary['runtime_error']['failure_stage']
+            summary['runtime_error'].update(stage=failure_stage, failure_stage=failure_stage)
         summary.update(execution_status=execution, diagnosis_status=result['diagnosis_status'],
                        diagnosis_result=result, stop_reason=reason, elapsed_seconds=elapsed)
         timestamp=now()
@@ -150,13 +230,16 @@ class RunCoordinator:
         self.cancellation(row['run_id']).set()
 
     def finalize(self, run_id, execution_status, result, *, lease_token=None, reason='completed'):
-        if (execution_status not in TERMINAL or result.get('schema_version') != 'ab-result-1'
+        if (execution_status not in TERMINAL or not isinstance(result, dict) or result.get('schema_version') != 'ab-result-1'
                 or result.get('diagnosis_status') not in DIAGNOSES
-                or result.get('completion_satisfied') != (result['diagnosis_status'] in {'root_cause_supported', 'no_fault_observed'})):
+                or type(result.get('completion_satisfied')) is not bool
+                or result['completion_satisfied'] != (result['diagnosis_status'] in COMPLETIONS)):
             raise ValueError('执行终态或后端诊断结果无效')
         with self._lock, self.db.transaction() as tx:
             row = self._row(tx, run_id)
             if row['execution_status'] not in {'queued', 'running'} or (row['execution_status'] == 'running' and row['lease_token'] != lease_token):
+                return False
+            if self._expire(tx, row, self.clock()):
                 return False
             self._finish(tx, row, execution_status, result, reason, self.clock())
             return True
@@ -176,6 +259,8 @@ class RunCoordinator:
             row = self._row(tx, run_id)
             if row['execution_status'] != 'running' or row['lease_token'] != lease_token:
                 return False
+            if self._expire(tx, row, self.clock()):
+                return False
             self._finish(tx, row, 'waiting_input', json.loads(row['result_json']), 'clarification_required', self.clock(), sanitize_payload(question))
             return True
 
@@ -185,6 +270,8 @@ class RunCoordinator:
             if row['lease_token'] != lease_token or row['execution_status'] in {'queued', 'running'}:
                 return False
             tx.execute('UPDATE run_executions SET worker_alive=0 WHERE run_id=?', (run_id,))
+            self._progress.pop(run_id, None)
+            self._operations.pop(run_id, None)
             return True
 
     def resume(self, run_id, job_id, *, question_id, version):
@@ -205,11 +292,7 @@ class RunCoordinator:
         with self._lock, self.db.transaction() as tx:
             for record in tx.execute("SELECT * FROM run_executions WHERE execution_status IN ('queued','running')").fetchall():
                 row = dict(record)
-                reason = ('queue_timeout' if row['execution_status'] == 'queued' and stamp - row['queued_since'] >= 30
-                          else 'worker_liveness_timeout' if row['execution_status'] == 'running' and stamp - row['heartbeat_at'] >= 15
-                          else None)
-                if reason:
-                    self._finish(tx, row, 'timed_out', json.loads(row['result_json']), reason, stamp)
+                self._expire(tx, row, stamp)
 
     def recover(self):
         from app.runtime.processes import reap_owned_process

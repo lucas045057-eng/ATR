@@ -148,7 +148,7 @@ def successful_checks(connection, hypothesis_id, snapshot_id):
 
 def verify_native_repair(database,settings,run,request):
     from app.connectors.service import RuntimeService
-    from app.run_outcomes import outcome
+    from app.run_outcomes import outcome, verification_node_ids
     from app.system.scope import binding_is_current
     from app.tools.business import BusinessToolRegistry
     with database.connect() as tx:
@@ -156,18 +156,24 @@ def verify_native_repair(database,settings,run,request):
         if not measured['root_supported']:
             raise ValueError('需要已完成且有完整根因证据的原生调查')
         summary=json.loads(run['summary_json'])
-        proxy=next(segment['participants']['proxy'] for segment in measured['result']['verified_segments'] if segment['rule_id']=='upstream_unavailable')
-        node=tx.execute('SELECT name FROM graph_nodes WHERE id=? AND snapshot_id=?',(proxy,run['graph_snapshot_id'])).fetchone()
-        if not node:
+        verification_nodes = verification_node_ids(measured['result'])
+        nodes = {identifier: node['name'] for identifier in verification_nodes
+                 for node in tx.execute('SELECT name FROM graph_nodes WHERE id=? AND snapshot_id=?', (identifier, run['graph_snapshot_id']))}
+        if not nodes or len(nodes) != len(verification_nodes):
             raise ValueError('根因入口不属于原调查的图版本')
-        bindings=[dict(row) for row in tx.execute('SELECT * FROM service_bindings WHERE business_id=? AND target_id=? AND service=?',(summary['business_id'],run['target_id'],node['name'])) if binding_is_current(row)]
     target=RuntimeService(database,settings).get(summary['business_id'],run['target_id'])
-    endpoints=[endpoint for endpoint in target.get('health_endpoints',[]) if endpoint['service']==node['name']
+    endpoints=[endpoint for endpoint in target.get('health_endpoints',[]) if endpoint['service'] in nodes.values()
                and (endpoint['endpoint_id']==request.verification_endpoint_id if request.verification_endpoint_id else endpoint['url']==request.verification_url)]
-    if len(bindings)!=1 or len(endpoints)!=1 or request.verification_url and request.verification_url!=endpoints[0]['url']:
+    if len(endpoints)!=1 or request.verification_url and request.verification_url!=endpoints[0]['url']:
         raise ValueError('恢复验证需要原服务器中唯一的当前入口绑定和已授权健康端点')
+    matching_nodes=[identifier for identifier, name in nodes.items() if name==endpoints[0]['service']]
+    with database.connect() as tx:
+        bindings=[dict(row) for row in tx.execute('SELECT * FROM service_bindings WHERE business_id=? AND target_id=? AND service=?',(summary['business_id'],run['target_id'],endpoints[0]['service'])) if binding_is_current(row)]
+    if len(bindings)!=1 or len(matching_nodes)!=1:
+        raise ValueError('恢复验证需要原服务器中唯一的当前入口绑定和已授权健康端点')
+    verification_node=matching_nodes[0]
     registry=BusinessToolRegistry(database,settings,summary['business_id'],run['id'],run['graph_snapshot_id'],summary['budget_id'],run['target_id'])
-    action={'tool_id':'health.get','target_id':run['target_id'],'target_node_id':proxy,'binding_id':bindings[0]['id'],
+    action={'tool_id':'health.get','target_id':run['target_id'],'target_node_id':verification_node,'binding_id':bindings[0]['id'],
             'arguments':{'endpoint_id':endpoints[0]['endpoint_id']}}
     verification=registry.execute(action,purpose='verification')
     payload=verification.get('payload',{})
@@ -183,7 +189,7 @@ def counterexamples(summary, status):
     examples, seen = [], set()
     native=summary.get('diagnosis_result')
     if isinstance(native,dict) and native.get('schema_version')=='ab-result-1':
-        if native.get('diagnosis_status') in {'root_cause_supported','no_fault_observed'}:
+        if native.get('diagnosis_status') in {'root_cause_supported','direct_cause_supported','no_fault_observed'}:
             return []
         return [{'status':native.get('diagnosis_status','unresolved'),'missing_evidence':native.get('required_gaps',[])[:24],
                  'counter_evidence':native.get('counterevidence',[])[:8],'critical_ambiguities':native.get('critical_ambiguities',[])[:8],

@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import './styles.css'
-import { api } from './api'
+import { api, ApiError } from './api'
 import { BusinessPages } from './business'
 import { StructureView } from './structure-view'
 import { ModelError, ModelAttempt } from './model-error'
@@ -26,7 +26,7 @@ function investigationTarget(targets: Row[], defaults: Row, explicit = '') {
 }
 
 function App() {
-  const [page, setPage] = useState<Page>('business')
+  const [page, setPage] = useState<Page>(sessionStorage.getItem('atr_active_run_job') || sessionStorage.getItem('atr_active_run_id') ? 'investigation' : 'business')
   const [theme, setTheme] = useState(initialTheme)
   const [modelSettingsOpen,setModelSettingsOpen]=useState(false)
   useEffect(() => applyTheme(theme), [theme])
@@ -50,6 +50,9 @@ function App() {
   const [notice, setNotice] = useState('')
   const [busy, setBusy] = useState(false)
   const [runJob, setRunJob] = useState(sessionStorage.getItem('atr_active_run_job') || '')
+  const [activeRunId, setActiveRunId] = useState(sessionStorage.getItem('atr_active_run_id') || '')
+  const [connectionError, setConnectionError] = useState('')
+  const [readAttempt, setReadAttempt] = useState(0)
   const [token, setToken] = useState(sessionStorage.getItem('atr_operator_token') || '')
 
   const refresh = useCallback(async () => {
@@ -57,8 +60,8 @@ function App() {
     setSystems(s); setIncidents(i); setPatterns(p); setMetrics(m); setEvaluationCases(c); setEvaluationTrials(e); setRuns(r)
     setBusinesses(b)
     setKnowledgeFailures(failures)
-    if (!selectedSystem && s.length) setSelectedSystem(s[0].id)
-  }, [selectedSystem])
+    if (s.length) setSelectedSystem(current => current || s[0].id)
+  }, [])
 
   useEffect(() => { refresh().catch(e => setError(e.message)) }, [refresh])
   useEffect(() => { if(['systems','investigation','knowledge','efficiency'].includes(page)) void refresh().catch(e=>setError(e.message)) }, [page,refresh])
@@ -66,6 +69,10 @@ function App() {
     if (runJob) sessionStorage.setItem('atr_active_run_job', runJob)
     else sessionStorage.removeItem('atr_active_run_job')
   }, [runJob])
+  useEffect(() => {
+    if (activeRunId) sessionStorage.setItem('atr_active_run_id', activeRunId)
+    else sessionStorage.removeItem('atr_active_run_id')
+  }, [activeRunId])
 
   useEffect(() => {
     if (!selectedSystem) { setGraph(null); return }
@@ -91,27 +98,55 @@ function App() {
     if (!selectedIncident) { setRun(null); return }
     const incident = incidents.find(x => x.id === selectedIncident)
     if (!incident) return
-    if (incident.latest_run_id) api(`/runs/${incident.latest_run_id}`).then(setRun).catch(() => setRun(null))
+    if (run?.id === activeRunId && run.incident_id === selectedIncident) return
+    let stopped = false
+    if (incident.latest_run_id) api(`/runs/${incident.latest_run_id}`).then(current => { if (!stopped) setRun(current) }).catch(e => { if (!stopped) setError(`无法读取已保存的调查；状态未知。${e.message}`) })
     else setRun(null)
+    return () => { stopped = true }
   }, [selectedIncident, incidents])
 
   useEffect(() => {
-    if (!runJob) return
+    if (!runJob && !activeRunId) return
     let stopped = false; let timer: ReturnType<typeof setTimeout>
+    const controller = new AbortController()
     const poll = async () => {
       try {
-        const state = await api(`/jobs/${runJob}`)
+        let state: Row = {}
+        let id = activeRunId
+        if (!id) {
+          state = await api(`/jobs/${runJob}`, {signal: controller.signal})
+          if (stopped) return
+          id = state.result?.run_id || state.result?.id
+        }
+        if (id) {
+          const current = await api(`/runs/${id}`, {signal: controller.signal})
+          if (stopped) return
+          setActiveRunId(id); setRun(current); setSelectedIncident(current.incident_id); setSelectedSystem(current.system_id)
+          if (current.execution_status) state = {status: current.execution_status}
+          else if (!runJob) {
+            const ended = current.ended_at || ['supported','unresolved','completed'].includes(current.status)
+            state = {status: current.summary?.stage === 'awaiting_review' ? 'waiting_input' : ended ? 'completed' : current.status}
+          }
+        }
+        if (!state.status) state = await api(`/jobs/${runJob}`, {signal: controller.signal})
         if (stopped) return
-        const id = state.result?.run_id || state.result?.id
-        if (id) {const current = await api(`/runs/${id}`); if(stopped)return;setRun(current);setSelectedIncident(current.incident_id);setSelectedSystem(current.system_id)}
-        setError('')
+        if (!state.status) throw new Error('返回的数据未提供可确认的执行状态。')
+        setConnectionError('')
         if (['queued','running'].includes(state.status)) timer = setTimeout(poll,1500)
-        else {setRunJob(''); await refresh(); if(state.status==='waiting_input')setNotice('调查正在等待范围确认，请查看当前问题。');else if(state.status==='cancelled')setNotice('本次调查已取消。');else if(state.status!=='completed')setError(state.error || '调查执行失败或中断，请查看已保留的证据。')}
-      } catch(e) {if(!stopped){setError(`连接中断，调查状态暂时未知；恢复连接后将继续读取同一调查。${(e as Error).message}`);timer=setTimeout(poll,1500)}}
+        else {
+          setRunJob('')
+          if (state.status==='waiting_input') setNotice('调查正在等待范围确认，请查看当前问题。')
+          else if (state.status==='cancelled') setNotice('本次调查已取消。')
+          else if (state.status!=='completed') setError(state.error || '调查执行失败或中断，请查看已保留的证据。')
+          void refresh().catch(e => { if (!stopped) setError(e.message) })
+        }
+      } catch(e) {
+        if (!stopped) setConnectionError(`调查状态暂时未知；保留已读取的证据，重新连接只会读取同一调查。${e instanceof ApiError && e.status ? `HTTP ${e.status} · ` : ''}${(e as Error).message}`)
+      }
     }
     void poll()
-    return () => {stopped=true;clearTimeout(timer)}
-  }, [runJob,refresh])
+    return () => {stopped=true;clearTimeout(timer);controller.abort()}
+  }, [runJob,activeRunId,readAttempt,refresh])
 
   const act = async (fn: () => Promise<void>) => {
     setError(''); setNotice(''); setBusy(true)
@@ -119,7 +154,7 @@ function App() {
     finally { setBusy(false) }
   }
 
-  const saveToken = () => { sessionStorage.setItem('atr_operator_token', token); setError(''); setNotice('本次浏览器会话中已保存操作员令牌。'); void refresh().catch(e => setError(e.message)) }
+  const saveToken = () => { sessionStorage.setItem('atr_operator_token', token); setError(''); setReadAttempt(value => value + 1); setNotice('本次浏览器会话中已保存操作员令牌。'); void refresh().catch(e => setError(e.message)) }
 
   const onBoard = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault(); const data = new FormData(event.currentTarget)
@@ -139,10 +174,13 @@ function App() {
       const systemId = mentioned.length === 1 ? mentioned[0].system_id : String(data.get('system_id'))
       const business = businesses.find(b => b.system_id === systemId)
       const payload = await runPayload(business, business?.id === targetBusinessId ? selectedTarget : '')
-      const created = await api('/incidents', { method: 'POST', body: JSON.stringify({ system_id: systemId, symptom, mode: 'normal', task_type: data.get('task_type'), window_start: occurred ? new Date(occurred).toISOString() : null }) })
+      const goalSelect = form.querySelector<HTMLSelectElement>('select[name="task_type"]')
+      const task = !business || goalSelect?.dataset.explicit === 'true' ? {task_type: data.get('task_type')} : {}
+      const created = await api('/incidents', { method: 'POST', body: JSON.stringify({ system_id: systemId, symptom, mode: 'normal', ...task, window_start: occurred ? new Date(occurred).toISOString() : null }) })
       setSelectedIncident(created.id); setSelectedSystem(systemId); setRun(null); setPage('investigation')
       await startInvestigation(created.id, payload)
       form.reset()
+      if (goalSelect) delete goalSelect.dataset.explicit
     })
   }
 
@@ -154,8 +192,7 @@ function App() {
   }
   const startInvestigation = async (incidentId: string, payload: Row) => {
     const result = await api(`/incidents/${incidentId}/runs`, {method:'POST', body:JSON.stringify(payload)})
-    setSelectedIncident(incidentId); setRunJob(result.job_id); setPage('investigation'); setNotice('只读调查已排入后台，可查看实际执行过程。')
-    if (result.run_id) setRun(await api(`/runs/${result.run_id}`))
+    setSelectedIncident(incidentId); setRun(null); setActiveRunId(result.run_id || ''); setRunJob(result.job_id); setConnectionError(''); setPage('investigation'); setNotice('只读调查已排入后台，可查看实际执行过程。')
   }
 
   const runIncident = (incidentId: string) => void act(async () => {
@@ -224,6 +261,7 @@ function App() {
   const activeBusiness = businesses.find(x => x.system_id === (activeIncident?.system_id || selectedSystem))
   const activeTargetsLoaded = !!activeBusiness && targetBusinessId === activeBusiness.id
   const activeSelectedTarget = runtimeTargets.find(x => x.id === selectedTarget)
+  const runInProgress = !connectionError && (!!runJob || run?.id === activeRunId && ['queued','running'].includes(run?.execution_status))
   const totals = useMemo(() => ({ nodes: graph?.nodes?.length || 0, conflicts: graph?.conflicts?.filter((x: Row) => x.status === 'open').length || 0 }), [graph])
 
   return <div className="app-shell">
@@ -270,15 +308,15 @@ function App() {
           <div className="page-heading"><div><div className="eyebrow">EVIDENCE-LED DIAGNOSIS</div><h1>排查故障</h1><p>先收集当前只读证据，再判断哪些结论有足够支持。</p></div><div className="heading-meta"><span className="run-limit">◉ 用量只记录，不限制调用</span></div></div>
           <div className="investigation-grid">
             <section className="panel incident-panel"><div className="panel-title"><div><h2>创建事件</h2><p>从已有系统图谱开始一次诊断。</p></div><span className="step-icon">02</span></div>
-              <form className="form" onSubmit={createIncident}><label>目标系统<select name="system_id" required value={selectedSystem} onChange={e => setSelectedSystem(e.target.value)}><option value="">选择已登记系统</option>{systems.map(x => <option value={x.id} key={x.id}>{x.name}</option>)}</select></label><label>故障现象<textarea name="symptom" required minLength={3} rows={3} placeholder="例如：外部请求返回 502，发生在 14:20 左右"/></label>{currentSystem?.source_path?.startsWith("business://") ? <label>本次任务目标<select name="task_type" defaultValue="root_cause_investigation"><option value="health_check">健康检查 · 读取指定服务状态和日志</option><option value="focused_diagnosis">定向诊断 · 定位直接异常，触发原因可未知</option><option value="root_cause_investigation">根因调查 · 在授权范围内追查并通过证据核验确认</option></select><small>任务类型只控制检查目标和停止策略，不会扩大工具或服务器授权；高级评估中的资料图与经验对照保留历史流程。</small></label> : <input type="hidden" name="task_type" value="focused_diagnosis"/>}<label>故障开始时间（可选）<input name="window_start" type="datetime-local"/><small>留空时默认回看提交前 15 分钟；旧日志会保留为历史线索。</small></label><p className="muted">直接按当前资料、授权服务和证据核验排查；历史经验仅提供检查建议。</p><button className="btn primary full" disabled={busy || !!runJob || !systems.length}>提交故障并开始调查 <span>→</span></button></form>
+              <form className="form" onSubmit={createIncident}><label>目标系统<select name="system_id" required value={selectedSystem} onChange={e => setSelectedSystem(e.target.value)}><option value="">选择已登记系统</option>{systems.map(x => <option value={x.id} key={x.id}>{x.name}</option>)}</select></label><label>故障现象<textarea name="symptom" required minLength={3} rows={3} placeholder="例如：外部请求返回 502，发生在 14:20 左右"/></label>{currentSystem?.source_path?.startsWith("business://") ? <label>本次任务目标<select name="task_type" defaultValue="focused_diagnosis" onChange={e => { e.currentTarget.dataset.explicit = 'true' }}><option value="health_check">健康检查 · 读取指定服务状态和日志</option><option value="focused_diagnosis">直接故障定位（默认）· 触发原因可未知</option><option value="root_cause_investigation">深入根因调查 · 显式追查触发原因并核验</option></select><small>任务类型只控制检查目标和停止策略，不会扩大工具或服务器授权；高级评估中的资料图与经验对照保留历史流程。</small></label> : <input type="hidden" name="task_type" value="focused_diagnosis"/>}<label>故障开始时间（可选）<input name="window_start" type="datetime-local"/><small>留空时默认回看提交前 15 分钟；旧日志会保留为历史线索。</small></label><p className="muted">直接按当前资料、授权服务和证据核验排查；历史经验仅提供检查建议。</p><button className="btn primary full" disabled={busy || runInProgress || !systems.length}>提交故障并开始调查 <span>→</span></button></form>
               <div className="divider"/><div className="panel-title compact"><div><h2>事件列表</h2><p>共 {incidents.length} 个事件</p></div></div>
               <div className="incident-list">{incidents.length === 0 ? <Empty title="还没有故障事件" text="创建事件后即可开始调查。"/> : incidents.map(x => <button key={x.id} className={`incident-row ${selectedIncident === x.id ? 'selected' : ''}`} onClick={() => {setSelectedIncident(x.id); setSelectedSystem(x.system_id)}}><span className="incident-mark">⌁</span><span><strong>{x.symptom?.text || '未命名事件'}</strong><small>{x.system_name} · {fmtDate(x.created_at)}</small></span><span className="incident-right">{badge(x.status)}<b>›</b></span></button>)}</div>
             </section>
-            <section className="panel run-panel"><div className="panel-title"><div><h2>本次调查</h2><p>{activeIncident ? activeIncident.symptom?.text : '选择一个事件或创建新事件'}</p></div>{activeIncident && <button className="btn primary" disabled={busy||!!runJob||!!activeBusiness&&(!activeTargetsLoaded||!activeSelectedTarget?.investigation_readiness?.eligible)} onClick={() => runIncident(activeIncident.id)}>▶　{runJob?'调查进行中':'开始只读调查'}</button>}</div>
-              {activeBusiness && <div className="target-picker"><label>本次调查 SSH 目标<select aria-label="本次调查 SSH 目标" value={activeTargetsLoaded ? selectedTarget : ''} disabled={busy||!!runJob||!activeTargetsLoaded} onChange={e => setSelectedTarget(e.target.value)}><option value="">{activeTargetsLoaded ? '请选择已授权目标' : '正在读取目标…'}</option>{runtimeTargets.map((target: Row) => <option key={target.id} value={target.id} disabled={!target.investigation_readiness?.eligible}>{target.name} · {target.host}:{target.port} · {target.execution_mode} · {target.investigation_readiness?.eligible ? '已授权' : target.investigation_readiness?.reason || '不可用'}</option>)}</select><small>{activeSelectedTarget ? `${activeSelectedTarget.name} · ${activeSelectedTarget.host}:${activeSelectedTarget.port} · ${activeSelectedTarget.execution_mode} · ${activeSelectedTarget.investigation_readiness?.status === 'mock' ? 'Mock 测试目标' : activeSelectedTarget.investigation_readiness?.eligible ? '授权有效' : activeSelectedTarget.investigation_readiness?.reason}` : runtimeTargets.length > 1 ? '配置了多个目标，请明确选择；不可用目标不会触发回退。调查开始后绑定固定。' : runtimeTargets.length === 0 ? '当前业务没有服务器目标，无法启动调查。' : '目标已失效或授权/凭据不可用，不能用于调查。'}</small></label></div>}
-              {!run ? <div className="run-empty"><div className="empty-orbit"><span>⌁</span><i/><i/><i/></div><h3>等待调查运行</h3><p>运行会先读取服务状态和近期日志，所有调用都会进入审计时间线。</p><div className="run-steps"><span><b>01</b> 定位当前图版本</span><span><b>02</b> 采集状态与日志</span><span><b>03</b> 核验当前证据</span></div></div> : <RunView run={run} onScope={() => {if(activeBusiness)sessionStorage.setItem('atr_business_id',activeBusiness.id);setPage('scope')}} onResume={(answer = {}) => void act(async () => {
+            <section className="panel run-panel">{connectionError && <div className="alert error" data-testid="run-connection" role="status"><p>{connectionError}</p><small>保存的调查：{activeRunId || runJob}。开始新调查需主动提交，不会自动重建。</small><button className="btn" onClick={() => setReadAttempt(value => value + 1)}>重新读取同一调查</button></div>}<div className="panel-title"><div><h2>本次调查</h2><p>{activeIncident ? activeIncident.symptom?.text : '选择一个事件或创建新事件'}</p></div>{activeIncident && <button className="btn primary" disabled={busy||runInProgress||!!activeBusiness&&(!activeTargetsLoaded||!activeSelectedTarget?.investigation_readiness?.eligible)} onClick={() => runIncident(activeIncident.id)}>▶　{runInProgress?'调查进行中':connectionError?'开始新的只读调查':'开始只读调查'}</button>}</div>
+              {activeBusiness && <div className="target-picker"><label>本次调查 SSH 目标<select aria-label="本次调查 SSH 目标" value={activeTargetsLoaded ? selectedTarget : ''} disabled={busy||runInProgress||!activeTargetsLoaded} onChange={e => setSelectedTarget(e.target.value)}><option value="">{activeTargetsLoaded ? '请选择已授权目标' : '正在读取目标…'}</option>{runtimeTargets.map((target: Row) => <option key={target.id} value={target.id} disabled={!target.investigation_readiness?.eligible}>{target.name} · {target.host}:{target.port} · {target.execution_mode} · {target.investigation_readiness?.eligible ? '已授权' : target.investigation_readiness?.reason || '不可用'}</option>)}</select><small>{activeSelectedTarget ? `${activeSelectedTarget.name} · ${activeSelectedTarget.host}:${activeSelectedTarget.port} · ${activeSelectedTarget.execution_mode} · ${activeSelectedTarget.investigation_readiness?.status === 'mock' ? 'Mock 测试目标' : activeSelectedTarget.investigation_readiness?.eligible ? '授权有效' : activeSelectedTarget.investigation_readiness?.reason}` : runtimeTargets.length > 1 ? '配置了多个目标，请明确选择；不可用目标不会触发回退。调查开始后绑定固定。' : runtimeTargets.length === 0 ? '当前业务没有服务器目标，无法启动调查。' : '目标已失效或授权/凭据不可用，不能用于调查。'}</small></label></div>}
+              {!run ? <div className="run-empty"><div className="empty-orbit"><span>⌁</span><i/><i/><i/></div><h3>等待调查运行</h3><p>运行会先读取服务状态和近期日志，按症状逐步检查，所有调用都会进入审计时间线。</p><div className="run-steps"><span><b>01</b> 定位当前图版本</span><span><b>02</b> 采集状态与日志</span><span><b>03</b> 核验当前证据</span></div></div> : <RunView run={run} connectionUnknown={!!connectionError && (!activeRunId || run.id === activeRunId)} onScope={() => {if(activeBusiness)sessionStorage.setItem('atr_business_id',activeBusiness.id);setPage('scope')}} onResume={(answer = {}) => void act(async () => {
                 const result = await api(`/runs/${run.id}/resume`, {method: 'POST', body: JSON.stringify(run.clarification?.question_id ? {question_id:run.clarification.question_id,version:run.clarification.version,...answer} : null)});
-                setRunJob(result.job_id); setNotice('继续原调查并累计记录用量，后台会再次核验范围授权。');
+                setActiveRunId(run.id); setRunJob(result.job_id); setConnectionError(''); setNotice('继续原调查并累计记录用量，后台会再次核验范围授权。');
               })} onCancel={()=>void act(async()=>{await api(`/runs/${run.id}/cancel`,{method:'POST',body:'{}'});setRun(await api(`/runs/${run.id}`));await refresh();})} onRepair={recordRepair} onMatchOutcome={recordMatchOutcome} verificationDefault={currentSystem?.compose_project === 'atr-system-b' ? 'http://ingress_proxy/health' : 'http://edge_proxy/health'}/>}
             </section>
           </div>
@@ -298,12 +336,12 @@ function App() {
 
         {page === 'efficiency' && <>
           <div className="page-heading"><div><div className="eyebrow">OBSERVABILITY OF THE INVESTIGATOR</div><h1>效果与成本</h1><p>只呈现由已保存运行和工具审计记录计算出的结果。</p></div><div className="heading-meta"><span className="sync"><i/> 数据来自本地审计库</span></div></div>
-          <div className="metric-strip analytics"><Metric label="诊断运行" value={metrics.runs_total ?? 0} detail={`${metrics.runs_completed ?? 0} 已结束`} icon="⌁"/><Metric label="有证据支持" value={metrics.supported_runs ?? 0} detail={`${metrics.unresolved_runs ?? 0} 次未解决`} icon="✓" tone="green"/><Metric label="定位用时中位数" value={metrics.tt_rca_seconds_median == null ? '—' : `${Math.round(metrics.tt_rca_seconds_median)}s`} detail="从开始调查到首次证据支持" icon="◷"/><Metric label="只读工具调用" value={metrics.diagnostic_tool_attempts ?? 0} detail={`${metrics.denied_or_failed_calls ?? 0} 次失败或拒绝`} icon="⌘"/></div>
-          <div className="analytics-grid"><section className="panel"><div className="panel-title"><div><h2>知识复用漏斗</h2><p>各阶段按真实排障经验匹配记录计算</p></div></div><Funnel metrics={metrics}/></section><section className="panel"><div className="panel-title"><div><h2>指标说明</h2><p>样本不足时显示为空，不用预置数字填充。</p></div></div><div className="definition-list"><Definition name="定位用时（TT_RCA）" text="开始调查到首次结论获得证据支持的用时中位数；未定位的调查不进入该统计。"/><Definition name="失败调用" text="被策略拒绝、超时或读取失败的工具调用数。"/><Definition name="经验建议有用率" text="操作员标记为有用的经验匹配数 ÷ 所有经验匹配数。"/><Definition name="配对评估" text="只有相同目标、相同用例和相同复位摘要的调查才组成完整配对。"/></div></section></div>
+          <div className="metric-strip analytics"><Metric label="诊断运行" value={metrics.runs_total ?? 0} detail={`${metrics.runs_completed ?? 0} 已结束`} icon="⌁"/><Metric label="完整根因确认" value={metrics.supported_runs ?? 0} detail={`直接原因定位 ${metrics.direct_cause_runs ?? 0} 次`} icon="✓" tone="green"/><Metric label="定位用时中位数" value={metrics.tt_rca_seconds_median == null ? '—' : `${Math.round(metrics.tt_rca_seconds_median)}s`} detail="从开始调查到完整根因证据支持" icon="◷"/><Metric label="只读工具调用" value={metrics.diagnostic_tool_attempts ?? 0} detail={`${metrics.denied_or_failed_calls ?? 0} 次失败或拒绝`} icon="⌘"/></div>
+          <div className="analytics-grid"><section className="panel"><div className="panel-title"><div><h2>知识复用漏斗</h2><p>各阶段按真实排障经验匹配记录计算</p></div></div><Funnel metrics={metrics}/></section><section className="panel"><div className="panel-title"><div><h2>指标说明</h2><p>样本不足时显示为空，不用预置数字填充。</p></div></div><div className="definition-list"><Definition name="定位用时（TT_RCA）" text="开始调查到完整根因获得证据支持的用时中位数；仅完成直接定位的调查不计入该统计。"/><Definition name="失败调用" text="被策略拒绝、超时或读取失败的工具调用数。"/><Definition name="经验建议有用率" text="操作员标记为有用的经验匹配数 ÷ 所有经验匹配数。"/><Definition name="配对评估" text="只有相同目标、相同用例和相同复位摘要的调查才组成完整配对。"/></div></section></div>
           <section className="panel evaluation-history"><div className="panel-title"><div><h2>三模式完整对比</h2><p>仅统计三种模式都完成的同组调查；评分依赖登记真值，token 可能为估算，不能直接当作生产准确率。</p></div><span className="count-pill">{metrics.three_arm_evaluation?.completed_groups || 0} GROUPS</span></div>
             <div className="comparison-scroll"><table className="comparison-table"><thead><tr><th>模式</th><th>完整根因正确</th><th>误报</th><th>未解决</th><th>平均工具 / 模型</th><th>平均 token</th></tr></thead><tbody>{Object.entries(metrics.three_arm_evaluation?.arms || {}).map(([arm, raw]) => { const m = raw as Row; const rate = (v: number | null) => v == null ? '—' : `${(v * 100).toFixed(1)}%`; return <tr key={arm}><td>{comparisonNames[arm] || '未知对照方式'}</td><td>{rate(m.correct_rate)}</td><td>{rate(m.false_positive_rate)}</td><td>{rate(m.unresolved_rate)}</td><td>{m.mean_diagnostic_tool_calls == null ? '—' : `${m.mean_diagnostic_tool_calls.toFixed(1)} / ${m.mean_model_calls.toFixed(1)}`}</td><td>{m.mean_input_tokens == null ? '—' : Math.round(m.mean_input_tokens + m.mean_output_tokens)}</td></tr>})}</tbody></table></div>
           </section>
-          <div className="evaluation-grid"><section className="panel"><div className="panel-title"><div><h2>登记评估用例</h2><p>人工确认的答案只用于评估评分，不会进入排查模型或诊断接口。</p></div><span className="count-pill">{evaluationCases.length} CASES</span></div><form className="form" onSubmit={createEvaluationCase}><label>用例编号<input name="case_key" required pattern="[a-zA-Z0-9][a-zA-Z0-9._-]*" placeholder="例如 db-startup-failure-v1"/></label><label>目标系统<select name="case_system" required defaultValue={selectedSystem}>{systems.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select></label><label>故障类别<input name="fault_class" required defaultValue="dependency_startup_failure"/></label><label>操作员确认的根因标签<textarea name="ground_truth" required minLength={5} rows={2} placeholder="仅供离线配对评估评分，不进入模型上下文"/></label><button className="btn primary" disabled={busy || !!runJob || !systems.length}>保存评估用例</button></form></section>
+          <div className="evaluation-grid"><section className="panel"><div className="panel-title"><div><h2>登记评估用例</h2><p>人工确认的答案只用于评估评分，不会进入排查模型或诊断接口。</p></div><span className="count-pill">{evaluationCases.length} CASES</span></div><form className="form" onSubmit={createEvaluationCase}><label>用例编号<input name="case_key" required pattern="[a-zA-Z0-9][a-zA-Z0-9._-]*" placeholder="例如 db-startup-failure-v1"/></label><label>目标系统<select name="case_system" required defaultValue={selectedSystem}>{systems.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select></label><label>故障类别<input name="fault_class" required defaultValue="dependency_startup_failure"/></label><label>操作员确认的根因标签<textarea name="ground_truth" required minLength={5} rows={2} placeholder="仅供离线配对评估评分，不进入模型上下文"/></label><button className="btn primary" disabled={busy || runInProgress || !systems.length}>保存评估用例</button></form></section>
             <section className="panel"><div className="panel-title"><div><h2>登记同目标配对</h2><p>需要一次只按资料图检查与一次结合已验证经验的已完成调查。</p></div><span className="count-pill">{metrics.complete_paired_evaluations ?? 0} COMPLETE</span></div><form className="form" onSubmit={createEvaluationPair}><label>评估用例<select name="case_id" required>{evaluationCases.map(c => <option key={c.id} value={c.id}>{c.case_key} · {c.system_name}</option>)}</select></label><label>配对键与重复序号<div className="split-input"><input name="pair_key" required pattern="[a-zA-Z0-9][a-zA-Z0-9._-]*" placeholder="pair-01"/><input name="repetition" type="number" min="1" max="100" defaultValue="1" required/></div></label><label>复位摘要（固定用例版本）<select name="reset_digest" required>{evaluationCases.map(c => <option key={c.id} value={c.fixture_digest}>{c.case_key} · {c.fixture_digest}</option>)}</select><small>同一用例两臂使用相同摘要；操作员仍需按运行手册确认基线已复位。</small></label><label>只按资料图检查的调查<select name="graph_only_run" required>{runs.filter(r => r.mode === 'graph_only').map(r => <option key={r.id} value={r.id}>{r.system_name} · {r.symptom} · {r.id.slice(0,8)}</option>)}</select></label><label>结合已验证经验的调查<select name="graph_pattern_run" required>{runs.filter(r => r.mode === 'graph_pattern').map(r => <option key={r.id} value={r.id}>{r.system_name} · {r.symptom} · {r.id.slice(0,8)}</option>)}</select></label><div className="split-input"><label>资料图检查评分<select name="graph_only_verdict"><option value="correct">根因正确</option><option value="unresolved">未解决</option><option value="incorrect">根因错误</option></select></label><label>结合经验检查评分<select name="graph_pattern_verdict"><option value="correct">根因正确</option><option value="unresolved">未解决</option><option value="incorrect">根因错误</option></select></label></div><button className="btn primary" disabled={busy || !evaluationCases.length}>原子保存配对结果</button></form></section></div>
           <section className="panel evaluation-history"><div className="panel-title"><div><h2>已记录的评估运行</h2><p>指标来自实际调查记录，人工确认的评分答案不在此页面返回。</p></div><span className="count-pill">{evaluationTrials.length} TRIALS</span></div>{evaluationTrials.length === 0 ? <Empty title="暂无评估运行" text="创建用例并记录一组完整配对后，这里会展示每个评估臂的实际结果。"/> : <div className="evaluation-rows">{evaluationTrials.map(t => <div className="evaluation-row" key={t.id}><span className="eval-arm">{comparisonNames[t.arm] || '未知对照方式'}</span><strong>{t.case_key}</strong><span>{t.pair_key} · #{t.repetition}</span>{badge(t.verdict)}<span>{t.metrics.diagnostic_tool_calls} calls · {t.metrics.diagnostic_steps} steps · {t.metrics.tt_rca_seconds == null ? '未支持' : `${Math.round(t.metrics.tt_rca_seconds)}s`}</span></div>)}</div>}</section>
         </>}
@@ -368,7 +406,38 @@ function RuntimeFactReport({ report }: {report: Row}) {
   </section>
 }
 
-function RunView({ run, onRepair, onMatchOutcome, verificationDefault, onResume, onScope, onCancel }: {run: Row; onResume: (answer?: Row) => void; onScope: () => void; onCancel: () => void; onRepair: (e: React.FormEvent<HTMLFormElement>) => void; onMatchOutcome: (id: string, payload: Row) => void; verificationDefault: string}) {
+function InvestigationConclusion({run}: {run: Row}) {
+  const summary = run.summary || {}
+  const report = summary.report?.fact_report || {}
+  const result = {...report, ...(run.diagnosis_result || summary.diagnosis_result || {})}
+  const status = run.diagnosis_status || result.diagnosis_status
+  const direct = status === 'direct_cause_supported'
+  const labels: Record<string,string> = {direct_cause_supported:'直接原因已定位', root_cause_supported:'根因已通过证据核验', partial:'已观察到异常，解释仍有缺口', unresolved:'证据不足，原因尚未确认', no_fault_observed:'已执行的检查范围内未观察到故障'}
+  const facts: Row[] = result.direct_findings || result.direct_faults || report.direct_anomalies || summary.runtime_outcome?.direct_faults || []
+  const explanations: (Row | string)[] = result.direct_explanations || []
+  const scope = result.impact_scope
+  const scopeText = typeof scope === 'string' ? scope : scope?.description || scope?.summary
+  const endpoints: (Row | string)[] = scope?.endpoints || []
+  const evidence = [...new Set<string>([...facts.flatMap(f => f.evidence_id ? [f.evidence_id] : f.evidence_ids || []), ...explanations.flatMap(e => typeof e === 'string' ? [] : e.evidence_ids || [])])]
+  const goal = result.investigation_goal || summary.investigation_goal || summary.task_objective?.task_type
+  const directGoal = ['direct_fault','direct_diagnosis','direct_cause','focused_diagnosis'].includes(goal)
+  const goalLabel = ['trigger_cause','root_cause_investigation'].includes(goal) ? '深入根因调查' : directGoal ? '直接故障定位' : ['scoped_health','health_check'].includes(goal) ? '范围内健康检查' : '历史记录未单独提供'
+  const directComplete = direct && directGoal && (result.completion_satisfied ?? run.completion_satisfied) === true
+  return <section className="diagnosis-summary" data-testid="investigation-conclusion">
+    <div className="summary-label"><span>当前发现</span><span>{run.evidence?.length || 0} 条当前证据</span></div>
+    <h3>{labels[status] || '结论按原调查记录保留'}</h3>
+    <p>本次目标：{goalLabel}。{directComplete ? '直接故障定位目标已完成；触发原因仍单独判断。' : (result.completion_satisfied ?? run.completion_satisfied) === false ? '本次目标尚未完成。' : ''}</p>
+    {facts.slice(0,6).map((fact,i) => <p key={i}>{fact.service || report.direct_anomalies?.find((f:Row) => f.evidence_id === fact.evidence_id)?.service || fact.target_node_id || '已核验对象'}：{fact.description || fact.finding || (fact.kind === 'http_status' ? `HTTP ${fact.value}` : `状态 ${fact.value ?? fact.state ?? '见保存的证据'}`)}</p>)}
+    {explanations.map((explanation,i) => <p key={i}>{typeof explanation === 'string' ? explanation : [explanation.symptom?.text || explanation.symptom, explanation.explanation || explanation.description || explanation.reason || (explanation.kind === 'instance_unavailable' ? '已核验实例无法提供服务' : '')].filter(Boolean).join('：')}</p>)}
+    <p>{report.summary || summary.summary || '本次运行没有可展示的摘要。'}</p>
+    <p><b>解释的范围：</b>{scopeText || (scope?.level === 'instance' ? '实例范围，仅限已核验对象。' : '仅限已执行的观测范围。')}{scope?.entry_impact_verified === true ? `已验证入口影响：${endpoints.map(endpoint => typeof endpoint === 'string' ? endpoint : endpoint.url || endpoint.endpoint_id).join('、') || '仅限已保存的承载关系'}。` : '入口与业务影响尚未确认。'}</p>
+    <p><b>关键依据：</b>{evidence.length ? evidence.slice(0,6).join('、') : '见下方已保存的证据；未提供独立引用时不扩展结论。'}</p>
+    <p><b>尚未确认：</b>{direct || result.trigger_cause_status === 'unknown' ? '触发原因尚未确认。' : status === 'root_cause_supported' ? '根因结论仅限已核验的因果关系。' : status ? '尚不足以确认完整根因。' : '历史记录未单独区分触发原因等级。'}业务恢复尚未验证，需人工修复后独立验证。</p>
+    <p><b>是否需要继续：</b>{directComplete ? '当前直接定位可结束；追查触发原因需明确选择深入根因调查。' : summary.next_action || report.next_steps?.join(' ') || '按本次目标及证据缺口决定是否继续。'}</p>
+  </section>
+}
+
+function RunView({ run, connectionUnknown, onRepair, onMatchOutcome, verificationDefault, onResume, onScope, onCancel }: {run: Row; connectionUnknown: boolean; onResume: (answer?: Row) => void; onScope: () => void; onCancel: () => void; onRepair: (e: React.FormEvent<HTMLFormElement>) => void; onMatchOutcome: (id: string, payload: Row) => void; verificationDefault: string}) {
   const summary = run.summary || {}
   const independentScope = !!summary.scope_validation || !!summary.unauthorized_objects
   const gate = summary.gate || {}
@@ -377,18 +446,21 @@ function RunView({ run, onRepair, onMatchOutcome, verificationDefault, onResume,
   const taskLabels: Record<string,string> = {health_check:'健康检查', focused_diagnosis:'定向诊断', root_cause_investigation:'根因调查'}
   const taskStatusLabels: Record<string,string> = {completed:'已完成', completed_with_gaps:'已完成（存在检查或范围缺口）', stopped_with_gap:'已停止，证据仍有缺口', stopped_with_limit:'已达任务/预算上限', stopped_with_error:'因错误停止', in_progress:'进行中'}
   const stopReasonLabels: Record<string,string> = {task_completed:'已完成本次任务目标', evidence_supported:'证据核验已确认根因', no_further_useful_checks:'没有更多有用的授权检查', no_progress:'连续检查没有带来新信息', task_soft_limit:'达到任务级软上限', model_finished_without_useful_action:'模型建议结束，Runtime 未发现值得继续的任务相关检查', model_call_limit:'模型调用硬预算耗尽', tool_call_limit:'工具调用硬预算耗尽', total_token_limit:'累计 Token 硬预算耗尽', permission_blocked:'权限或范围阻断', no_new_actions:'没有新的合法动作', no_verified_authorized_objects:'没有身份核验通过的授权对象'}
-  const runStatusLabel = summary.task_completion_status === 'completed' || summary.task_completion_status === 'completed_with_gaps'
+  const runStatusLabel = run.diagnosis_status === 'direct_cause_supported' ? '直接原因已定位 · 触发原因单独判断' : summary.task_completion_status === 'completed' || summary.task_completion_status === 'completed_with_gaps'
     ? `任务${taskStatusLabels[summary.task_completion_status]} · 根因状态单独显示`
     : run.status === 'supported' ? '证据核验通过' : run.status === 'unresolved' ? '尚未建立根因' : run.status
-  return <div className="run-view"><div className="run-status-line"><div><span className={`status-pulse ${run.status}`}/><strong>{runStatusLabel}</strong><small>运行 {run.id.slice(0,8)} · 图版本 {run.graph_snapshot_id?.slice(0,8)}</small></div>{badge(run.status)}</div>
-    {run.execution_status && <section className="business-block" aria-live="polite"><strong>执行状态：{({queued:'排队中',running:'调查中',waiting_input:'等待确认',completed:'已结束',cancelled:'已取消',timed_out:'已超时',interrupted:'执行中断',failed:'因错误停止'} as Record<string,string>)[run.execution_status] || run.execution_status}</strong><p>诊断结果：{({root_cause_supported:'✓ 根因已定位',partial:'△ 已发现部分异常，完整根因未解决',unresolved:'？证据不足，根因未解决',no_fault_observed:'✓ 已执行的授权检查中未观察到故障'} as Record<string,string>)[run.diagnosis_status] || '尚未判定'}</p>
+  return <div className="run-view"><InvestigationConclusion run={run}/><div className="run-status-line"><div><span className={`status-pulse ${run.status}`}/><strong>{runStatusLabel}</strong><small>运行 {run.id.slice(0,8)} · 图版本 {run.graph_snapshot_id?.slice(0,8)}</small></div>{badge(run.status)}</div>
+    {run.execution_status && <section className="business-block" aria-live="polite"><strong>执行状态：{connectionUnknown ? '连接状态未知（下方证据为上次读取）' : ({queued:'排队中',running:'调查中',waiting_input:'等待确认',completed:'已结束',cancelled:'已取消',timed_out:'已超时',interrupted:'执行中断',failed:'因错误停止'} as Record<string,string>)[run.execution_status] || run.execution_status}</strong><p>诊断结果：{({direct_cause_supported:'✓ 直接原因已定位，触发原因单独判断',root_cause_supported:'✓ 根因已定位',partial:'△ 已发现部分异常，完整根因未解决',unresolved:'？证据不足，根因未解决',no_fault_observed:'✓ 已执行的授权检查中未观察到故障'} as Record<string,string>)[run.diagnosis_status] || '尚未判定'}</p>
       <small>调查编号 {run.id} · 任务结束不等于根因确认。</small>
-      {['queued','running','waiting_input'].includes(run.execution_status) && <button className="btn" onClick={onCancel}>取消本次调查</button>}
+      {!connectionUnknown && ['queued','running','waiting_input'].includes(run.execution_status) && <button className="btn" onClick={onCancel}>取消本次调查</button>}
       {run.diagnosis_result?.required_gaps?.length > 0 && <details open><summary>必须补齐的证据（{run.diagnosis_result.required_gaps.length} 项）</summary>{run.diagnosis_result.required_gaps.map((g:Row,i:number)=><p key={i}>{g.requirement_id} · {g.rule_id}</p>)}</details>}
       {run.diagnosis_result?.model_unknowns?.length > 0 && <details><summary>模型提出的未知项</summary>{run.diagnosis_result.model_unknowns.map((s:string,i:number)=><p key={i}>{s}</p>)}</details>}
-      {!independentScope && run.clarification?.question_id && run.execution_status==='waiting_input' && <RuntimeQuestion key={run.clarification.question_id+':'+run.clarification.version} question={run.clarification} onResume={onResume} onScope={onScope}/>}
+      {!connectionUnknown && !independentScope && run.clarification?.question_id && run.execution_status==='waiting_input' && <RuntimeQuestion key={run.clarification.question_id+':'+run.clarification.version} question={run.clarification} onResume={onResume} onScope={onScope}/>}
     </section>}
     <div className="target-binding"><strong>本次调查的服务器目标</strong>{run.target_binding_status === 'unknown' ? <span>历史运行：来源未知，未保存目标绑定</span> : <span>{run.runtime_target?.name || '目标名称未保存'} · {run.runtime_target?.host || '地址未知'}{run.runtime_target?.port ? `:${run.runtime_target.port}` : ''} · {run.runtime_target?.execution_mode || '执行方式未知'} · {run.target_id}</span>}</div>
+    {!connectionUnknown && !independentScope && summary.stage === 'awaiting_review' && <section className="business-block"><p>调查等待范围确认；已保存证据见下方审计。</p><button className="btn" onClick={onScope}>审核运行范围</button><button className="btn primary" onClick={onResume}>审核后继续调查</button></section>}
+    <ModelError error={summary.model_error} readonlyFallback={Boolean(summary.report?.fact_report && summary.model_error)}/>
+    <details className="business-block" data-testid="evidence-audit"><summary>完整证据与执行审计</summary>
     {summary.scope_validation && <section className="business-block"><strong>本轮运行身份核验</strong><p>已核验授权对象 {summary.scope_validation.verified_count} 项 · 未知对象 {summary.scope_validation.unknown_count} 项 · {fmtDate(summary.scope_validation.observed_at)}</p><small>持久授权与本轮运行证据分别核对；范围核验不会自动批准新对象。</small></section>}
     {!!summary.unauthorized_objects?.length && <section className="business-block" data-testid="unknown-object-review"><h3>未知对象独立审批</h3><p>未知对象待独立审批，不阻断当前授权调查</p>{summary.unauthorized_objects.map((item:Row)=><p key={item.id}>{item.name} · {item.kind} · {item.classification} · 观测 {item.observation_id} · 证据 {item.evidence_id}</p>)}<button className="btn" onClick={onScope}>到服务器与服务独立审批</button></section>}
     {!!summary.scope_gaps?.length && <details className="business-block"><summary>授权范围缺口（{summary.scope_gaps.length} 项）</summary>{summary.scope_gaps.map((gap:Row,i:number)=><p key={i}>{gap.requirement_id} · 授权 {gap.grant_id || '未提供'} · 目标 {gap.target_ids?.join('、') || '未提供'}</p>)}</details>}
@@ -403,15 +475,13 @@ function RunView({ run, onRepair, onMatchOutcome, verificationDefault, onResume,
           <small>审核后可考虑：{p.next_tools.join('、') || '无'}</small></div>
         {badge(p.state)}
       </div>)}
-      {!independentScope && summary.stage === 'awaiting_review' && <><button className="btn" onClick={onScope}>审核运行范围</button>
-        <button className="btn primary" onClick={onResume}>审核后继续调查</button></>}
       {(summary.tool_errors || []).map((e: Row, i: number) => <p className="alert error" key={i}>
         {e.tool_id} · {e.error_code} · 阶段 {e.failure_stage || 'budget'} · {e.message}
         {e.line_number != null && ` · 行 ${e.line_number}`} · 输出 {e.output_bytes || 0} 字节 · 异常 {e.invalid_item_count || 0} 项</p>)}
     </section>}
     {summary.report?.fact_report && <RuntimeFactReport report={summary.report.fact_report}/>}
-    <div className="diagnosis-summary"><div className="summary-label"><span>诊断摘要</span><span>{run.evidence?.length || 0} 条当前证据</span></div><p>{(summary.report?.fact_report ? summary.summary : summary.model_error?.message || summary.summary) || '本次运行没有可展示的摘要。'}</p>{summary.next_action && <div className="next-action"><span>建议的下一步</span><p>{summary.next_action}</p></div>}<div className="gate-note"><b>证据核验：</b>{gate.rationale || '无支持结论。'}　当前冲突：{gate.open_conflict_count ?? 0}</div>{findingLabel && <div className="gate-note"><b>Runtime 判定：</b>{findingLabel}{summary.runtime_outcome?.direct_faults?.length > 0 && <span> · {summary.runtime_outcome.direct_faults.map((fault: Row) => `${fault.service || '服务'} ${fault.state}`).join('、')}</span>}</div>}</div>
-    <div className="business-block"><p className="muted">采集阶段：{collectionLabels[summary.collection_phase] || summary.collection_phase || '历史记录未提供'} · Agent 阶段：{summary.stage === 'stopped' ? '已停止' : summary.stage === 'completed' ? '已完成' : summary.stage === 'awaiting_review' ? '等待范围审核' : summary.stage||run.status} · 模型：{summary.model_status === 'failed' ? '调用失败' : summary.model_status === 'offline' ? '离线' : summary.model_status === 'not_requested' ? '未请求模型' : summary.model_status || '历史记录未提供'} {summary.decision_protocol && `· 决策协议 ${summary.decision_protocol}`} {summary.round&&`· 第 ${summary.round} 轮`} · 数据来源：{summary.connector_types?.join('、')||'查看下方工具审计'}</p><ModelError error={summary.model_error} readonlyFallback={Boolean(summary.report?.fact_report && summary.model_error)}/>{(summary.runtime_decision_audit || []).filter((audit: Row) => audit.rejected_hypothesis_count > 0 || audit.runtime_action_override).map((audit: Row, index: number) => <div className="alert" key={index}>{audit.rejected_hypothesis_count > 0 && <>局部推理假设已隔离：{audit.rejected_hypothesis_count} 项；{audit.rejected_hypotheses?.map((item: Row) => `${item.path}（${item.type}）`).join('、')}</>}{audit.runtime_action_override && '结束建议被 Runtime 覆盖；为完成未核实的授权检查，继续执行了当前优先级最高的只读候选。'}</div>)}{summary.decision_audit?.rejected_relation_count > 0 && <div className="alert">局部证据关系已隔离：拒绝 {summary.decision_audit.rejected_relation_count} 条；{summary.decision_audit.validation_errors?.map((e:Row) => `${e.path}（${e.type}）`).join('、')}{summary.decision_audit.consecutive_error_rounds >= 2 ? '；连续两轮异常，已停止后续工具调用' : ''}</div>}{summary.unresolved_reason&&!summary.model_error&&<p className="alert error">未解决原因：{summary.unresolved_reason}</p>}{budget&&<p>输入 {budget.input_tokens} · 输出 {budget.output_tokens} Tokens · 模型 {budget.calls} 次 · 工具 {budget.tool_calls} 次 · 读取 {budget.retrieved_bytes} bytes · 预算只读，不限制调用</p>}{budget?.usage_records.map((u:Row)=><ModelAttempt key={u.id} usage={u} readonlyFallback={Boolean(summary.report?.fact_report && summary.model_error)}/>)}<details><summary>每次实际执行的工具与策略结果</summary>{run.tool_calls?.map((c:Row)=><div className="business-row" key={c.id}><strong>{c.tool_id}</strong>{badge(c.status)}<small>{fmtDate(c.started_at)} · {c.policy_version} · {c.error_code||c.id}</small>{c.actual_target_id && <small>实际目标：{c.actual_target?.name || '名称未知'} · {c.actual_target?.host || '地址未知'} · {c.actual_target?.execution_mode || '执行方式未知'} · {c.actual_target_id}</small>}{c.diagnostic?.error_code && <small>{c.diagnostic.message} · 阶段 {c.diagnostic.failure_stage} · 行 {c.diagnostic.output_bytes} 字节 · 异常 {c.diagnostic.invalid_item_count} 项</small>}</div>)}</details></div>
+    <div className="business-block"><div className="summary-label"><span>诊断摘要</span><span>{run.evidence?.length || 0} 条当前证据</span></div><p>{(summary.report?.fact_report ? summary.summary : summary.model_error?.message || summary.summary) || '本次运行没有可展示的摘要。'}</p>{summary.next_action && <div className="next-action"><span>建议的下一步</span><p>{summary.next_action}</p></div>}<div className="gate-note"><b>证据核验：</b>{gate.rationale || '无支持结论。'}　当前冲突：{gate.open_conflict_count ?? 0}</div>{findingLabel && <div className="gate-note"><b>Runtime 判定：</b>{findingLabel}{summary.runtime_outcome?.direct_faults?.length > 0 && <span> · {summary.runtime_outcome.direct_faults.map((fault: Row) => `${fault.service || '服务'} ${fault.state}`).join('、')}</span>}</div>}</div>
+    <div className="business-block"><p className="muted">采集阶段：{collectionLabels[summary.collection_phase] || summary.collection_phase || '历史记录未提供'} · Agent 阶段：{summary.stage === 'stopped' ? '已停止' : summary.stage === 'completed' ? '已完成' : summary.stage === 'awaiting_review' ? '等待范围审核' : summary.stage||run.status} · 模型：{summary.model_status === 'failed' ? '调用失败' : summary.model_status === 'offline' ? '离线' : summary.model_status === 'not_requested' ? '未请求模型' : summary.model_status || '历史记录未提供'} {summary.decision_protocol && `· 决策协议 ${summary.decision_protocol}`} {summary.round&&`· 第 ${summary.round} 轮`} · 数据来源：{summary.connector_types?.join('、')||'查看下方工具审计'}</p>{(summary.runtime_decision_audit || []).filter((audit: Row) => audit.rejected_hypothesis_count > 0 || audit.runtime_action_override).map((audit: Row, index: number) => <div className="alert" key={index}>{audit.rejected_hypothesis_count > 0 && <>局部推理假设已隔离：{audit.rejected_hypothesis_count} 项；{audit.rejected_hypotheses?.map((item: Row) => `${item.path}（${item.type}）`).join('、')}</>}{audit.runtime_action_override && '结束建议被 Runtime 覆盖；为完成未核实的授权检查，继续执行了当前优先级最高的只读候选。'}</div>)}{summary.decision_audit?.rejected_relation_count > 0 && <div className="alert">局部证据关系已隔离：拒绝 {summary.decision_audit.rejected_relation_count} 条；{summary.decision_audit.validation_errors?.map((e:Row) => `${e.path}（${e.type}）`).join('、')}{summary.decision_audit.consecutive_error_rounds >= 2 ? '；连续两轮异常，已停止后续工具调用' : ''}</div>}{summary.unresolved_reason&&!summary.model_error&&<p className="alert error">未解决原因：{summary.unresolved_reason}</p>}{budget&&<p>输入 {budget.input_tokens} · 输出 {budget.output_tokens} Tokens · 模型 {budget.calls} 次 · 工具 {budget.tool_calls} 次 · 读取 {budget.retrieved_bytes} bytes · 预算只读，不限制调用</p>}{budget?.usage_records.map((u:Row)=><ModelAttempt key={u.id} usage={u} readonlyFallback={Boolean(summary.report?.fact_report && summary.model_error)}/>)}<details><summary>每次实际执行的工具与策略结果</summary>{run.tool_calls?.map((c:Row)=><div className="business-row" key={c.id}><strong>{c.tool_id}</strong>{badge(c.status)}<small>{fmtDate(c.started_at)} · {c.policy_version} · {c.error_code||c.id}</small>{c.actual_target_id && <small>实际目标：{c.actual_target?.name || '名称未知'} · {c.actual_target?.host || '地址未知'} · {c.actual_target?.execution_mode || '执行方式未知'} · {c.actual_target_id}</small>}{c.diagnostic?.error_code && <small>{c.diagnostic.message} · 阶段 {c.diagnostic.failure_stage} · 行 {c.diagnostic.output_bytes} 字节 · 异常 {c.diagnostic.invalid_item_count} 项</small>}</div>)}</details></div>
     <div className="run-section-title"><h3>假设与证据</h3><span>{run.hypotheses?.length || 0} HYPOTHESES</span></div>
     {!!summary.hypothesis_history?.length&&<details className="business-block"><summary>查看每轮假设与反证</summary>{summary.hypothesis_history.map((h:Row)=><div className="business-row" key={h.hypothesis_id+'-'+h.round}><strong>第 {h.round} 轮 · {h.failure_mode}</strong>{badge(h.status)}<p>{h.prediction}</p><small>支持 {h.support_evidence?.length||0} · 反证 {h.counter_evidence?.length||0}{h.missing_evidence?.length?` · 尚缺：${h.missing_evidence.join('、')}`:''}</small></div>)}</details>}
     {!!summary.scope_requests?.length&&<div className="alert">需要人工确认额外范围：{summary.scope_requests.map((r:Row)=>`${r.service}（${r.reason}）`).join('；')}</div>}
@@ -420,7 +490,8 @@ function RunView({ run, onRepair, onMatchOutcome, verificationDefault, onResume,
     <div className="iteration-list">{(run.diagnostic_steps || []).map((step: Row) => { const action = step.action || {}; const executed = action.executed_action; const proposed = action.proposed_action; const actionLabel = executed ? `${executed.tool_id} · ${executed.service} (${executed.role})` : proposed && step.review_outcome === 'supported' ? '证据门已通过，未执行后续动作' : proposed && action.policy_outcome === 'rejected' ? '建议检查被策略拒绝' : proposed ? '建议的检查未执行' : '本轮未提出额外检查'; return <article className="iteration-card" key={step.id}><div><strong>第 {step.sequence_no} 轮 · {badge(step.review_outcome)}</strong><small>置信分 {Number(step.score_before).toFixed(2)} → {Number(step.score_after).toFixed(2)}</small></div><p>{actionLabel}</p>{proposed?.rationale && <small>{proposed.rationale}</small>}<small>{action.evidence_ids?.length || 0} 条用于复核的证据{action.tool_status ? ` · 工具 ${action.tool_status}` : ''}</small></article> })}</div>
     {summary.pattern_matches && <><div className="run-section-title"><h3>可迁移检查建议</h3><span>历史经验不能替代本次证据</span></div><div className="pattern-match-list">{summary.pattern_matches.length === 0 ? <p className="muted">没有适用于当前业务、版本和角色的已审核经验。</p> : summary.pattern_matches.map((m: Row) => <article className="pattern-match" key={m.match_id}><div><strong>{m.pattern.pattern_key} · v{m.pattern.version}</strong><span>{badge(m.decision)}　匹配分 {Number(m.score).toFixed(2)}</span><p>角色绑定：{(m.binding?.roles || []).join(' · ')}{m.executed_check_count == null ? '' : ` · 本次按经验建议采集 ${m.executed_check_count} 项`}</p><div className="match-checks">{(m.pattern.checks || []).map((c: Row, i: number) => <span key={i}>{i+1}. {c.tool_id}{c.target_role ? ` · ${c.target_role}` : ''}</span>)}</div></div>{m.decision === 'suggested' && <div className="match-actions"><div><small>检查已在当前目标验证？</small><button className="btn small" disabled={m.validation_outcome !== 'pending'} onClick={() => onMatchOutcome(m.match_id, {validation:'validated'})}>是</button><button className="btn small" disabled={m.validation_outcome !== 'pending'} onClick={() => onMatchOutcome(m.match_id, {validation:'failed'})}>否</button></div><div><small>对本次调查有帮助？</small><button className="btn small" disabled={m.usefulness_outcome !== 'pending'} onClick={() => onMatchOutcome(m.match_id, {usefulness:'useful'})}>有帮助</button><button className="btn small" disabled={m.usefulness_outcome !== 'pending'} onClick={() => onMatchOutcome(m.match_id, {usefulness:'not_useful'})}>没有</button></div><span>复核：{m.validation_outcome} · 有用性：{m.usefulness_outcome}</span></div>}</article>)}</div></>}
     <div className="run-section-title"><h3>审计时间线</h3><span>{run.events?.length || 0} EVENTS</span></div><div className="timeline">{(run.events || []).map((event: Row) => <div className="timeline-item" key={event.id}><i/><div><strong>{event.event_type}</strong><small>{fmtDate(event.created_at)} · {event.actor}</small></div></div>)}{(run.evidence || []).map((ev: Row) => <div className="timeline-item evidence-item" key={ev.id}><i/><div><strong>{ev.tool_id} · {ev.freshness_state}</strong><small>{fmtDate(ev.observed_at)} · {ev.content_hash.slice(0,12)}{ev.truncated ? ' · truncated' : ''}</small>{ev.payload.text && <pre>{ev.payload.text.slice(-1000)}</pre>}{ev.payload.containers && <pre>{ev.payload.containers.map((x: Row) => `${x.service || x.name}: ${x.state}`).join('\n')}</pre>}</div></div>)}</div>
-    {(run.repair_eligible??(run.status==='supported')) && <form key={run.id} className="repair-form" onSubmit={onRepair}><div className="run-section-title"><h3>记录人工确认与修复</h3><span>创建待审核经验</span></div><label>修复记录<textarea name="repair" required minLength={5} rows={2} placeholder="说明人工执行的修复内容；Agent 不会执行写操作"/></label><label>验证结果<textarea name="verification" required minLength={5} rows={2} placeholder="说明恢复后的验证请求、时间与观察结果"/></label>{run.execution_status?<label>原服务器中已授权的恢复端点<select name="verification_endpoint_id" required><option value="">选择原目标中的健康端点</option>{(run.verification_endpoints||[]).map((endpoint:Row)=><option key={endpoint.endpoint_id} value={endpoint.endpoint_id}>{endpoint.service} · {endpoint.url}</option>)}</select>{!run.verification_endpoints?.length&&<small>原调查的目标没有可用的入口健康端点，或授权已经变化。请核对服务器配置；验证需要保持原调查的授权。</small>}</label>:<label>已授权的只读健康检查地址<input name="verification_url" required defaultValue={verificationDefault}/></label>}<label className="check-label"><input type="checkbox" name="confirmed" required/> 我已复核诊断结论、人工修复和后续验证</label><button className="btn primary" disabled={!!run.execution_status&&!run.verification_endpoints?.length}>验证恢复结果并保存待审核经验</button></form>}
+    </details>
+    {(run.diagnosis_status || summary.diagnosis_result?.diagnosis_status ? (run.diagnosis_status || summary.diagnosis_result?.diagnosis_status) === 'root_cause_supported' && run.repair_eligible === true : (run.repair_eligible??(run.status==='supported'))) && <form key={run.id} className="repair-form" onSubmit={onRepair}><div className="run-section-title"><h3>记录人工确认与修复</h3><span>创建待审核经验</span></div><label>修复记录<textarea name="repair" required minLength={5} rows={2} placeholder="说明人工执行的修复内容；Agent 不会执行写操作"/></label><label>验证结果<textarea name="verification" required minLength={5} rows={2} placeholder="说明恢复后的验证请求、时间与观察结果"/></label>{run.execution_status?<label>原服务器中已授权的恢复端点<select name="verification_endpoint_id" required><option value="">选择原目标中的健康端点</option>{(run.verification_endpoints||[]).map((endpoint:Row)=><option key={endpoint.endpoint_id} value={endpoint.endpoint_id}>{endpoint.service} · {endpoint.url}</option>)}</select>{!run.verification_endpoints?.length&&<small>原调查的目标没有可用的入口健康端点，或授权已经变化。请核对服务器配置；验证需要保持原调查的授权。</small>}</label>:<label>已授权的只读健康检查地址<input name="verification_url" required defaultValue={verificationDefault}/></label>}<label className="check-label"><input type="checkbox" name="confirmed" required/> 我已复核诊断结论、人工修复和后续验证</label><button className="btn primary" disabled={!!run.execution_status&&!run.verification_endpoints?.length}>验证恢复结果并保存待审核经验</button></form>}
   </div>
 }
 function Funnel({ metrics }: {metrics: Row}) {

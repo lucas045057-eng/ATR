@@ -32,7 +32,12 @@ from app.knowledge import (
     graph_contract,
     successful_checks,
 )
-from app.run_outcomes import native_verification_valid, outcome, supported_checks
+from app.run_outcomes import (
+    native_verification_valid,
+    outcome,
+    supported_checks,
+    verification_node_ids,
+)
 from app.settings import get_settings
 from app.storage.database import Database
 from app.system.inventory import SystemOnboarding
@@ -753,12 +758,20 @@ def resume_business_run(run_id: str, request: dict[str, Any] | None = None, acto
 def list_runs() -> list[dict[str, Any]]:
     connection = db().connect()
     try:
-        rows = connection.execute("""SELECT r.id,r.incident_id,r.status,r.mode,r.started_at,r.supported_at,r.ended_at,
+        rows = connection.execute("""SELECT r.id,r.incident_id,r.status,r.mode,r.started_at,r.supported_at,r.ended_at,r.model_config_json,
           i.system_id,s.name AS system_name,i.symptom_json FROM diagnosis_runs r
           JOIN incidents i ON i.id=r.incident_id JOIN systems s ON s.id=i.system_id
           ORDER BY r.started_at DESC LIMIT 250""").fetchall()
-        return [{**dict(row), "symptom": decode(row["symptom_json"]).get("text", ""), "symptom_json": None}
-                for row in rows]
+        results = []
+        for row in rows:
+            measured = outcome(connection, row)
+            item = {key: value for key, value in dict(row).items() if key != 'model_config_json'}
+            item.update(symptom=decode(row['symptom_json']).get('text', ''), symptom_json=None)
+            if measured['native']:
+                item.update(execution_status=measured['execution_status'], diagnosis_status=measured['diagnosis_status'],
+                            completion_satisfied=measured['result'].get('completion_satisfied', False))
+            results.append(item)
+        return results
     finally:
         connection.close()
 
@@ -791,8 +804,8 @@ def get_run(run_id: str) -> dict[str, Any]:
             try:
                 current=RuntimeService(db(),get_settings()).get(result['summary']['business_id'],row['target_id'])
                 if authorization_digest(current)==target_snapshot.get('authorization_digest'):
-                    proxies={segment['participants']['proxy'] for segment in measured_outcome['result']['verified_segments'] if segment['rule_id']=='upstream_unavailable'}
-                    names={node[0] for identifier in proxies for node in connection.execute('SELECT name FROM graph_nodes WHERE id=? AND snapshot_id=?',(identifier,row['graph_snapshot_id']))}
+                    verification_nodes=verification_node_ids(measured_outcome['result'])
+                    names={node[0] for identifier in verification_nodes for node in connection.execute('SELECT name FROM graph_nodes WHERE id=? AND snapshot_id=?',(identifier,row['graph_snapshot_id']))}
                     result['verification_endpoints']=[endpoint for endpoint in current.get('health_endpoints',[]) if endpoint['service'] in names]
             except (KeyError,ValueError):
                 pass
@@ -815,9 +828,11 @@ def get_run(run_id: str) -> dict[str, Any]:
             item["action"] = decode(item.pop("action_json"))
             result["diagnostic_steps"].append(item)
         result["events"] = [dict(e) for e in connection.execute("SELECT * FROM events WHERE run_id=? ORDER BY sequence_no", (run_id,))]
+        tool_failures = {event['entity_id']: decode(event['payload_redacted_json']) for event in result['events']
+                         if event['entity_type'] == 'tool_call' and event['event_type'] in {'tool_failed', 'tool_denied', 'tool_timed_out'}}
         result["tool_calls"] = []
         for call in connection.execute("SELECT t.*,o.diagnostics_json,o.target_id AS actual_target_id FROM tool_calls t LEFT JOIN runtime_observations o ON o.id=t.request_id WHERE t.run_id=? ORDER BY t.started_at", (run_id,)):
-            item = {**dict(call), "diagnostic": decode(call["diagnostics_json"] or "{}")}
+            item = {**dict(call), "diagnostic": decode(call["diagnostics_json"] or "{}") or tool_failures.get(call['id'], {})}
             item.pop("diagnostics_json", None)
             actual_id = item.pop("actual_target_id", None)
             item["actual_target_id"] = actual_id
@@ -1097,8 +1112,8 @@ def metrics() -> dict[str, Any]:
         outcomes=[outcome(connection,run) for run in runs]
         completed = [item for item in outcomes if item['completed']]
         durations = []
-        for row in runs:
-            if row["supported_at"]:
+        for row, measured in zip(runs, outcomes, strict=True):
+            if row["supported_at"] and measured['root_supported']:
                 start = datetime.fromisoformat(row["started_at"])
                 end = datetime.fromisoformat(row["supported_at"])
                 durations.append(max(0, (end-start).total_seconds()))
@@ -1114,6 +1129,8 @@ def metrics() -> dict[str, Any]:
         def rate(n: int, d: int) -> float | None:
             return round(n/d, 4) if d else None
         return {"runs_total": len(runs), "runs_completed": len(completed), "supported_runs": sum(item['root_supported'] for item in outcomes),
+                "direct_cause_runs":sum(item['direct_supported'] for item in outcomes),
+                "goal_completed_runs":sum(item['completion_satisfied'] for item in outcomes),
                 "healthy_runs":sum(item['healthy'] for item in outcomes),
                 "partial_runs":sum(item.get('diagnosis_status')=='partial' for item in outcomes),
                 "aborted_runs":sum(item.get('execution_status') in {'failed','cancelled','timed_out','interrupted'} for item in outcomes),

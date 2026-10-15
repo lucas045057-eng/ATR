@@ -53,7 +53,7 @@ def investigation(client, monkeypatch):
     monkeypatch.setattr(MockConnector, 'read', read)
 
     def create(names=('orders-api', 'orders-store'), settings=None, services=2,
-               task_type='root_cause_investigation', symptom=None, related=False):
+               task_type='root_cause_investigation', symptom=None, related=False, replicas=1):
         names = tuple(names) if services == 2 else tuple('component-' + str(i) for i in range(services))
         compose = 'services:\n' + ''.join('  ' + name + ': {build: .}\n' for name in names)
         if related:
@@ -68,18 +68,23 @@ def investigation(client, monkeypatch):
         }).json()
         database = Database(get_settings().database_path)
         inventories[target['id']] = [{'id':name + '.service', 'name':name, 'kind':'service'} for name in names]
+        inventories[target['id']] += [{'id': names[0] + '-replica-' + str(i) + '.service',
+                                       'name': names[0] + '-replica-' + str(i), 'kind': 'service'}
+                                      for i in range(1, replicas)]
         with database.transaction() as tx:
             tx.execute('INSERT INTO investigation_defaults VALUES(?,?,?,?,?,?)',
                        (profile['business_id'], target['id'], '[]', names[0], 'test', now()))
-            for name in names:
+            objects = [(name, name + '.service') for name in names]
+            objects += [(names[0], names[0] + '-replica-' + str(i) + '.service') for i in range(1, replicas)]
+            for name, runtime_id in objects:
                 tx.execute("""INSERT INTO service_bindings(id,business_id,target_id,service,runtime_id,
                     kind,score,reasons_json,evidence_ids_json,status,discovery_id,freshness_status,
                     observed_at,expires_at,source_json,candidate_digest)
                     VALUES(?,?,?,?,?,'service',1,'[]','[]','confirmed',?,'confirmed',?,?,
                     '{}',?)""",
-                    (uid(), profile['business_id'], target['id'], name, name + '.service', uid(),
+                    (uid(), profile['business_id'], target['id'], name, runtime_id, uid(),
                      now(), (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
-                     candidate_digest(next(c for c in inventories[target['id']] if c['name']==name))))
+                     candidate_digest(next(c for c in inventories[target['id']] if c['id']==runtime_id))))
         event = client.post('/api/v1/incidents', json={
             'system_id': profile['system_id'], 'symptom': symptom or names[0] + ' unavailable',
             'task_type': task_type,
@@ -154,7 +159,8 @@ def test_baseline_reads_precede_any_model_decision(investigation, monkeypatch):
     assert observed[0][0][0] == 'service.list'
     baseline = [(tool, args) for tool, args in observed[0] if tool != 'service.list']
     assert {tool for tool, _ in baseline} == {'service.status', 'service.logs', 'health.get'}
-    assert len(baseline) == 5
+    assert len(baseline) == 3
+    assert {args.get('name') for tool, args in baseline if tool.startswith('service.')} == {'orders-api.service'}
     assert summary['report']['summary'] != '尚无运行时证据'
 
 
@@ -182,7 +188,7 @@ def test_successful_decision_then_529_keeps_new_evidence_without_an_extra_retry(
     summary, calls = run_to_completion(broker)
     assert len(requests) == 2 and summary['model_failed_at_call'] == 2
     assert any(call['tool_id'] == 'config.list' and call['status'] == 'succeeded' for call in calls)
-    assert len(summary['evidence']) >= 6
+    assert len(summary['evidence']) == 5
     assert summary['report']['summary'] != '尚无运行时证据'
     assert summary['analysis_status'] == 'offline'
     assert [usage['status'] for usage in broker.manager.get(broker.budget_id)['usage_records']] == ['succeeded', 'failed']
@@ -201,7 +207,7 @@ def test_first_model_failure_finishes_readonly_without_a_second_request(
     broker = create(names, settings=model_settings(model_api_key=SecretStr('isolated-placeholder')))
     summary, calls = run_to_completion(broker)
     assert len(requests) == 1
-    assert len([call for call in calls if call['tool_id'] in {'service.status', 'service.logs', 'health.get'}]) == 5
+    assert len([call for call in calls if call['tool_id'] in {'service.status', 'service.logs', 'health.get'}]) == 3
     assert len(reads) == len(calls)
     assert {call['target_id'] for call in calls} == {broker.target_id}
     assert summary['execution_status'] == 'completed'
@@ -215,16 +221,16 @@ def test_first_model_failure_finishes_readonly_without_a_second_request(
     assert usage['reserved_tokens'] == 0
 
 
-def test_two_failed_checks_do_not_abandon_other_authorized_baseline_checks(investigation):
+def test_failed_check_does_not_abandon_other_relevant_checks_or_scan_unrelated_services(investigation):
     create, _, responses = investigation
     broker = create()
     for name in ('orders-api.service', 'orders-store.service'):
         responses[('service.status', name)] = TimeoutError('fixture timeout')
     summary, calls = run_to_completion(broker)
     assert {call['tool_id'] for call in calls} >= {'service.status', 'service.logs', 'health.get'}
-    assert len([call for call in calls if call['tool_id'] == 'service.status']) == 2
+    assert len([call for call in calls if call['tool_id'] == 'service.status']) == 1
     checks = summary['report']['fact_report']['checks']
-    assert sum(check['tool_status'] == 'timed_out' for check in checks) == 2
+    assert sum(check['tool_status'] == 'timed_out' for check in checks) == 1
     assert any(check['tool_status'] == 'succeeded' for check in checks)
 
 
@@ -242,7 +248,7 @@ def test_old_logs_are_successful_reads_but_not_current_failure_or_health_proof(i
     summary, _ = run_to_completion(broker)
     checks = summary['report']['fact_report']['checks']
     old_logs = [row for row in checks if row['tool_id'] == 'service.logs']
-    assert len(old_logs) == 2
+    assert len(old_logs) == 1
     assert all(row['tool_status'] == 'succeeded' and row['evidence_status'] == 'out_of_window' for row in old_logs)
     assert not any(fact['kind'] == 'log_observation' for fact in summary['report']['fact_report']['confirmed_facts'])
     assert summary['diagnosis_status'] != 'no_fault_observed'
@@ -260,7 +266,7 @@ def test_offline_continues_remaining_checks_and_does_not_replay_prior_success(in
     summary, calls = run_to_completion(broker)
     assert sum(call['tool_id'] == first['tool_id'] and json.loads(call['args_redacted_json']) == first['arguments']
                for call in calls) == 1
-    assert len(reads) >= 5
+    assert len(reads) >= 4
     assert broker.manager.get(broker.budget_id)['calls'] == 0
     assert summary['report']['summary'] != '尚无运行时证据'
 
@@ -322,12 +328,12 @@ def test_exhausted_existing_tool_manager_stops_without_extra_tool_or_model_calls
     assert summary['report']['fact_report']['missing_evidence']
 
 
-def test_large_scope_baseline_is_not_starved_by_configuration_candidates(investigation):
+def test_large_authorization_scope_does_not_trigger_full_baseline_scan(investigation):
     create, _, _ = investigation
     broker = create(services=15)
     _, calls = run_to_completion(broker)
-    assert len([call for call in calls if call['tool_id'] == 'service.status']) == 15
-    assert len([call for call in calls if call['tool_id'] == 'service.logs']) == 15
+    assert len([call for call in calls if call['tool_id'] == 'service.status']) == 1
+    assert len([call for call in calls if call['tool_id'] == 'service.logs']) == 1
 
 
 @pytest.mark.parametrize('task_type', ['health_check', 'focused_diagnosis'])
@@ -335,7 +341,8 @@ def test_task_scope_filtering_precedes_candidate_capacity(investigation, task_ty
     create, _, _ = investigation
     broker = create(services=15, related=True, symptom='component-0 unavailable', task_type=task_type)
     _, calls = run_to_completion(broker)
-    assert {call['tool_id'] for call in calls} >= {'service.status', 'service.logs', 'health.get'}
+    required = {'service.status'} if task_type == 'focused_diagnosis' else {'service.status', 'service.logs', 'health.get'}
+    assert {call['tool_id'] for call in calls} >= required
     with broker.db.connect() as tx:
         nodes = {row[0] for row in tx.execute('SELECT target_node_id FROM evidence WHERE tool_call_id IN '
                                              '(SELECT id FROM tool_calls WHERE run_id=?)', (broker.run_id,))}
@@ -343,7 +350,7 @@ def test_task_scope_filtering_precedes_candidate_capacity(investigation, task_ty
 
 
 @pytest.mark.parametrize('old_logs', [False, True])
-def test_offline_gap_reads_are_not_starved_by_irrelevant_configuration_candidates(investigation, old_logs):
+def test_unverified_relationship_does_not_invent_mandatory_configuration_gaps(investigation, old_logs):
     create, _, responses = investigation
     symptom = ' '.join('component-' + str(i) for i in range(1, 14))
     broker = create(services=15, related=True, symptom=symptom)
@@ -360,8 +367,8 @@ def test_offline_gap_reads_are_not_starved_by_irrelevant_configuration_candidate
     with broker.db.connect() as tx:
         config_nodes = {row[0] for row in tx.execute("SELECT target_node_id FROM evidence WHERE tool_call_id IN "
             "(SELECT id FROM tool_calls WHERE run_id=? AND tool_id='config.read')", (broker.run_id,))}
-    assert config_nodes == {broker.root, missing_target}
-    assert any(call['tool_id'] == 'config.read' for call in calls)
+    assert config_nodes == set()
+    assert not any(call['tool_id'] == 'config.read' for call in calls)
 
 
 def test_fact_report_preserves_noncritical_unknowns_after_a_verified_chain():
@@ -439,6 +446,6 @@ def test_actual_loopback_http_529_is_a_single_audited_request(investigation, fak
     assert state['requests'] == 1
     assert summary['model_error']['status_code'] == 529
     assert summary['model_error']['retry_count'] == 0
-    assert summary['analysis_status'] == 'offline' and len(calls) >= 5
+    assert summary['analysis_status'] == 'offline' and len(calls) >= 4
     assert 'synthetic-secret' not in dumps(summary)
     assert 'NEVER-ECHO-REQUEST' not in dumps(summary)

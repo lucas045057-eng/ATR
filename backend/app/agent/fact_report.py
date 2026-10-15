@@ -41,11 +41,14 @@ def evidence_quality(evidence, state, *, ssh=False):
         return 'current', '只读资料已保存；资料本身不构成根因证明'
     if tool == 'health.get':
         if (payload.get('observation_location') != 'remote_ssh' or not payload.get('endpoint_id')
-                or type(payload.get('status_code')) is not int or payload.get('redirected')):
+                or not (type(payload.get('status_code')) is int or state.get('investigation_goal')
+                        and payload.get('reachable') is False and payload.get('failure_kind') == 'connection_refused')
+                or payload.get('redirected')):
             return 'insufficient_for_gate', '缺少原目标的精确 HTTP 观测身份'
         return 'current', '原授权端点的响应事实，不能单独证明根因'
-    if ssh and (not payload.get('startup_cycle') or tool in {'service.logs', 'container.logs', 'log.tail'}
-                and not payload.get('cycle_verified')):
+    if ssh and ((not payload.get('startup_cycle') and not (
+            state.get('investigation_goal') and tool.endswith('.status') and evidence.get('runtime_identity_verified')))
+            or tool in {'service.logs', 'container.logs', 'log.tail'} and not payload.get('cycle_verified')):
         return 'insufficient_for_gate', '当前启动身份尚未核验'
     if tool.endswith('.status'):
         return ('current', '当前状态观测') if isinstance(payload.get('state'), str) else (
@@ -72,11 +75,12 @@ def build_fact_report(state, result, history, *, model_error=None, ssh=False):
              and fact['freshness'] == 'current' and fact['independent_observation']]
     facts = [{**fact, 'service': names.get(fact['target_node_id'])} for fact in facts]
     for fact in facts:
-        if fact['kind'] == 'http_status':
+        if fact['kind'] in {'http_status', 'endpoint_reachability'}:
             payload = evidence_by_id[fact['evidence_id']]['payload']
             fact.update(endpoint_id=payload.get('endpoint_id'), url=payload.get('url'))
     direct = [fact for fact in facts if fact['kind'] == 'service_state' and fact['value'] in FAILED
               or fact['kind'] == 'http_status' and fact['value'] >= 400
+              or fact['kind'] == 'endpoint_reachability' and fact['value'] is False
               or fact['kind'] == 'log_observation' and (fact['value'].get('failure_signal')
                                                        or fact['value'].get('mechanisms'))]
     evidence_by_call = {e['call_id']: e for e in state['evidence'] if e.get('call_id')}
@@ -109,13 +113,21 @@ def build_fact_report(state, result, history, *, model_error=None, ssh=False):
     states = '、'.join(names.get(fact['target_node_id'], fact['target_node_id']) + '=' + fact['value']
                       for fact in facts if fact['kind'] == 'service_state')
     status = result['diagnosis_status']
-    verdict = {'root_cause_supported': '完整故障链已通过原有独立证据核验。',
+    stopped = any(f['kind'] == 'service_state' and f['value'] in {'exited', 'inactive', 'dead'} for f in direct)
+    verdict = {'root_cause_supported': ('当前调查范围内的因果主张已通过独立证据核验。' if result.get('investigation_goal') else
+                                       '完整故障链已通过原有独立证据核验。'),
+               'direct_cause_supported': ('已确认相关实例已停止；该实例无法提供服务。停止的触发原因尚未确认。' if stopped else
+                                          '已确认相关实例处于异常状态，无法正常提供服务；触发原因尚未确认。'),
                'no_fault_observed': '已执行的当前授权检查中未观察到故障。',
                'partial': '已观察到直接异常；完整根因尚未通过证据核验。',
                'unresolved': '当前证据不足，故障原因未确认。'}[status]
-    summary = (f"只读取证成功 {counts['succeeded']} 项、拒绝 {counts['denied']} 项、"
+    if result.get('impact_scope', {}).get('entry_impact_verified'):
+        urls = '、'.join(e['url'] for e in result['impact_scope']['endpoints'])
+        verdict += f' 当前端口配置确认该实例唯一直接承载入口 {urls}，实例停止足以解释该入口不可用。'
+    summary = (verdict + (' 状态：' + states + '。' if states else '')
+               + f"只读取证成功 {counts['succeeded']} 项、拒绝 {counts['denied']} 项、"
                f"失败或超时 {counts['failed'] + counts['timed_out']} 项；保存 {len(facts)} 条当前独立事实。"
-               + (' 状态：' + states + '。' if states else '') + verdict)
+               )
     if model_error:
         summary += ' 模型分析不可用，事实报告由 Runtime 生成，未自动追加模型请求。'
     scope_reasons = {
@@ -130,7 +142,9 @@ def build_fact_report(state, result, history, *, model_error=None, ssh=False):
         {'requirement_id': check['check_id'], 'target_ids': [check['target_node_id']],
          'tool_status': check['tool_status'], 'evidence_status': check['evidence_status'], 'reason': check['reason']}
         for check in checks if check['tool_status'] != 'succeeded' or check['evidence_status'] != 'current']]
-    unknowns = [] if result['completion_satisfied'] else ['故障触发原因尚未通过独立证据确认。']
+    unknowns = [] if status in {'root_cause_supported', 'no_fault_observed'} else ['故障触发原因尚未通过独立证据确认。']
+    if result.get('investigation_goal') and not result.get('impact_scope', {}).get('entry_impact_verified'):
+        unknowns.append('业务入口的全部副本及承载关系尚未完整核验；影响范围限于已观测对象。')
     unknowns += ['模型提出的待核实项（非已确认原因）：' + redact_text(str(item))
                  for item in result.get('model_unknowns', [])]
     for ambiguity in result.get('critical_ambiguities', []):
@@ -143,7 +157,9 @@ def build_fact_report(state, result, history, *, model_error=None, ssh=False):
     next_steps = []
     if missing:
         next_steps.append('核对列出的权限、时间窗、启动身份和未采集证据；仅在明确授权后补充检查。')
-    if status not in {'root_cause_supported', 'no_fault_observed'}:
+    if status == 'direct_cause_supported':
+        next_steps.append('直接故障定位已完成；如需追查停止的触发原因，可显式发起深入调查。')
+    elif status not in {'root_cause_supported', 'no_fault_observed'}:
         next_steps.append('当前状态或 HTTP 异常不能单独证明触发原因，需补齐原 Evidence Gate 要求的独立证据。')
     if model_error:
         next_steps.append('模型恢复后由操作者另行决定是否发起新推理；本次离线流程不会自动收费重试。')
@@ -164,6 +180,10 @@ def build_fact_report(state, result, history, *, model_error=None, ssh=False):
     if not advice:
         advice.append('先补齐列出的授权或证据缺口，再决定是否需要修复；当前报告不支持直接执行修复。')
     return {'schema_version': 'ab-fact-report-1', 'summary': summary, 'diagnosis_status': status,
+            'investigation_goal': result.get('investigation_goal'),
+            'direct_explanations': result.get('direct_explanations', []),
+            'impact_scope': result.get('impact_scope', {}),
+            'trigger_cause_status': result.get('trigger_cause_status', 'unknown'),
             'confirmed_facts': facts, 'direct_anomalies': direct, 'checks': checks,
             'fault_directions': directions, 'root_cause_verified': status == 'root_cause_supported',
             'repair_advice': advice,

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -88,6 +89,11 @@ def health(endpoint, deadline):
         response = opener.open(request, timeout=max(.01, min(3, deadline-time.monotonic())))
     except urllib.error.HTTPError as exc:
         response = exc
+    except (urllib.error.URLError, ConnectionRefusedError) as exc:
+        if isinstance(exc, urllib.error.URLError) and not isinstance(exc.reason, ConnectionRefusedError):
+            raise
+        return {'endpoint_id': endpoint['endpoint_id'], 'url': url, 'reachable': False,
+                'failure_kind': 'connection_refused', 'partial': False, 'truncated': False}
     with response:
         raw = bytearray()
         while len(raw) < 8001:
@@ -103,17 +109,51 @@ def health(endpoint, deadline):
                 'body': bytes(raw[:8000]).decode('utf-8', errors='replace')}
 
 
+def published_endpoints(bindings):
+    if bindings is None:
+        return []
+    if not isinstance(bindings, dict):
+        raise ValueError('Invalid port bindings')
+    endpoints = []
+    for key, entries in bindings.items():
+        match = re.fullmatch(r'([0-9]{1,5})/(tcp|udp|sctp)', key) if isinstance(key, str) else None
+        if not match or not 1 <= int(match[1]) <= 65535:
+            raise ValueError('Invalid container port or protocol')
+        if entries is None:
+            continue
+        if not isinstance(entries, list):
+            raise ValueError('Invalid port binding entries')
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ValueError('Invalid port binding entry')
+            host_ip, host_port = entry.get('HostIp'), entry.get('HostPort')
+            if not isinstance(host_ip, str) or not isinstance(host_port, str):
+                raise ValueError('Invalid published IP or port type')
+            # Docker leaves defaults/auto-assigned ports empty; they prove no exact endpoint.
+            if not host_ip or not host_port:
+                continue
+            if ('%' in host_ip or not re.fullmatch(r'[0-9]{1,5}', host_port)
+                    or not 1 <= int(host_port) <= 65535):
+                raise ValueError('Invalid published IP or port')
+            endpoints.append({'host_ip': str(ipaddress.ip_address(host_ip)),
+                              'host_port': int(host_port), 'container_port': int(match[1]),
+                              'protocol': match[2]})
+    return endpoints
+
+
 def container_status(cid, deadline):
     # Docker's environment, mounts, health output and credentials are never requested.
     template = ('{"id":{{json .Id}},"name":{{json .Name}},"status":{{json .State.Status}},'
                 '"started_at":{{json .State.StartedAt}},"finished_at":{{json .State.FinishedAt}},'
                 '"exit_code":{{json .State.ExitCode}},"health":{{with (index .State "Health")}}{{json .Status}}{{else}}null{{end}},'
                 '"networks":{{json .NetworkSettings.Networks}},'
+                '"port_bindings":{{json .HostConfig.PortBindings}},'
                 '"compose_project":{{json (index .Config.Labels "com.docker.compose.project")}},'
                 '"compose_service":{{json (index .Config.Labels "com.docker.compose.service")}}}')
     row = json.loads(command(['/usr/bin/docker', 'inspect', '--format', template, cid], deadline))
     if not isinstance(row, dict) or not CID.fullmatch(str(row.get('id', ''))) or not row['id'].startswith(cid):
         raise ValueError('Container identity mismatch')
+    row['published_endpoints'] = published_endpoints(row.pop('port_bindings', None))
     row['networks'] = {name: {key: item.get(key) for key in ('IPAddress', 'Aliases', 'DNSNames')}
                        for name, item in (row.get('networks') or {}).items()}
     row.update(state=row.pop('status'), container_id=row.pop('id'))

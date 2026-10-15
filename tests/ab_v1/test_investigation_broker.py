@@ -65,8 +65,14 @@ def test_supplement_selects_the_specific_missing_runtime_check():
     assert gap['target_ids'] == ['db'] and action['action_id'] == 'read-db'
 
 
-def start(client, profile, target):
-    event_id = incident(client, profile)
+def start(client, profile, target, task_type=None):
+    if task_type:
+        response = client.post('/api/v1/incidents', json={'system_id':profile['system_id'],
+                                'symptom':'catalog-api unavailable', 'task_type':task_type})
+        assert response.status_code == 200, response.text
+        event_id = response.json()['id']
+    else:
+        event_id = incident(client, profile)
     response = client.post(f'/api/v1/incidents/{event_id}/runs', json={'target_id': target['id'], 'decision_protocol': 'ab_v1'})
     assert response.status_code == 202, response.text
     return event_id, response.json()
@@ -90,7 +96,7 @@ def test_empty_pending_profile_discovers_and_releases_process(client):
     assert run['diagnosis_status'] == 'unresolved'
     assert not run['completion_satisfied']
     assert not run.get('clarification') and run['summary']['scope_gaps']
-    assert run['summary']['task_type'] == 'root_cause_investigation'
+    assert run['summary']['task_type'] == 'focused_diagnosis'
     assert {c['tool_id'] for c in run['tool_calls']} == {'host.info', 'service.list', 'container.list','process.list'}
     assert all(c['status'] == 'succeeded' for c in run['tool_calls'])
     assert client.get(f"/api/v1/businesses/{profile['business_id']}").json()['review_status'] == 'pending'
@@ -118,10 +124,10 @@ def test_pending_material_does_not_prevent_authorized_detailed_reads(client, mon
     job = wait_job(client, started['job_id'])
     assert job['status'] == 'completed', job
     run = client.get(f"/api/v1/runs/{started['run_id']}").json()
-    assert {'service.status', 'service.logs'} <= {c['tool_id'] for c in run['tool_calls']}
-    assert run['diagnosis_status'] in {'partial', 'unresolved'}
-    assert run['summary']['required_gaps']
-    assert not run['completion_satisfied']
+    assert [c['tool_id'] for c in run['tool_calls']] == ['service.list', 'service.status']
+    assert run['diagnosis_status'] == 'direct_cause_supported'
+    assert not run['summary']['required_gaps']
+    assert run['completion_satisfied'] and not run['repair_eligible']
     wait_reaped(run['id'])
 
 
@@ -138,7 +144,7 @@ def test_cancel_during_model_blocks_late_evidence_and_reuses_same_job(client, mo
             pass
         raise InterruptedError('cancelled')
     monkeypatch.setattr('app.agent.ab_investigation.call_json', pending)
-    event_id, started = start(client, profile, target)
+    event_id, started = start(client, profile, target, task_type='root_cause_investigation')
     duplicate = client.post(f'/api/v1/incidents/{event_id}/runs', json={'target_id': target['id'], 'decision_protocol': 'ab_v1'}).json()
     assert duplicate['job_id'] == started['job_id'] and duplicate['reused']
     run_id = started['run_id']
@@ -171,7 +177,7 @@ def test_model_outage_finishes_fact_collection_without_retry_or_claiming_root_ca
         attempted.append(True)
         raise ModelUnavailable('unavailable')
     monkeypatch.setattr('app.agent.ab_investigation.call_json', unavailable)
-    _, begun = start(client, profile, target)
+    _, begun = start(client, profile, target, task_type='root_cause_investigation')
     assert wait_job(client, begun['job_id'])['status'] == 'completed'
     run = client.get('/api/v1/runs/'+begun['run_id']).json()
     assert len(attempted) == 1

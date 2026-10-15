@@ -25,6 +25,7 @@ def waiting(client):
         configuration = json.loads(tx.execute('SELECT model_config_json FROM diagnosis_runs WHERE id=?', (run_id,)).fetchone()[0])
         configuration.pop('scope_identity_required')
         configuration.pop('scope_grants')
+        configuration.pop('investigation_goal')
         tx.execute('UPDATE diagnosis_runs SET model_config_json=? WHERE id=?', (dumps(configuration), run_id))
     coordinator = get_coordinator(database)
     lease = coordinator.claim(run_id)

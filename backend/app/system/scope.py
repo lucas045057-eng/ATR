@@ -267,8 +267,10 @@ class ScopeResolver:
                         ),
                         )
                     if approved:
-                        tx.execute("UPDATE service_bindings SET status='superseded' WHERE business_id=? AND target_id=? AND service=? AND status='confirmed' AND id<>?",
-                                   (business_id, target_id, service['name'], binding_id))
+                        # A replacement supersedes its own grant, never another authorized replica.
+                        if approved['id'] != binding_id:
+                            tx.execute("UPDATE service_bindings SET status='superseded' WHERE id=? AND status='confirmed'",
+                                       (approved['id'],))
                         tx.execute("UPDATE service_bindings SET status='confirmed',freshness_status='confirmed',authorization_json=?,verified_run_id=COALESCE(?,verified_run_id) WHERE id=?",
                                    (approved['authorization_json'], verification_run_id, binding_id))
                         if approved['id'] != binding_id:

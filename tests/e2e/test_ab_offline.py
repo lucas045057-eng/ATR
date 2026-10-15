@@ -37,6 +37,7 @@ def test_ab_529_shows_current_facts_and_keeps_cause_unconfirmed(live_server, fak
         symptom = 'P0 isolated outage ' + profile['business_id'][:8]
         event = api.post('/api/v1/incidents', json={
             'system_id': profile['system_id'], 'symptom': symptom,
+            'task_type': 'root_cause_investigation',
         }).json()
         started = api.post('/api/v1/incidents/' + event['id'] + '/runs', json={
             'target_id': runtime['id'], 'decision_protocol': 'ab_v1',
@@ -57,6 +58,7 @@ def test_ab_529_shows_current_facts_and_keeps_cause_unconfirmed(live_server, fak
         page.goto(base)
         page.get_by_role('button', name='排查故障', exact=False).click()
         page.locator('.incident-list').get_by_text(symptom, exact=True).click()
+        page.get_by_test_id('evidence-audit').locator('summary').first.click()
         expect(page.get_by_role('heading', name='只读故障事实报告', exact=True)).to_be_visible(timeout=10000)
         panel = page.get_by_test_id('ab-fact-report')
         expect(panel).to_contain_text('已确认事实')
