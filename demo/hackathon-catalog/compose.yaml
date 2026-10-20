@@ -1,0 +1,9 @@
+services:
+  catalog-api:
+    build: .
+    ports:
+      - "8000:8000"
+    depends_on:
+      - store
+  store:
+    image: mysql:8.4
