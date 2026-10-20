@@ -2,11 +2,11 @@
 
 ATR 在本地分析陌生业务资料，建立有来源的业务骨架，经过人工审核后识别服务器上的业务范围，再使用固定只读工具调查故障。源码、部署资料、运行观测和人工结论分别保存；历史 Pattern 只能建议检查，诊断仍须通过当前证据 Gate。
 
-本版基于 main `aafd8183fa055f68138b432a788ec7831c9b9698` 增量开发，保留原架构、测试、数据和 Git 历史。新增有界发现与绑定时效、原子调查任务、多轮 Adaptive Planner、确定性预测/因果核验、范围约束的知识反馈和三模式评测。详细结果见 [V2.2 验收](docs/v2.2-acceptance-report.md)、[开发记录](docs/v2.2-development-report.md) 和 [限制](docs/v2.2-known-limitations.md)。
+本版保留 ATR 的运行核心：资料接入、业务图审核、固定只读调查、证据 Gate、Runtime 停止策略和安全审计。历史验收结果与一次性实验记录已从仓库移除，避免把生成物当作产品代码维护。
 
-架构见 [V2.2 架构](docs/v2.2-architecture.md)，跨机器启动见 [部署说明](docs/deployment.md)。旧 V2.1 交接和验收文档作为历史记录保留。
+当前 Runtime 设计见 [决策 Runtime 架构](docs/ATR-V2.3-DECISION-RUNTIME-ARCHITECTURE.md) 和 [任务停止策略](docs/ATR-V2.3-TASK-STOP-POLICY.md)，跨机器启动见 [部署说明](docs/deployment.md)。
 
-当前增量包含独立模型 Worker 与安全错误诊断、SSH 内存密码会话和私钥认证、调查 Run 的显式目标绑定、无映射时的基础发现与审核恢复，以及静态图标的可撤销附件分类。最新审计和回归结果见 [Ponytail 审计报告](docs/ponytail-audit-report.md)。
+当前增量包含独立模型 Worker 与安全错误诊断、SSH 内存密码会话和私钥认证、调查 Run 的显式目标绑定、无映射时的基础发现与审核恢复，以及静态图标的可撤销附件分类。仓库裁剪范围和保留内容见 [仓库精简报告](docs/repository-slimming-report.md)。
 
 ## Windows 本地启动
 
@@ -44,7 +44,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-local.ps1
 4. “故障调查”：选择本次 SSH 目标，创建对应系统的故障并开始调查；多个目标必须明确选择，Run 和恢复过程保持原目标。无有效映射时先基础发现、人工审核，再恢复同一 Run 与预算。页面展示实际工具目标、证据、预算及安全错误；未配置模型时保持离线未解决。
 5. 人工修复后记录修复事实，执行允许的健康 GET 验证，经过知识审核才能生成 Trusted Pattern；Agent 不实施修复。
 
-业务入口 normal/graph_adaptive 使用动态规划；graph_only/graph_pattern 用于固定基线对照。旧 Collector Demo 支持固定调查，不能以 graph_adaptive 标签执行。超过授权范围只记录申请，无法验证时保持 unresolved。详见 [接入手册](docs/business-onboarding.md)、[V2.2 API 增量](docs/api-v2.2.md)、[安全边界](docs/security-boundaries.md)、[预算配置](docs/context-budget.md)。
+业务入口 normal/graph_adaptive 使用动态规划；graph_only/graph_pattern 用于固定基线对照。旧 Collector Demo 支持固定调查，不能以 graph_adaptive 标签执行。超过授权范围只记录申请，无法验证时保持 unresolved。详见 [接入手册](docs/business-onboarding.md)、[安全边界](docs/security-boundaries.md)、[预算配置](docs/context-budget.md)。
 
 ## 模型与预算
 
@@ -67,9 +67,7 @@ python -m uv run pytest -q --basetemp=test-results/local-new-run --junitxml=test
 python -m uv run ruff check .
 ```
 
-初版 V2.2 验收为 **180 passed / 0 failed / 0 skipped**，隔离 Linux/OpenSSH **18 passed**；当前增量结果见 [最新审计报告](docs/ponytail-audit-report.md)。本机 Chrome/Edge 可通过 `$env:ATR_BROWSER_CHANNEL='chrome'` 或 `'msedge'` 使用；默认使用已安装的 Playwright Chromium。缺少前端产物的跳过不能计为通过；缺浏览器会失败。每次 Windows 测试使用新的 --basetemp，保留旧记录。
-
-13 个隔离故障各两次、三模式共 78 次运行的注入/步骤/成本/真值见 [评测报告](docs/v2.2-evaluation-report.md)。模型为 Stub，Docker 观测经 Mock 重放；不能当作真实模型或生产准确率。CI 包含锁定依赖、Ruff、全量默认测试与前端构建，使用隔离测试配置，不读取本地运行凭据。
+本地测试包含后端回归、模型隔离、Runtime 安全边界和浏览器流程；本机 Chrome/Edge 可通过 `$env:ATR_BROWSER_CHANNEL='chrome'` 或 `'msedge'` 使用。缺少前端产物或浏览器时测试会失败，不把跳过当作通过。
 
 ## 运行边界
 
@@ -78,4 +76,4 @@ python -m uv run ruff check .
 - 原 Docker Collector 只在显式 `docker-demo` profile 启动。它仍拥有 Docker daemon 权限，`:ro` socket 挂载不能消除此权限。仅用于可信本地隔离 Demo。
 - Docker API/UI/Worker/SQLite 与原 A/B 故障恢复、Linux/OpenSSH 受限夹具已经实际隔离验收。真实模型供应商、生产 Linux 业务服务器、完整 Redis/Nginx 故障集及生产根因准确率未验证；当前 Gate 只认可五类保守机制。
 
-[架构](docs/v2.2-architecture.md) · [审计与变更](docs/v2.2-development-report.md) · [验收](docs/v2.2-acceptance-report.md) · [限制与后续](docs/v2.2-known-limitations.md) · [原 Demo 手册](docs/demo-runbook.md)
+[决策 Runtime 架构](docs/ATR-V2.3-DECISION-RUNTIME-ARCHITECTURE.md) · [任务停止策略](docs/ATR-V2.3-TASK-STOP-POLICY.md) · [部署](docs/deployment.md) · [安全边界](docs/security-boundaries.md) · [Demo 手册](docs/demo-runbook.md)

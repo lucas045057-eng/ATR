@@ -1,1 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="0" skipped="0" tests="1" time="7.049" timestamp="2026-10-09T23:31:55.811573+08:00" hostname="DESKTOP-IIO0DI0"><testcase classname="tests.e2e.test_browser" name="test_browser_complete_onboarding" time="6.964" /></testsuite></testsuites>

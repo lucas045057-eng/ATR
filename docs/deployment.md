@@ -89,11 +89,11 @@ V2.2 已在 WSL Docker Engine 29.1.3 / Compose 1.29.2 实际构建、启动、�
 ```powershell
 python -m uv sync --locked --group dev
 python -m uv run playwright install chromium
-python -m uv run pytest -q --junitxml=docs/test-results.xml
+python -m uv run pytest -q --junitxml=test-results/local.xml
 python -m uv run ruff check backend collector scripts tests
 python -m uv lock --check
 ```
 
 浏览器测试需前端 dist 和 Chromium，缺失时可能显式 skip。安装浏览器/开发依赖属于 ATR 工程，不会安装上传业务的依赖。测试只用临时数据、本地回环 HTTP/SSH、显式 Mock；不访问已知真实业务服务器。
 
-本机 Windows 临时目录权限受限时，使用每次新建的项目内 --basetemp；本次浏览器下载 CDN 失败时显式 ATR_BROWSER_CHANNEL=chrome 复用已安装 Chrome。完整默认测试、18 项实际隔离 SSH 及 78 次故障比较的命令见 [V2.2 隔离验收手册](v2.2-validation-runbook.md)。
+本机 Windows 临时目录权限受限时，使用每次新建的项目内 --basetemp；本次浏览器下载 CDN 失败时显式 ATR_BROWSER_CHANNEL=chrome 复用已安装 Chrome。隔离环境和生产服务器的实际验收不属于默认启动流程。

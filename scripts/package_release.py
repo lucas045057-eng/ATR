@@ -133,7 +133,7 @@ def package(repo: Path, output: Path, context: str, api_sha: str, web_sha: str):
             for image in images.values():
                 record = next(record for record in metadata if image['tag'] in record['RepoTags'])
                 image['config_id'] = 'sha256:'+hashlib.sha256(saved.extractfile(record['Config']).read()).hexdigest()
-        (root/'README.zh-CN.md').write_bytes((repo/'docs/ab-v1/install-upgrade-rollback.md').read_bytes())
+        (root/'README.zh-CN.md').write_bytes((repo/'docs/deployment.md').read_bytes())
         (root/'runtime-inventory.json').write_text(json.dumps(inventory,indent=2),encoding='utf-8')
         (root/'load-images.ps1').write_text(LOAD_PS,encoding='utf-8')
         (root/'load-images.sh').write_text(LOAD_SH,encoding='utf-8')

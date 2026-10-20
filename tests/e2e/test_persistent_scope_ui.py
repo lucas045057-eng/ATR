@@ -4,10 +4,9 @@ import os
 
 import httpx
 from playwright.sync_api import expect, sync_playwright
-from test_ab_offline import fake_model  # noqa: F401
 from test_browser import live_server  # noqa: F401
 from test_business import onboard
-from test_model_isolation import fake_model as loopback_model  # noqa: F401
+from test_model_isolation import fake_model  # noqa: F401
 from test_runtime import discover, target
 
 

@@ -16,7 +16,7 @@
 | POST /evaluation-trials | arm 增加 graph_adaptive；指标从持久化运行派生；同组约束保留 |
 | GET /metrics | 增加 three_arm_evaluation，只统计三臂完整的同组；部分诊断与误报分开 |
 
-以上路径以 /api/v1 为前缀。旧 /evaluation-pairs 仍原子记录两臂。第三臂使用 /evaluation-trials 添加到同 pair_key/repetition，全部完成才进入三模式指标；现有 UI 两臂写入表单保留，三臂批量写入可用 scripts/evaluate_faults.py 或 API。
+以上路径以 /api/v1 为前缀。旧 /evaluation-pairs 仍原子记录两臂。第三臂使用 /evaluation-trials 添加到同 pair_key/repetition，全部完成才进入三模式指标；现有 UI 两臂写入表单保留，三臂批量写入可通过 API 完成。
 
 标准评测 ground_truth.truth 是服务名到机制的映射，例如 `{ "truth": { "store": "database_unavailable" } }`。评分要求支持集合与真值完全一致；支持了集合外原因记误报，只找到多故障的一部分记部分诊断，unresolved 不能填为 correct。非标准真值仍由操作者评分，API 不把人工评分证明为独立事实。真值不会提供给模型。
 

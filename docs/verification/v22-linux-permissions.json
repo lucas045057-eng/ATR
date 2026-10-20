@@ -1,7 +1,0 @@
-{
-  "uid": 10002,
-  "gid": 10002,
-  "write_denied_paths": 5,
-  "actual_write_open_denied": true,
-  "category": "isolated_actual_linux_openssh"
-}
