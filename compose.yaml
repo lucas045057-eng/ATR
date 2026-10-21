@@ -48,7 +48,6 @@ services:
     build:
       context: .
       dockerfile: frontend/Dockerfile
-    environment:
     ports:
       - "127.0.0.1:28080:80"
     depends_on: [api]
