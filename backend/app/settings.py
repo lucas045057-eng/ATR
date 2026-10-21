@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import secrets
 from functools import lru_cache
 from pathlib import Path
@@ -17,7 +18,6 @@ class Settings(BaseSettings):
     repository_roots: str = "/demo,/repos"
     collector_url: str = "http://collector:8090"
     collector_token: SecretStr = SecretStr("")
-    operator_token: SecretStr = SecretStr("")
     operator_id: str = "local-operator"
     model_provider: str = "openai-compatible"
     model_base_url: str = ""
@@ -82,10 +82,7 @@ class Settings(BaseSettings):
         return value
 
     def validate_secrets(self) -> None:
-        operator_token = self.operator_token.get_secret_value()
         collector_token = self.collector_token.get_secret_value()
-        if len(operator_token) < 32 or "replace-this" in operator_token:
-            raise ValueError("Set OPERATOR_TOKEN in .env to a private value of at least 32 characters")
         if len(collector_token) < 32 or "replace-this" in collector_token:
             raise ValueError("Set COLLECTOR_TOKEN in .env to a private value of at least 32 characters")
 
@@ -95,11 +92,27 @@ class Settings(BaseSettings):
             raise ValueError("Configure at least one read-only repository root")
         return roots
 
-    def authenticate_operator(self, candidate: str) -> bool:
-        return secrets.compare_digest(candidate, self.operator_token.get_secret_value())
-
     def authenticate_collector(self, candidate: str) -> bool:
         return secrets.compare_digest(candidate, self.collector_token.get_secret_value())
+
+    def local_secret(self) -> bytes:
+        """Persist a per-installation key for local encrypted model state."""
+        location = self.database_path.parent / ".atr-local-key"
+        location.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            descriptor = os.open(location, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            return location.read_bytes()
+        value = secrets.token_bytes(32)
+        try:
+            with os.fdopen(descriptor, "wb") as output:
+                output.write(value)
+                output.flush()
+                os.fsync(output.fileno())
+        except BaseException:
+            location.unlink(missing_ok=True)
+            raise
+        return value
 
     def health_url_allowlist(self) -> tuple[str, ...]:
         urls = []

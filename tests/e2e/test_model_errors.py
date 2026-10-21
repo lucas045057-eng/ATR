@@ -1,5 +1,4 @@
 """Real browser, local API and local fake provider: failure then recovery."""
-import json
 import os
 
 import httpx
@@ -25,14 +24,12 @@ def low_input_budget(monkeypatch):
 def test_browser_model_failure_is_visible_and_next_request_recovers(live_server, fake_model, status, message):  # noqa: F811 - imported pytest fixtures
     base, directory = live_server
     _, _, state, _ = fake_model
-    token = "browser-test-operator-" + "x" * 40
     state["status"] = status
     if status == 400:
         state['error'] = {'type': 'invalid_request_error', 'message': 'Model gpt-6.1-sol has not been priced by the administrator yet. synthetic-secret NEVER-ECHO-REQUEST'}
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, channel=os.environ.get("ATR_BROWSER_CHANNEL") or None)
         context = browser.new_context(viewport={"width": 1440, "height": 1000})
-        context.add_init_script("sessionStorage.setItem('atr_operator_token'," + json.dumps(token) + ")")
         page = context.new_page()
         errors, statuses = [], []
         page.on("pageerror", lambda e: errors.append(str(e)))
@@ -64,8 +61,7 @@ def test_browser_model_failure_is_visible_and_next_request_recovers(live_server,
 def test_browser_usage_is_read_only_despite_small_legacy_budget(low_input_budget, live_server, fake_model):  # noqa: F811
     base, _ = live_server
     _, _, state, _ = fake_model
-    token = 'browser-test-operator-' + 'x' * 40
-    with httpx.Client(base_url=base, headers={'Authorization': 'Bearer ' + token}) as api:
+    with httpx.Client(base_url=base) as api:
         profile = onboard(api)
         runtime = target(api, profile)
         discovered = discover(api, profile, runtime)
@@ -88,7 +84,6 @@ def test_browser_usage_is_read_only_despite_small_legacy_budget(low_input_budget
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, channel=os.environ.get('ATR_BROWSER_CHANNEL') or None)
         context = browser.new_context()
-        context.add_init_script("sessionStorage.setItem('atr_operator_token'," + json.dumps(token) + ")")
         page = context.new_page()
         page.goto(base)
         page.get_by_role('button', name='排查故障', exact=False).click()
@@ -102,8 +97,7 @@ def test_browser_usage_is_read_only_despite_small_legacy_budget(low_input_budget
 def test_browser_529_investigation_history_and_manual_recovery(live_server, fake_model):  # noqa: F811
     base, directory = live_server
     _, _, state, _ = fake_model
-    token = "browser-test-operator-" + "x" * 40
-    with httpx.Client(base_url=base, headers={"Authorization": "Bearer " + token}) as api:
+    with httpx.Client(base_url=base) as api:
         profile = onboard(api)
         runtime = target(api, profile)
         discovered = discover(api, profile, runtime)
@@ -122,7 +116,6 @@ def test_browser_529_investigation_history_and_manual_recovery(live_server, fake
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, channel=os.environ.get("ATR_BROWSER_CHANNEL") or None)
         context = browser.new_context(viewport={"width": 1440, "height": 1000})
-        context.add_init_script("sessionStorage.setItem('atr_operator_token'," + json.dumps(token) + ")")
         page = context.new_page()
         legacy_run_requests(page)
         errors, responses = [], []
@@ -148,11 +141,9 @@ def test_browser_529_investigation_history_and_manual_recovery(live_server, fake
         expect(panel).to_have_count(0, timeout=20000)
         page.get_by_test_id('evidence-audit').locator('summary').first.click()
         expect(page.locator('.run-status-line strong')).to_have_text('证据核验通过', timeout=20000)
-        latest = httpx.get(base + '/api/v1/incidents/' + incident['id'] + '/runs',
-                           headers={'Authorization': 'Bearer ' + token}).json()
+        latest = httpx.get(base + '/api/v1/incidents/' + incident['id'] + '/runs').json()
         assert len(latest) == 2
-        recovered = httpx.get(base + '/api/v1/runs/' + latest[0]['id'],
-                              headers={'Authorization': 'Bearer ' + token}).json()
+        recovered = httpx.get(base + '/api/v1/runs/' + latest[0]['id']).json()
         assert recovered['summary']['gate']['status'] == 'supported'
         assert recovered['summary']['gate']['hypotheses'][0]['verification']['passed'] is True
         expect(page.get_by_role('button', name='开始只读调查', exact=False)).to_be_enabled(timeout=10000)
@@ -169,8 +160,7 @@ def test_browser_529_investigation_history_and_manual_recovery(live_server, fake
 def test_browser_schema_error_shows_safe_field_path(live_server, fake_model, invalid_reference):  # noqa: F811
     base, directory = live_server
     _, _, state, _ = fake_model
-    token = "browser-test-operator-" + "x" * 40
-    with httpx.Client(base_url=base, headers={"Authorization": "Bearer " + token}) as api:
+    with httpx.Client(base_url=base) as api:
         profile = onboard(api)
         runtime = target(api, profile)
         discovered = discover(api, profile, runtime)
@@ -212,7 +202,6 @@ def test_browser_schema_error_shows_safe_field_path(live_server, fake_model, inv
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, channel=os.environ.get('ATR_BROWSER_CHANNEL') or None)
         context = browser.new_context(viewport={'width': 1440, 'height': 1000})
-        context.add_init_script("sessionStorage.setItem('atr_operator_token'," + json.dumps(token) + ")")
         page = context.new_page()
         errors = []
         page.on('pageerror', lambda e: errors.append(str(e)))
@@ -251,8 +240,7 @@ def test_browser_discovery_next_tools_error_is_safe_and_specific(live_server, fa
 
     base, _ = live_server
     _, _, provider, _ = fake_model
-    token = "browser-test-operator-" + "x" * 40
-    with httpx.Client(base_url=base, headers={"Authorization": "Bearer " + token}) as api:
+    with httpx.Client(base_url=base) as api:
         profile = onboard(api)
         target(api, profile)
         path = '/api/v1/businesses/' + profile['business_id']
@@ -276,7 +264,6 @@ def test_browser_discovery_next_tools_error_is_safe_and_specific(live_server, fa
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, channel=os.environ.get('ATR_BROWSER_CHANNEL') or None)
         context = browser.new_context()
-        context.add_init_script("sessionStorage.setItem('atr_operator_token'," + json.dumps(token) + ")")
         page = context.new_page()
         page.goto(base)
         page.get_by_role('button', name='排查故障', exact=False).click()

@@ -26,7 +26,7 @@ curl http://127.0.0.1:18081/health
 curl http://127.0.0.1:18081/record
 ```
 
-In the workbench at `http://127.0.0.1:8080`, set the operator token from `.env`. On **系统图谱**, onboard `system-a` and `system-b`, each with `compose.yaml`. The Compose project names match the explicit `-p` names above so the private collector can map runtime containers.
+In the workbench at `http://127.0.0.1:8080`, open **系统图谱** and onboard `system-a` and `system-b`, each with `compose.yaml`. The Compose project names match the explicit `-p` names above so the private collector can map runtime containers.
 
 ## 2. Create and verify a Candidate from System A
 

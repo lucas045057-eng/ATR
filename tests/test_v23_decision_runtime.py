@@ -118,7 +118,6 @@ def test_no_action_runtime_path_does_not_invoke_model(monkeypatch):
 
     settings = Settings(
         _env_file=None,
-        operator_token="test-operator-" + "x" * 40,
         collector_token="test-collector-" + "y" * 40,
     )
     settings.external_model_enabled = True

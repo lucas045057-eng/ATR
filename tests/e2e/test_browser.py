@@ -36,7 +36,6 @@ def live_server(tmp_path, request):
         assert "fake_model" not in request.fixturenames, "模型错误测试必须启动专用隔离 API"
         parsed = urlsplit(external)
         assert parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost"}, "仅允许隔离回环验收"
-        assert os.environ.get("ATR_E2E_OPERATOR_TOKEN"), "隔离验收需要专用本地 token"
         yield external.rstrip("/"), tmp_path
         return
     if not (ROOT / "frontend/dist/index.html").exists():
@@ -50,7 +49,6 @@ def live_server(tmp_path, request):
         DATABASE_PATH=str(tmp_path / "runtime.sqlite"),
         ARTIFACT_ROOT=str(tmp_path / "artifacts"),
         REPOSITORY_ROOTS=str(ROOT / "demo"),
-        OPERATOR_TOKEN="browser-test-operator-" + "x" * 40,
         COLLECTOR_TOKEN="browser-test-collector-" + "y" * 40,
         EXTERNAL_MODEL_ENABLED="false",
         SSH_ENABLED="true" if "ssh_server_enabled" in request.fixturenames else "false",
@@ -102,8 +100,7 @@ def live_server(tmp_path, request):
 
 def test_browser_complete_onboarding(live_server):
     base, directory = live_server
-    token = os.environ.get("ATR_E2E_OPERATOR_TOKEN") if os.environ.get("ATR_E2E_BASE_URL") else "browser-test-operator-" + "x" * 40
-    existing = httpx.post(base + "/api/v1/systems/onboard", headers={"Authorization": "Bearer " + token},
+    existing = httpx.post(base + "/api/v1/systems/onboard",
                           json={"source_key": "system-a", "display_name": "Existing isolated system"})
     assert existing.status_code == 200, existing.text
     source = directory / "catalog.zip"
@@ -111,7 +108,6 @@ def test_browser_complete_onboarding(live_server):
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, channel=os.environ.get("ATR_BROWSER_CHANNEL") or None)
         context = browser.new_context(viewport={"width": 1440, "height": 1000})
-        context.add_init_script("sessionStorage.setItem('atr_operator_token'," + json.dumps(token) + ")")
         page = context.new_page()
         errors = []
         page.on("pageerror", lambda e: errors.append(str(e)))

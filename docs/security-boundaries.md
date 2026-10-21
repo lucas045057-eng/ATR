@@ -73,6 +73,6 @@ Docker 在客户端和网关均默认关闭。如果确需 Docker，应另行设
 
 原 Demo Collector 仍需 Docker daemon，因此是显式 docker-demo profile，API 默认启动不依赖它。虽已 cap_drop=ALL、no-new-privileges、read_only、私有网络且无宿主机端口，socket 的 `:ro` 不能限制 daemon API 的写能力。被攻陷 Collector 仍可能控制宿主机，只能用于可信隔离本地 Demo。
 
-API/UI 绑定 127.0.0.1，除最小 health 外 API 使用 OPERATOR_TOKEN，Collector 用另一令牌。工作台令牌保存在当前浏览器 sessionStorage，不写入交付包。单操作员认证不提供多人角色、租户隔离、证书管理或互联网发布安全方案。
+API/UI 绑定 127.0.0.1，Collector 使用独立令牌；工作台本身不提供登录认证。单机本地演示不提供多人角色、租户隔离、证书管理或互联网发布安全方案。
 
 健康验证只允许 ALLOWED_HEALTH_URLS 的精确 URL、无重定向、有限超时与响应字节。只有记录修复/人工复核和真实成功验证，再经知识审核才 Trusted；不会自动改变远端状态。

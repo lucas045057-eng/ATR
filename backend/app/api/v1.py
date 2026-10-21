@@ -11,7 +11,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.agent.workflow import build_workflow
-from app.api.dependencies import require_operator
+from app.api.dependencies import current_actor
 from app.domain import (
     ClarificationAnswer,
     ConflictReviewRequest,
@@ -44,7 +44,7 @@ from app.storage.database import Database
 from app.system.inventory import SystemOnboarding
 from app.tools.registry import ToolRegistry
 
-router = APIRouter(prefix="/api/v1", dependencies=[Depends(require_operator)])
+router = APIRouter(prefix="/api/v1")
 
 
 def db() -> Database:
@@ -155,7 +155,7 @@ def list_systems() -> list[dict[str, Any]]:
 
 
 @router.post("/systems/onboard")
-def onboard(request: OnboardingRequest, actor: str = Depends(require_operator)) -> dict[str, Any]:
+def onboard(request: OnboardingRequest, actor: str = Depends(current_actor)) -> dict[str, Any]:
     settings = get_settings()
     try:
         return SystemOnboarding(db(), settings).create_snapshot(request.source_key, request.display_name, request.compose_file)
@@ -214,7 +214,7 @@ def list_incidents() -> list[dict[str, Any]]:
 
 
 @router.post("/incidents")
-def create_incident(request: IncidentCreate, actor: str = Depends(require_operator)) -> dict[str, Any]:
+def create_incident(request: IncidentCreate, actor: str = Depends(current_actor)) -> dict[str, Any]:
     connection = db().connect()
     try:
         system = connection.execute("SELECT id FROM systems WHERE id=?", (request.system_id,)).fetchone()
@@ -603,7 +603,7 @@ def execute_legacy_run(incident_id: str, actor: str, job_id: str | None = None) 
 
 @router.post("/incidents/{incident_id}/runs", status_code=202)
 def start_run(incident_id: str, request: InvestigationRunRequest | None = None,
-              actor: str = Depends(require_operator)) -> dict[str, Any]:
+              actor: str = Depends(current_actor)) -> dict[str, Any]:
     from app.agent.business_investigation import investigate_business
     from app.connectors.service import RuntimeService
     from app.jobs import reserve_investigation, submit
@@ -693,7 +693,7 @@ def list_incident_runs(incident_id: str) -> list[dict[str, Any]]:
 
 
 @router.post("/runs/{run_id}/resume", status_code=202)
-def resume_business_run(run_id: str, request: dict[str, Any] | None = None, actor: str = Depends(require_operator)):
+def resume_business_run(run_id: str, request: dict[str, Any] | None = None, actor: str = Depends(current_actor)):
     from app.agent.business_investigation import investigate_business
     from app.agent.discovery import authorization_digest
     from app.business.service import BusinessService
@@ -924,7 +924,7 @@ def list_counterexamples() -> list[dict[str, Any]]:
 
 
 @router.post("/incidents/{incident_id}/repair")
-def record_repair(incident_id: str, request: RepairRecord, actor: str = Depends(require_operator)) -> dict[str, Any]:
+def record_repair(incident_id: str, request: RepairRecord, actor: str = Depends(current_actor)) -> dict[str, Any]:
     if not request.operator_verified:
         raise HTTPException(status_code=422, detail="A human must confirm diagnosis, repair and verification before capturing experience")
     connection = db().connect()
@@ -993,7 +993,7 @@ def record_repair(incident_id: str, request: RepairRecord, actor: str = Depends(
 
 
 @router.post("/patterns/{pattern_id}/review")
-def review_pattern(pattern_id: str, request: ReviewRequest, actor: str = Depends(require_operator)) -> dict[str, Any]:
+def review_pattern(pattern_id: str, request: ReviewRequest, actor: str = Depends(current_actor)) -> dict[str, Any]:
     connection = db().connect()
     try:
         pattern = connection.execute("SELECT p.*,e.run_id,e.incident_id,i.system_id FROM pattern_versions p JOIN experiences e ON e.id=p.source_experience_id JOIN incidents i ON i.id=e.incident_id WHERE p.id=?", (pattern_id,)).fetchone()
@@ -1034,7 +1034,7 @@ def review_pattern(pattern_id: str, request: ReviewRequest, actor: str = Depends
 
 @router.post("/conflicts/{conflict_id}/review")
 def review_conflict(conflict_id: str, request: ConflictReviewRequest,
-                    actor: str = Depends(require_operator)) -> dict[str, Any]:
+                    actor: str = Depends(current_actor)) -> dict[str, Any]:
     connection = db().connect()
     try:
         conflict = connection.execute("""SELECT c.*,g.system_id FROM graph_conflicts c
@@ -1072,7 +1072,7 @@ def review_conflict(conflict_id: str, request: ConflictReviewRequest,
 
 @router.post("/pattern-matches/{match_id}/outcome")
 def record_pattern_outcome(match_id: str, request: PatternMatchOutcome,
-                           actor: str = Depends(require_operator)) -> dict[str, Any]:
+                           actor: str = Depends(current_actor)) -> dict[str, Any]:
     if request.validation is None and request.usefulness is None:
         raise HTTPException(status_code=422, detail="Provide a validation or usefulness outcome")
     connection = db().connect()
@@ -1150,7 +1150,7 @@ def metrics() -> dict[str, Any]:
 
 @router.post("/evaluation-cases")
 def create_evaluation_case(request: EvaluationCaseCreate,
-                           actor: str = Depends(require_operator)) -> dict[str, Any]:
+                           actor: str = Depends(current_actor)) -> dict[str, Any]:
     connection = db().connect()
     try:
         system = connection.execute("SELECT * FROM systems WHERE id=?", (request.system_id,)).fetchone()
@@ -1185,7 +1185,7 @@ def create_evaluation_case(request: EvaluationCaseCreate,
 
 @router.post("/evaluation-pairs")
 def create_evaluation_pair(request: EvaluationPairCreate,
-                           actor: str = Depends(require_operator)) -> dict[str, Any]:
+                           actor: str = Depends(current_actor)) -> dict[str, Any]:
     connection = db().connect()
     try:
         case = connection.execute("SELECT * FROM evaluation_cases WHERE id=?", (request.case_id,)).fetchone()
@@ -1255,7 +1255,7 @@ def list_evaluation_cases() -> list[dict[str, Any]]:
 
 @router.post("/evaluation-trials")
 def create_evaluation_trial(request: EvaluationTrialCreate,
-                            actor: str = Depends(require_operator)) -> dict[str, Any]:
+                            actor: str = Depends(current_actor)) -> dict[str, Any]:
     connection = db().connect()
     try:
         case = connection.execute("SELECT * FROM evaluation_cases WHERE id=?", (request.case_id,)).fetchone()

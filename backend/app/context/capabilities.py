@@ -21,7 +21,7 @@ def proof_path(settings):
 
 
 def proof_signature(settings,proof):
-    return hmac.new(settings.operator_token.get_secret_value().encode(),dumps(proof).encode(),hashlib.sha256).hexdigest()
+    return hmac.new(settings.local_secret(),dumps(proof).encode(),hashlib.sha256).hexdigest()
 
 
 def verified_vision(settings):

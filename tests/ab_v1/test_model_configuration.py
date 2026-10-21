@@ -18,10 +18,9 @@ def request(settings,**changes):
 
 def owner(settings,database):
     settings.database_path=database.path
-    settings.operator_token=SecretStr('synthetic-operator-'+'x'*40)
 
 
-def test_encrypted_save_survives_reload_and_changed_owner_fails_closed(fake_model):  # noqa: F811
+def test_encrypted_save_survives_reload_with_local_key(fake_model):  # noqa: F811
     database,settings,_,_=fake_model
     owner(settings,database)
     result=save(database,settings,request(settings,model='chosen-model'))
@@ -30,9 +29,7 @@ def test_encrypted_save_survives_reload_and_changed_owner_fails_closed(fake_mode
     assert b'synthetic-secret' not in path(settings).read_bytes()
     reloaded=load(settings)
     assert reloaded.model_name=='chosen-model' and reloaded.model_api_key==settings.model_api_key
-    settings.operator_token=SecretStr('another-synthetic-owner-'+'y'*40)
-    with pytest.raises(ValueError,match='加密模型设置无法读取'):
-        load(settings)
+    assert load(settings).model_name == 'chosen-model'
 
 
 def test_destination_change_requires_own_key_and_active_task_blocks_save(fake_model):  # noqa: F811
@@ -48,8 +45,8 @@ def test_destination_change_requires_own_key_and_active_task_blocks_save(fake_mo
     assert not path(settings).exists() and public(settings)['source']=='existing_environment'
 
 
-def test_configuration_api_is_authenticated_and_invalid_secret_is_not_returned(client):
-    assert client.get('/api/v1/model/configuration',headers={'Authorization':'Bearer wrong'}).status_code==401
+def test_configuration_api_is_open_and_invalid_secret_is_not_returned(client):
+    assert client.get('/api/v1/model/configuration').status_code==200
     value=client.get('/api/v1/model/configuration').json()
     assert 'api_key' not in value
     payload={'provider':'openai-compatible','base_url':'https://model.example/v1','model':'chosen-model',

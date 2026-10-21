@@ -11,7 +11,6 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "runtime.sqlite"))
     monkeypatch.setenv("ARTIFACT_ROOT", str(tmp_path / "artifacts"))
     monkeypatch.setenv("REPOSITORY_ROOTS", str(Path(__file__).resolve().parents[1] / "demo"))
-    monkeypatch.setenv("OPERATOR_TOKEN", "test-operator-" + "x" * 40)
     monkeypatch.setenv("COLLECTOR_TOKEN", "test-collector-" + "y" * 40)
     monkeypatch.setenv("EXTERNAL_MODEL_ENABLED", "false")
     monkeypatch.setenv("AGENT_DECISION_PROTOCOL", "legacy_v22")
@@ -24,7 +23,7 @@ def client(tmp_path, monkeypatch):
     get_settings.cache_clear()
     from app.main import app
 
-    with TestClient(app, headers={"Authorization": "Bearer test-operator-" + "x" * 40}) as instance:
+    with TestClient(app) as instance:
         yield instance
     get_settings.cache_clear()
 

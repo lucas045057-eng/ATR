@@ -11,7 +11,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse
 from fastapi.routing import APIRoute
 
-from app.api.dependencies import require_operator
+from app.api.dependencies import current_actor
 from app.business.ingestion import safe_name
 from app.business.models import (
     BusinessCreate,
@@ -79,9 +79,7 @@ class BusinessRoute(APIRoute):
         return handler
 
 
-router = APIRouter(
-    prefix="/api/v1", dependencies=[Depends(require_operator)], route_class=BusinessRoute
-)
+router = APIRouter(prefix="/api/v1", route_class=BusinessRoute)
 
 
 def service():
@@ -242,7 +240,7 @@ def continue_media(business_id: str,file_id: str,request: MediaContinuation):
 
 
 @router.post("/businesses/{business_id}/review")
-def review(business_id: str, request: BusinessReview, actor: str = Depends(require_operator)):
+def review(business_id: str, request: BusinessReview, actor: str = Depends(current_actor)):
     ensure_idle(business_id)
     return service().review(business_id, request, actor)
 
@@ -279,7 +277,7 @@ def media_review(business_id: str, file_id: str, request: ManualMediaReview):
 
 
 @router.post("/businesses/{business_id}/files/media-batch-review")
-def media_batch_review(business_id: str, request: MediaBatchReview, actor: str = Depends(require_operator)):
+def media_batch_review(business_id: str, request: MediaBatchReview, actor: str = Depends(current_actor)):
     from app.business.media import optional_image
     ensure_idle(business_id)
     s = service()
@@ -547,7 +545,7 @@ def endpoint_mapping_candidates(business_id: str,target_id: str):
 
 @router.post('/businesses/{business_id}/targets/{target_id}/endpoint-mappings')
 def confirm_endpoint_mapping(business_id: str,target_id: str,request: EndpointMappingReview,
-                             actor: str=Depends(require_operator)):
+                             actor: str=Depends(current_actor)):
     from app.system.endpoint_mapping import confirm
     ensure_idle(business_id)
     s=service()
@@ -622,7 +620,7 @@ def review_binding(
     business_id: str,
     binding_id: str,
     request: BindingReview,
-    actor: str = Depends(require_operator),
+    actor: str = Depends(current_actor),
 ):
     ensure_idle(business_id)
     s = service()
@@ -632,20 +630,20 @@ def review_binding(
 
 
 @router.post('/businesses/{business_id}/bindings/{binding_id}/revoke')
-def revoke_binding(business_id: str, binding_id: str, request: ScopeRevocation, actor: str = Depends(require_operator)):
+def revoke_binding(business_id: str, binding_id: str, request: ScopeRevocation, actor: str = Depends(current_actor)):
     s = service()
     return ScopeResolver(s.db, s.settings).revoke(business_id, binding_id, redact_text(request.reason), actor)
 
 
 @router.put('/businesses/{business_id}/bindings/{binding_id}/authorization')
-def approve_binding_rule(business_id: str, binding_id: str, request: AuthorizationRuleReview, actor: str = Depends(require_operator)):
+def approve_binding_rule(business_id: str, binding_id: str, request: AuthorizationRuleReview, actor: str = Depends(current_actor)):
     ensure_idle(business_id)
     s = service()
     return ScopeResolver(s.db, s.settings).approve_rule(business_id, binding_id, request.model_copy(update={'reason':redact_text(request.reason)}), actor)
 
 
 @router.post('/businesses/{business_id}/targets/{target_id}/authorize-object')
-def authorize_inventory_object(business_id: str, target_id: str, request: InventoryAuthorization, actor: str = Depends(require_operator)):
+def authorize_inventory_object(business_id: str, target_id: str, request: InventoryAuthorization, actor: str = Depends(current_actor)):
     ensure_idle(business_id)
     s = service()
     return ScopeResolver(s.db, s.settings).authorize_object(business_id, target_id, request.model_copy(update={'reason':redact_text(request.reason)}), actor)
@@ -661,7 +659,7 @@ def investigation_defaults(business_id: str):
 
 
 @router.put('/businesses/{business_id}/investigation-defaults')
-def save_investigation_defaults(business_id: str, request: InvestigationDefaults, actor: str = Depends(require_operator)):
+def save_investigation_defaults(business_id: str, request: InvestigationDefaults, actor: str = Depends(current_actor)):
     from app.system.authorization import authorized
     s = service()
     target = RuntimeService(s.db, s.settings).get(business_id, request.target_id)

@@ -37,11 +37,11 @@ def onboard(client, files=SAMPLE):
     return client.get(f"/api/v1/businesses/{business['business_id']}").json()
 
 
-def test_empty_profile_auth_and_no_fabrication(client):
+def test_empty_profile_is_not_fabricated(client):
     result = client.post("/api/v1/businesses", json={"name": "Empty"}).json()
     assert result["services"] == []
     assert result["coverage"]["knowledge_level"] == "insufficient"
-    assert client.get("/api/v1/businesses", headers={"Authorization": ""}).status_code == 401
+    assert client.get("/api/v1/businesses").status_code == 200
 
 
 def test_upload_search_review_and_incremental(client):

@@ -13,8 +13,7 @@ def runner():
 
 def test_child_environment_has_no_parent_credentials(monkeypatch):
     monkeypatch.setenv("MODEL_API_KEY", "synthetic-model-secret")
-    monkeypatch.setenv("OPERATOR_TOKEN", "synthetic-operator-secret")
-    command = [sys.executable, "-c", "import os,sys; sys.stdin.buffer.read(); print('MODEL_API_KEY' in os.environ or 'OPERATOR_TOKEN' in os.environ)"]
+    command = [sys.executable, "-c", "import os,sys; sys.stdin.buffer.read(); print('MODEL_API_KEY' in os.environ)"]
     result = runner()(command, b"{}", timeout=3)
     assert result["stdout"].strip() == b"False"
     assert os.environ["MODEL_API_KEY"] == "synthetic-model-secret"

@@ -19,7 +19,7 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 New-Item -ItemType Directory -Force targets | Out-Null
 ```
 
-编辑 `.env`，将 `OPERATOR_TOKEN` 和 `COLLECTOR_TOKEN` 分别换为至少 32 字符的不同随机值。默认关闭外部模型和 SSH，保留此默认即可先完成资料导入。需要重建前端时：
+编辑 `.env`，将 `COLLECTOR_TOKEN` 换为至少 32 字符的随机值。默认关闭外部模型和 SSH，保留此默认即可先完成资料导入。需要重建前端时：
 
 ```powershell
 Set-Location frontend
@@ -34,7 +34,7 @@ Set-Location ..
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-local.ps1
 ```
 
-打开 **http://127.0.0.1:8000**，在访问设置输入操作员令牌。API 健康检查为 `/api/v1/health`。只支持单 API 进程。WSL2、Docker 启动及数据恢复见 [部署说明](docs/deployment.md)。
+打开 **http://127.0.0.1:8000**。本地工作台不需要登录令牌；API 健康检查为 `/api/v1/health`。只支持单 API 进程。WSL2、Docker 启动及数据恢复见 [部署说明](docs/deployment.md)。
 
 ## 使用流程
 

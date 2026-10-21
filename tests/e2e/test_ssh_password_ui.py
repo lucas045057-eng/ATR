@@ -1,4 +1,3 @@
-import json
 import os
 
 import httpx
@@ -15,8 +14,7 @@ def ssh_server_enabled():
 
 def test_password_form_has_no_browser_persistence(live_server, ssh_server_enabled):  # noqa: F811
     base, directory = live_server
-    token = "browser-test-operator-" + "x" * 40
-    with httpx.Client(base_url=base, headers={"Authorization": "Bearer " + token}) as api:
+    with httpx.Client(base_url=base) as api:
         business = api.post("/api/v1/businesses", json={"name": "SSH 密码浏览器验收", "description": "隔离合成数据"})
         business.raise_for_status()
     password = "synthetic-browser-ssh-6f3e!"
@@ -24,7 +22,6 @@ def test_password_form_has_no_browser_persistence(live_server, ssh_server_enable
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, channel=os.environ.get("ATR_BROWSER_CHANNEL") or None)
         context = browser.new_context(viewport={"width": 1440, "height": 1000})
-        context.add_init_script("sessionStorage.setItem('atr_operator_token'," + json.dumps(token) + ")")
         page = context.new_page()
         submitted = []
         page.on("request", lambda r: submitted.append((r.url, r.post_data or "")))

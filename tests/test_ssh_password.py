@@ -134,8 +134,7 @@ def test_invalid_password_body_is_never_echoed(client, body):
 
 def test_authentication_and_target_bound_reference(client):
     path, profile = setup_target(client)
-    assert client.post(path + "/credential", json={"password": PASSWORD},
-                       headers={"Authorization": "Bearer invalid"}).status_code == 401
+    assert client.post(path + "/credential", json={"password": PASSWORD}).status_code == 200
     cfg = client.post(path + "/credential", json={"password": PASSWORD}).json()
     data = config(credential_ref=cfg["credential_ref"])
     data.pop("id")

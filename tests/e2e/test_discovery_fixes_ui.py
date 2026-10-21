@@ -1,5 +1,4 @@
 """Real browser/API, isolated data; the model endpoint is local fake HTTP only."""
-import json
 import os
 
 import httpx
@@ -15,10 +14,9 @@ from test_model_isolation import fake_model  # noqa: F401
 from test_v22_adaptive import report
 
 
-def browser_page(p, base, token):
+def browser_page(p, base):
     browser = p.chromium.launch(headless=True, channel=os.environ.get("ATR_BROWSER_CHANNEL") or None)
     context = browser.new_context(viewport={"width": 1440, "height": 1000})
-    context.add_init_script("sessionStorage.setItem('atr_operator_token'," + json.dumps(token) + ")")
     page = context.new_page()
     page.goto(base)
     return browser, page
@@ -27,13 +25,12 @@ def browser_page(p, base, token):
 def test_browser_discovery_review_and_same_run_resume(live_server, fake_model):  # noqa: F811
     base, directory = live_server
     _, _, state, _ = fake_model
-    token = "browser-test-operator-" + "x" * 40
     state["reply"] = lambda c, _: mapping(c) if c.get("phase") == "discovery" else report()
-    with httpx.Client(base_url=base, headers={"Authorization": "Bearer " + token}) as api:
+    with httpx.Client(base_url=base) as api:
         profile, _ = unbound(api)
         api.post("/api/v1/incidents", json={"system_id": profile["system_id"], "symptom": "catalog-api discovery UI"}).raise_for_status()
     with sync_playwright() as p:
-        browser, page = browser_page(p, base, token)
+        browser, page = browser_page(p, base)
         legacy_run_requests(page)
         errors = []
         page.on("pageerror", lambda e: errors.append(str(e)))
@@ -65,11 +62,10 @@ def test_browser_discovery_review_and_same_run_resume(live_server, fake_model): 
 
 def test_browser_optional_attachment_undo_and_process_groups(live_server):  # noqa: F811
     base, directory = live_server
-    token = os.environ.get("ATR_E2E_OPERATOR_TOKEN") if os.environ.get("ATR_E2E_BASE_URL") else "browser-test-operator-" + "x" * 40
-    with httpx.Client(base_url=base, headers={"Authorization": "Bearer " + token}) as api:
+    with httpx.Client(base_url=base) as api:
         profile = onboard(api, {"favicon.png": PNG, "architecture.png": PNG})
     with sync_playwright() as p:
-        browser, page = browser_page(p, base, token)
+        browser, page = browser_page(p, base)
         page.get_by_role("button", name="业务概览", exact=False).first.click()
         page.get_by_label("选择业务").select_option(profile["business_id"])
         page.locator("summary").filter(has_text="查看文件清单").click()

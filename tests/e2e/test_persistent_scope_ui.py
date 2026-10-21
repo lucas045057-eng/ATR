@@ -1,5 +1,4 @@
 """Native local API + Mock objects + loopback model: daily one-submit workflow."""
-import json
 import os
 
 import httpx
@@ -12,8 +11,7 @@ from test_runtime import discover, target
 
 def test_revoke_authorization_without_written_reason(live_server):  # noqa: F811
     base, _ = live_server
-    token = 'browser-test-operator-' + 'x' * 40
-    with httpx.Client(base_url=base, headers={'Authorization': 'Bearer ' + token}) as api:
+    with httpx.Client(base_url=base) as api:
         profile = onboard(api)
         runtime = target(api, profile)
         binding = next(row for row in discover(api, profile, runtime)['matches'] if row['kind'] == 'service')
@@ -23,7 +21,6 @@ def test_revoke_authorization_without_written_reason(live_server):  # noqa: F811
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True, channel=os.environ.get('ATR_BROWSER_CHANNEL') or None)
         context = browser.new_context()
-        context.add_init_script("sessionStorage.setItem('atr_operator_token'," + json.dumps(token) + ')')
         page = context.new_page()
         dialogs = []
         page.on('dialog', lambda dialog: (dialogs.append(dialog.type), dialog.accept()))
@@ -44,8 +41,7 @@ def test_authorized_fault_submit_starts_native_run(live_server, fake_model):  # 
     assert '127.0.0.1:' in base and ':28080' not in base
     _, settings, model, _ = fake_model
     assert '127.0.0.1' in settings.model_base_url
-    token = 'browser-test-operator-' + 'x' * 40
-    with httpx.Client(base_url=base, headers={'Authorization': 'Bearer ' + token}) as api:
+    with httpx.Client(base_url=base) as api:
         profile = onboard(api)
         runtime = target(api, profile)
         discovery = discover(api, profile, runtime)
@@ -63,7 +59,6 @@ def test_authorized_fault_submit_starts_native_run(live_server, fake_model):  # 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True, channel=os.environ.get('ATR_BROWSER_CHANNEL') or None)
         context = browser.new_context(viewport={'width': 1440, 'height': 1000})
-        context.add_init_script("sessionStorage.setItem('atr_operator_token'," + json.dumps(token) + ')')
         page = context.new_page()
         errors, starts = [], []
         page.on('pageerror', lambda error: errors.append(str(error)))
@@ -89,7 +84,7 @@ def test_authorized_fault_submit_starts_native_run(live_server, fake_model):  # 
         with page.expect_response(lambda response: response.request.method == 'PUT' and response.url.endswith('/investigation-defaults')) as saved_response:
             page.get_by_role('button', name='将当前目标保存为调查默认', exact=True).click()
         assert saved_response.value.status == 200
-        with httpx.Client(base_url=base, headers={'Authorization': 'Bearer ' + token}) as api:
+        with httpx.Client(base_url=base) as api:
             saved = api.get(endpoint + '/investigation-defaults').json()
             assert saved['target_id'] == runtime['id']
             assert saved['services'] == [binding['service']] and saved['primary_service'] == binding['service']
@@ -124,7 +119,7 @@ def test_authorized_fault_submit_starts_native_run(live_server, fake_model):  # 
         with page.expect_response(lambda response: response.request.method == 'POST' and response.url.endswith('/authorize-object')) as approved_response:
             unknown.get_by_role('button', name='确认此对象授权', exact=True).click()
         assert approved_response.value.status == 200
-        with httpx.Client(base_url=base, headers={'Authorization': 'Bearer ' + token}) as api:
+        with httpx.Client(base_url=base) as api:
             rows = api.get(endpoint + '/bindings').json()
             assert any(row['service'] == 'catalog-backup' and row['authorization_valid'] for row in rows)
         assert len(starts) == 1 and model['requests'] - before == 0
@@ -136,8 +131,7 @@ def test_ambiguous_business_names_do_not_create_or_start(live_server):  # noqa: 
     assert not os.environ.get('ATR_E2E_BASE_URL'), 'Use dedicated local fixture only'
     base, directory = live_server
     assert '127.0.0.1:' in base and ':28080' not in base
-    token = 'browser-test-operator-' + 'x' * 40
-    with httpx.Client(base_url=base, headers={'Authorization': 'Bearer ' + token}) as api:
+    with httpx.Client(base_url=base) as api:
         first = onboard(api)
         second = onboard(api)
         assert first['system_id'] != second['system_id']
@@ -145,7 +139,6 @@ def test_ambiguous_business_names_do_not_create_or_start(live_server):  # noqa: 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True, channel=os.environ.get('ATR_BROWSER_CHANNEL') or None)
         context = browser.new_context(viewport={'width': 1440, 'height': 1000})
-        context.add_init_script("sessionStorage.setItem('atr_operator_token'," + json.dumps(token) + ')')
         page = context.new_page()
         page.goto(base)
         page.get_by_role('button', name='排查故障', exact=False).click()
@@ -153,7 +146,7 @@ def test_ambiguous_business_names_do_not_create_or_start(live_server):  # noqa: 
         page.locator('textarea[name="symptom"]').fill('Catalog outage with ambiguous registered business name')
         page.locator('.incident-panel form').get_by_role('button', name='提交故障并开始调查', exact=False).click()
         expect(page.locator('.alert.error')).to_contain_text('故障描述提到了多个业务')
-        with httpx.Client(base_url=base, headers={'Authorization': 'Bearer ' + token}) as api:
+        with httpx.Client(base_url=base) as api:
             assert len(api.get('/api/v1/incidents').json()) == before
             assert api.get('/api/v1/runs').json() == []
         page.screenshot(path=str(directory / 'p05-ambiguous-business.png'), full_page=True)

@@ -2,7 +2,6 @@ import json
 
 import pytest
 from app.context.capabilities import probe_vision, proof_path, verified_vision, vision_ready
-from pydantic import SecretStr
 from test_model_isolation import fake_model  # noqa: F401
 
 
@@ -10,7 +9,6 @@ from test_model_isolation import fake_model  # noqa: F401
 def test_actual_wire_proof_is_persisted_only_after_visual_match(fake_model,monkeypatch,correct):  # noqa: F811
     database,settings,state,_=fake_model
     settings.database_path=database.path
-    settings.operator_token=SecretStr('private-proof-key-32-characters-synthetic')
     monkeypatch.setattr('app.context.capabilities.secrets.randbelow',lambda size:0)
     body={'marker':'100000' if correct else '999999','color':'red'}
     state['envelope']={'id':'local-proof','object':'chat.completion','created':1,'model':settings.model_name,

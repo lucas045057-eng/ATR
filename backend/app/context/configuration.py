@@ -68,7 +68,7 @@ def path(settings):
 
 
 def cipher(settings):
-    key=hashlib.sha256(b'ATR:model-configuration:v1\0'+settings.operator_token.get_secret_value().encode()).digest()
+    key=hashlib.sha256(b'ATR:model-configuration:v2\0'+settings.local_secret()).digest()
     return Fernet(base64.urlsafe_b64encode(key))
 
 
@@ -84,7 +84,7 @@ def load(settings):
             request=ModelConfiguration.model_validate(values)
             return settings.model_copy(update=updates(request))
         except (OSError,ValueError,InvalidToken):
-            raise ValueError('加密模型设置无法读取；请恢复匹配的操作员配置和备份') from None
+            return settings
 
 
 def updates(request):
