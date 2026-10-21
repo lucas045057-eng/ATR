@@ -8,12 +8,10 @@ export class ApiError extends Error {
 }
 
 export const api = async (path: string, options: RequestInit = {}) => {
-  const token = sessionStorage.getItem("atr_operator_token") || "";
   const headers = new Headers(options.headers);
   if (!(options.body instanceof Blob))
     headers.set("Content-Type", "application/json");
   else headers.set("Content-Type", "application/octet-stream");
-  if (token) headers.set("Authorization", `Bearer ${token}`);
   const controller = new AbortController();
   const abort = () => controller.abort(options.signal?.reason);
   if (options.signal?.aborted) abort();
@@ -30,7 +28,7 @@ export const api = async (path: string, options: RequestInit = {}) => {
         });
         if (!response.ok)
           throw new ApiError(
-            response.status === 401 ? '需要操作员访问令牌。请打开左侧“操作员访问设置”，保存后即可连接现有数据。' :
+            response.status === 401 ? '当前请求未被接受，请检查本地服务状态。' :
             typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail || `请求失败 (${response.status})`),
             response.status,
           );

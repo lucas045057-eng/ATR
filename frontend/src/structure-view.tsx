@@ -65,8 +65,7 @@ export function StructureView({businessId,theme}:{businessId:string;theme:Theme}
         const value=await api(`/businesses/${businessId}/observations/${reference.observation_id}`,{signal:controller.signal});
         if(!controller.signal.aborted)setCode(value);
       } else if(reference.page_number){
-        const token=sessionStorage.getItem('atr_operator_token')||'';
-        const response=await fetch(`/api/v1/businesses/${businessId}/files/${reference.file_id}/page?profile_version=${diagram?.profile_version}&page_number=${reference.page_number}`,{signal:controller.signal,headers:{Authorization:`Bearer ${token}`}});
+        const response=await fetch(`/api/v1/businesses/${businessId}/files/${reference.file_id}/page?profile_version=${diagram?.profile_version}&page_number=${reference.page_number}`,{signal:controller.signal});
         if(!response.ok)throw new Error('该页原件暂不可查看，请核对页码、资料版本和暂停原因');
         const value=await response.blob();if(!controller.signal.aborted)setImage(URL.createObjectURL(value));
       } else if(reference.file_id){

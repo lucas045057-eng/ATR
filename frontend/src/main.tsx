@@ -53,7 +53,6 @@ function App() {
   const [activeRunId, setActiveRunId] = useState(sessionStorage.getItem('atr_active_run_id') || '')
   const [connectionError, setConnectionError] = useState('')
   const [readAttempt, setReadAttempt] = useState(0)
-  const [token, setToken] = useState(sessionStorage.getItem('atr_operator_token') || '')
 
   const refresh = useCallback(async () => {
     const [s, b, i, p, m, c, e, r, failures] = await Promise.all([api('/systems'), api('/businesses'), api('/incidents'), api('/patterns'), api('/metrics'), api('/evaluation-cases'), api('/evaluations'), api('/runs'), api('/knowledge-counterexamples')])
@@ -153,8 +152,6 @@ function App() {
     try { await fn(); await refresh() } catch (e) { setError(e instanceof Error ? e.message : '操作失败') }
     finally { setBusy(false) }
   }
-
-  const saveToken = () => { sessionStorage.setItem('atr_operator_token', token); setError(''); setReadAttempt(value => value + 1); setNotice('本次浏览器会话中已保存操作员令牌。'); void refresh().catch(e => setError(e.message)) }
 
   const onBoard = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault(); const data = new FormData(event.currentTarget)
@@ -272,9 +269,7 @@ function App() {
       </nav>
       <div className="sidebar-bottom">
         <div className="live-dot" /> <span>本地诊断工作区</span>
-        <button className="token-button" onClick={() => document.getElementById('token-dialog')?.classList.toggle('open')}>操作员访问设置</button>
-        <button className="token-button" onClick={() => setModelSettingsOpen(true)}>模型设置与连通性</button>
-        <div id="token-dialog" className="token-dialog"><label htmlFor="operator-token">操作员访问令牌</label><input id="operator-token" type="password" autoComplete="off" value={token} onChange={e => setToken(e.target.value)} placeholder="粘贴 .env 中配置的令牌"/><button className="btn small" onClick={saveToken}>保存到本次会话</button></div>
+        <button className="settings-button" onClick={() => setModelSettingsOpen(true)}>模型设置与连通性</button>
       </div>
     </aside>
 

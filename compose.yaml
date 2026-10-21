@@ -48,6 +48,8 @@ services:
     build:
       context: .
       dockerfile: frontend/Dockerfile
+    environment:
+      OPERATOR_TOKEN: ${OPERATOR_TOKEN:?Set OPERATOR_TOKEN in .env}
     ports:
       - "127.0.0.1:28080:80"
     depends_on: [api]
