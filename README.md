@@ -1,16 +1,37 @@
-# Adaptive Troubleshooting Runtime · V2.2
+# ATR — Adaptive Troubleshooting Runtime
 
-ATR 在本地分析陌生业务资料，建立有来源的业务骨架，经过人工审核后识别服务器上的业务范围，再使用固定只读工具调查故障。源码、部署资料、运行观测和人工结论分别保存；历史 Pattern 只能建议检查，诊断仍须通过当前证据 Gate。
+ATR 是一个本地单操作员 SRE 故障调查运行时：先理解陌生业务，再在明确授权的范围内收集只读证据，由 Evidence Gate 决定结论等级。
 
-本版保留 ATR 的运行核心：资料接入、业务图审核、固定只读调查、证据 Gate、Runtime 停止策略和安全审计。历史验收结果与一次性实验记录已从仓库移除，避免把生成物当作产品代码维护。
+```text
+业务资料 → 有界静态解析 → 可溯源业务图 → 人工审核
+       → Mock / Docker 只读 / SSH 只读目标
+       → 受限调查动作 → 当前证据 → Evidence Gate
+       → 人工修复与恢复验证 → Candidate / Trusted Pattern
+```
 
-当前 Runtime 设计见 [决策 Runtime 架构](docs/ATR-V2.3-DECISION-RUNTIME-ARCHITECTURE.md) 和 [任务停止策略](docs/ATR-V2.3-TASK-STOP-POLICY.md)，跨机器启动见 [部署说明](docs/deployment.md)。
+当前运行主线是 **V2.3 + `ab_v1`**。Python/npm 包元数据仍为 `2.2.0`；本文按当前代码和工作台行为描述。
 
-当前增量包含独立模型 Worker 与安全错误诊断、SSH 内存密码会话和私钥认证、调查 Run 的显式目标绑定、无映射时的基础发现与审核恢复，以及静态图标的可撤销附件分类。仓库裁剪范围和保留内容见 [仓库精简报告](docs/repository-slimming-report.md)。
+ATR 不执行自动修复，也不把模型的自报置信度当作根因证据。模型只能从 Runtime 提供的已授权 `action_id` 中选择动作；工具目标、参数、权限和证据关系由 Runtime 与确定性策略控制。
+
+## 当前能力
+
+| 能力 | 当前状态 |
+|---|---|
+| 资料接入 | ZIP、TAR/TAR.GZ、源码、配置、文档和常见图片/PDF 入口；解包与读取有大小、深度、文件数和超时限制 |
+| 静态理解 | 解析服务、角色、模块、接口、依赖、配置和来源，保存文件摘要与版本 |
+| 业务图谱 | 图节点、依赖关系、来源、未知项和冲突；关键事实需要人工确认 |
+| 源码按需查看 | 按路径、符号和关键词检索有限上下文，并返回版本、摘要和行号 |
+| 运行范围 | Mock 隔离场景、Docker 只读采集、固定 SSH 只读工具；候选匹配只负责排序，确认才代表授权 |
+| 故障调查 | `normal` / `graph_adaptive` 自适应调查，以及 `graph_only` / `graph_pattern` 对照模式 |
+| Evidence Gate | 区分直接故障、根因、未解决、范围内未观察到故障和证据缺口 |
+| 经验复用 | 记录修复事实、真实恢复验证和人工审核后，才可形成 Candidate 或 Trusted Pattern |
+| 评估 | 支持成对 Graph / Graph + Pattern 记录，指标来自持久化 Run，不预置结果 |
+
+当前工作台提交的新业务自适应调查使用 `ab_v1`。兼容读取旧 Run 的 `legacy_v22` 和 `minimal_v2` 快照；历史 Run 不会被重写。
 
 ## Windows 本地启动
 
-需要 Python 3.11+；前端重新构建需要 Node.js/npm。交付 ZIP 已包含 `frontend/dist`，本地资料接入和 Mock 调查不需要 Docker 或模型 API。
+需要 Python 3.11+。本地资料接入和 Mock 调查不需要 Docker 或外部模型；只有重建前端时才需要 Node.js/npm。
 
 ```powershell
 python -m pip install uv
@@ -19,7 +40,9 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 New-Item -ItemType Directory -Force targets | Out-Null
 ```
 
-编辑 `.env`，将 `COLLECTOR_TOKEN` 换为至少 32 字符的随机值。默认关闭外部模型和 SSH，保留此默认即可先完成资料导入。需要重建前端时：
+编辑 `.env`，至少设置一个长度不少于 32 个字符的 `COLLECTOR_TOKEN`。默认配置会关闭外部模型和 SSH，适合先使用资料接入与本地 Mock 流程。
+
+需要重建前端时：
 
 ```powershell
 Set-Location frontend
@@ -28,33 +51,58 @@ npm run build
 Set-Location ..
 ```
 
-启动：
+启动本地 API 和工作台：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-local.ps1
 ```
 
-打开 **http://127.0.0.1:8000**。本地工作台不需要登录令牌；API 健康检查为 `/api/v1/health`。只支持单 API 进程。WSL2、Docker 启动及数据恢复见 [部署说明](docs/deployment.md)。
+打开 <http://127.0.0.1:8000>。健康检查地址是 `/api/v1/health`。本地工作台是单操作员模式，不提供互联网发布、多租户或多人权限隔离。
 
 ## 使用流程
 
-1. “新业务接入”：创建业务，上传 ZIP、TAR/TAR.GZ、源码、配置或文档；后台先做本地解析，不执行源码、不安装依赖。无资料也可以创建空档案。
-2. “业务档案”：查看服务、模块、接口、依赖、未知项、来源和版本；逐条确认/否决关系、修正角色，再确认档案。图片/PDF 当前保留人工录入入口。
-3. “服务器范围”：先选择明确标注的 Mock 隔离场景，轻量发现后确认业务服务候选。匹配分数仅排序。真实 SSH 支持私钥凭据引用或后端内存密码会话，均需已确认的主机公钥与明确授权。推荐服务器端强制网关；普通 SSH 模式明确标注客户端约束，仍使用固定只读工具与低权限账号检查。
-4. “故障调查”：选择本次 SSH 目标，创建对应系统的故障并开始调查；多个目标必须明确选择，Run 和恢复过程保持原目标。无有效映射时先基础发现、人工审核，再恢复同一 Run 与预算。页面展示实际工具目标、证据、预算及安全错误；未配置模型时保持离线未解决。
-5. 人工修复后记录修复事实，执行允许的健康 GET 验证，经过知识审核才能生成 Trusted Pattern；Agent 不实施修复。
+1. **新业务接入**：创建业务，上传源码、部署资料、配置或文档。解析只读取受限内容，不执行源码、不安装依赖、不运行 Compose。
+2. **业务档案**：查看服务、角色、模块、接口、依赖、来源、未知项和冲突；逐条确认/否决关系，必要时修正角色，再确认档案版本。
+3. **服务器范围**：创建并选择明确标注的 Mock、Docker 只读或 SSH 只读目标；执行轻量发现后，由操作员确认业务服务绑定。未确认对象不能进入深读。
+4. **故障调查**：选择已确认的目标，创建故障并选择调查目标。`graph_adaptive` 需要已审核的业务档案和运行范围；没有有效映射时先发现、审核，再恢复同一 Run。
+5. **结果与知识**：查看动作台账、事实、反证、证据时间线和 Gate 结果。人工修复后记录修复事实，执行允许的健康 GET 验证，经过知识审核后才可形成 Trusted Pattern；Agent 不实施修复。
 
-业务入口 normal/graph_adaptive 使用动态规划；graph_only/graph_pattern 用于固定基线对照。旧 Collector Demo 支持固定调查，不能以 graph_adaptive 标签执行。超过授权范围只记录申请，无法验证时保持 unresolved。详见 [接入手册](docs/business-onboarding.md)、[安全边界](docs/security-boundaries.md)、[预算配置](docs/context-budget.md)。
+调查页面展示实际工具目标、读取字节数、模型调用、Token 用量、停止原因和安全错误。未配置模型、证据不足、范围冲突或权限错误时，系统保持未解决并说明缺口。
 
-## 模型与预算
+## 模型、预算与协议
 
-在 `.env` 配置 `MODEL_NAME`、`MODEL_API_KEY`、可选 `MODEL_BASE_URL`，确认资料允许发送到该供应商后设置 `EXTERNAL_MODEL_ENABLED=true`。能力采用明确声明，未实现自动供应商能力探测。`MODEL_JSON_SUPPORTED` 须为 true；`MODEL_VISION_SUPPORTED` 不会启用尚未接入的图像适配器。
+外部模型默认关闭。确认资料可以发送给供应商后，才设置 `MODEL_NAME`、`MODEL_API_KEY`、可选的 `MODEL_BASE_URL`，并将 `EXTERNAL_MODEL_ENABLED=true`。`MODEL_JSON_SUPPORTED=true` 是当前结构化决策的必要条件；视觉能力不会因为声明配置而自动启用。
 
-默认初始理解每请求输入 8,000、调查每请求输入 12,000、初始模型调用 6、调查模型轮数 8、调查工具 20。调用前保守预检，优先记录供应商实际 usage；估算和配置费率估算明确标识。可在业务页面提高已有初始预算后继续。
+常用配置项：
 
-单次输入估算采用 UTF-8 字节数加消息开销，不等同于供应商分词或计费。`INVESTIGATION_INPUT_TOKENS` 控制新建调查的单次预检查；限额会保存到 Run 的独立预算，修改 `.env` 不会自动改写历史预算。Docker 部署修改配置后需重新创建 API 容器加载新环境。调查模型上下文去除重复假设历史和冗余动作字段，完整证据与审计仍保存在数据库；无法容纳时在发送前停止，显示限制类别及安全数值。
+| 配置 | 默认/作用 |
+|---|---|
+| `EXTERNAL_MODEL_ENABLED` | `false`；是否允许外部模型调用 |
+| `MODEL_JSON_SUPPORTED` | `true`；供应商是否支持结构化 JSON |
+| `INVESTIGATION_INPUT_TOKENS` | `12000`；调查输入估算值 |
+| `INVESTIGATION_MODEL_ROUNDS` | `8`；模型轮数上限配置 |
+| `INVESTIGATION_TOOL_CALLS` | `20`；调查工具调用上限配置 |
+| `SSH_ENABLED` | `false`；是否启用 SSH 目标 |
+| `ALLOWED_HEALTH_URLS` | 允许执行恢复验证的精确 URL 列表 |
 
-## 测试
+`ab_v1` 会记录模型调用、Token、读取量和费用估算；工作台的预算区显示为可观测账本，不应被理解为供应商计费上限或替代基础设施限流。调查仍受 Runtime 任务停止策略、固定工具调用边界、输出大小和连接超时约束。
+
+## 安全边界
+
+- 上传资料、日志、配置和模型输出都视为不可信输入；解包拒绝路径穿越、链接、设备、重复路径、加密成员和超限内容。
+- 模型不能生成任意 Shell、注册工具、提交目标 ID、修改权限或直接确认事实。
+- 服务、容器、配置路径和 SSH 目标必须在授权范围内；候选匹配、历史日志和模型置信度都不能替代当前授权与证据。
+- SSH 使用固定主机公钥校验，禁用自动接收未知密钥、SSH agent、自由命令、PTY、SCP/SFTP 和 sudo。`forced_gateway` 需要服务器管理员配置的强制只读入口；`standard_ssh_readonly` 仍依赖服务器账号权限，客户端白名单不能把有写权限的账号变成只读。
+- Docker Collector 只在显式 `docker-demo` profile 中启用。Docker socket 的 `:ro` 挂载不能消除 daemon 权限，只适用于可信本地隔离 Demo。
+- Agent 永不重启服务、修改配置、删除文件、写数据库或执行修复。真实生产 Linux、真实外部模型供应商和完整生产根因准确率尚未验收。
+
+## 本地 Demo
+
+固定黑客松场景位于 `demo/hackathon-catalog`，完整步骤见 [Demo 手册](docs/demo-runbook.md) 和 [接入手册](docs/business-onboarding.md)。
+
+运行 Demo 时应把 Mock 结果描述为隔离演示。`direct_cause_supported` 表示当前授权范围内的直接故障得到支持；它不等于完整根因已确认，也不代表真实生产环境验收。
+
+## 测试与构建
 
 ```powershell
 python -m uv sync --locked --group dev
@@ -62,18 +110,19 @@ Set-Location frontend
 npm ci
 npm run build
 Set-Location ..
-python -m uv run playwright install chromium
 python -m uv run pytest -q --basetemp=test-results/local-new-run --junitxml=test-results/local.xml
 python -m uv run ruff check .
 ```
 
-本地测试包含后端回归、模型隔离、Runtime 安全边界和浏览器流程；本机 Chrome/Edge 可通过 `$env:ATR_BROWSER_CHANNEL='chrome'` 或 `'msedge'` 使用。缺少前端产物或浏览器时测试会失败，不把跳过当作通过。
+浏览器流程需要 Playwright Chromium。完整测试会访问隔离夹具；跳过的测试不能视为通过。当前仓库仍有历史基线问题，运行全套检查时应区分既有失败与本次改动造成的回归。
 
-## 运行边界
+## 文档索引
 
-- 默认无 Docker socket、无 SSH、无外部模型。本地单操作员令牌系统不提供多租户权限隔离。
-- SSH 校验固定主机公钥，禁止 root、agent 和自动查找私钥。forced_gateway 仅发送 `atr-read-v1` 与 JSON；standard_ssh_readonly 使用固定命令，不接受模型生成的 Shell。客户端白名单不能保证账号没有写权限，服务器端强制只读边界需由所有者配置。
-- 原 Docker Collector 只在显式 `docker-demo` profile 启动。它仍拥有 Docker daemon 权限，`:ro` socket 挂载不能消除此权限。仅用于可信本地隔离 Demo。
-- Docker API/UI/Worker/SQLite 与原 A/B 故障恢复、Linux/OpenSSH 受限夹具已经实际隔离验收。真实模型供应商、生产 Linux 业务服务器、完整 Redis/Nginx 故障集及生产根因准确率未验证；当前 Gate 只认可五类保守机制。
-
-[决策 Runtime 架构](docs/ATR-V2.3-DECISION-RUNTIME-ARCHITECTURE.md) · [任务停止策略](docs/ATR-V2.3-TASK-STOP-POLICY.md) · [部署](docs/deployment.md) · [安全边界](docs/security-boundaries.md) · [Demo 手册](docs/demo-runbook.md)
+- [Runtime 架构](docs/ATR-V2.3-DECISION-RUNTIME-ARCHITECTURE.md)
+- [任务停止策略](docs/ATR-V2.3-TASK-STOP-POLICY.md)
+- [业务接入手册](docs/business-onboarding.md)
+- [安全边界](docs/security-boundaries.md)
+- [部署说明](docs/deployment.md)
+- [预算与用量](docs/context-budget.md)
+- [Demo 手册](docs/demo-runbook.md)
+- [仓库精简报告](docs/repository-slimming-report.md)
