@@ -21,3 +21,4 @@ test-results/
 !third_party/licenses/**
 orbital/
 output/
+uploads/
