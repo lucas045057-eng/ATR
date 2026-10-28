@@ -19,3 +19,5 @@ Thumbs.db
 test-results/
 .local/
 !third_party/licenses/**
+orbital/
+output/
