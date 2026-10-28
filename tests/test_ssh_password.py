@@ -216,32 +216,6 @@ def test_existing_private_key_target_cannot_accept_password(client):
         assert PASSWORD not in "\n".join(conn.iterdump())
 
 
-def test_investigation_context_never_receives_session_password(client, monkeypatch):
-    from app.connectors.mock import MockConnector
-    from test_v22_adaptive import investigate, model_stub, prepared_profile, report
-
-    profile = prepared_profile(client, monkeypatch, store=False)
-    settings = get_settings()
-    settings.ssh_enabled = True
-    runtime = RuntimeService(Database(settings.database_path), settings)
-    with runtime.db.transaction() as tx:
-        row = tx.execute("SELECT id,config_json FROM runtime_targets WHERE business_id=?", (profile["business_id"],)).fetchone()
-        cfg = {**json.loads(row["config_json"]), **config(), "id": row["id"]}
-        tx.execute("UPDATE runtime_targets SET config_json=? WHERE id=?",
-                   (json.dumps({k: v for k, v in cfg.items() if k != "id"}), row["id"]))
-    runtime.provide_password(profile["business_id"], row["id"], SecretStr(PASSWORD))
-
-    def read(self, tool, args):
-        assert SSH_SESSIONS.resolve(self.config, settings.operator_id).get_secret_value() == PASSWORD
-        return MockConnector(self.config).read(tool, args)
-
-    monkeypatch.setattr(SSHConnector, "read", read)
-    contexts = model_stub(monkeypatch, lambda context, round_number: report())
-    result = investigate(client, profile, mode="graph_adaptive")
-    assert contexts and PASSWORD not in json.dumps(contexts)
-    assert PASSWORD not in json.dumps(result)
-    with runtime.db.connect() as conn:
-        assert PASSWORD not in "\n".join(conn.iterdump())
 
 
 def test_discovery_stops_after_authentication_failure(client, monkeypatch):

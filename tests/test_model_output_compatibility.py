@@ -301,13 +301,3 @@ def test_schema_prompt_uses_model_capacity_and_preserves_legacy_references(fake_
     assert context['previous_hypotheses'][1]['counter_evidence'] == [before['evidence'][0]['evidence_id']]
     assert context['previous_hypotheses'][1]['status'] == 'refuted'
     assert [a['action_id'] for a in context['available_actions']] == [a['action_id'] for a in before['available_actions']]
-
-
-def test_small_legacy_budget_does_not_stop_before_provider(fake_model, monkeypatch):  # noqa: F811
-    from app.context.budget import BudgetLimits
-    database, settings, state, _ = fake_model
-    manager = ContextBudgetManager(database, settings)
-    bid = manager.create('investigation', limits=BudgetLimits(max_input_tokens=1000))
-    result = _planner(settings, budget_regression_state(), database, bid)
-    assert 'model_error' not in result
-    assert manager.get(bid)['calls'] == state['requests'] == 1

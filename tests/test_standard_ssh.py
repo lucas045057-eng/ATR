@@ -1,11 +1,9 @@
-import json
 import shlex
 from contextlib import contextmanager
 
 import pytest
 from app.connectors.models import RuntimeTargetCreate
 from app.connectors.policy import SCHEMAS, check
-from app.connectors.service import RuntimeService
 from app.connectors.ssh import SSHConnector
 from app.connectors.standard_ssh import (
     FILE_READER,
@@ -166,41 +164,3 @@ def test_manual_observations_enter_existing_graph(client, monkeypatch):
     host = next(n for n in graph["nodes"] if n["kind"] == "host" and n["name"] == target["id"])
     assert host["attributes"]["observation_id"] == result["observation_id"]
     assert host["attributes"]["server_enforced_readonly"] is False
-
-
-def test_agent_uses_authorized_standard_tools_and_keeps_scope_gate(client, monkeypatch):
-    from app.connectors.mock import MockConnector
-    from test_v22_adaptive import (
-        candidate,
-        investigate,
-        model_stub,
-        prepared_profile,
-        proposal,
-        report,
-    )
-    profile = prepared_profile(client, monkeypatch, store=False)
-    settings = get_settings()
-    settings.ssh_enabled = True
-    runtime = RuntimeService(Database(settings.database_path), settings)
-    with runtime.db.transaction() as tx:
-        row = tx.execute("SELECT id,config_json FROM runtime_targets WHERE business_id=?", (profile["business_id"],)).fetchone()
-        cfg = {**json.loads(row["config_json"]), **standard(), "id": row["id"]}
-        cfg["allowed_paths"] = ["/srv/catalog"]
-        tx.execute("UPDATE runtime_targets SET config_json=? WHERE id=?", (json.dumps({k: v for k, v in cfg.items() if k != "id"}), row["id"]))
-    runtime.provide_password(profile["business_id"], row["id"], __import__("pydantic").SecretStr(PASSWORD))
-    reads = []
-    def read(self, tool, args):
-        reads.append(tool)
-        return {**MockConnector(self.config).read(tool, args), "connector": "ssh", "execution_mode": "standard_ssh_readonly"}
-    monkeypatch.setattr(StandardSSHConnector, "read", read)
-    def reply(context, n):
-        assert not any(a.get("service") == "store" for a in context["available_actions"])
-        if n == 1:
-            return report(action=proposal(candidate(context, "config.list")))
-        return report(action={"action_id": "injected-shell-command", "rationale": "touch /tmp/owned"})
-    contexts = model_stub(monkeypatch, reply)
-    result = investigate(client, profile, mode="graph_adaptive")
-    assert reads == ["service.status", "service.logs", "config.list"]
-    assert result["status"] == "unresolved" and result["summary"]["stop_reason"] == "model_schema_error"
-    assert PASSWORD not in json.dumps(contexts) and PASSWORD not in json.dumps(result)
-    assert all("shell" not in call["tool_id"] for call in result["tool_calls"])

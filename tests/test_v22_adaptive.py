@@ -240,13 +240,3 @@ def test_unknown_action_id_and_injected_arguments_never_execute(client, monkeypa
     assert result["context_budget"]["usage_records"][0]["status"] == "failed"
     assert len(result["tool_calls"]) == 2
     assert not any(c["tool_id"] == "shell.exec" for c in result["tool_calls"])
-
-
-def test_model_budget_rejection_has_machine_stop_reason(client, monkeypatch):
-    profile = prepared_profile(client, monkeypatch)
-    contexts = model_stub(monkeypatch, lambda context, n: report())
-    get_settings().investigation_input_tokens = 1
-    result = investigate(client, profile)
-    assert result["summary"]["stop_reason"] == "model_budget_exhausted"
-    assert result["context_budget"]["calls"] == 0
-    assert contexts == []

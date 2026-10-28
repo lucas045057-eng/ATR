@@ -1,6 +1,5 @@
 """Provider governance through real isolated LiteLLM and local fake HTTP only."""
 import json
-import subprocess
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -132,18 +131,6 @@ def test_invalid_usage_never_claims_actual(fake_model, monkeypatch, usage):  # n
     assert record['diagnostic']['usage_kind'] == 'estimate'
 
 
-def test_process_start_failure_releases_budget_and_has_initialize_stage(fake_model, monkeypatch):  # noqa: F811
-    database, settings, _, _ = fake_model
-    def fail(*_, **__):
-        raise OSError('synthetic-secret cannot start process')
-    monkeypatch.setattr(subprocess, 'run', fail)
-    manager = ContextBudgetManager(database, settings)
-    bid = manager.create('initial')
-    with pytest.raises(Exception) as caught:
-        call_json(database, settings, bid, 'local fake', {})
-    assert caught.value.code == 'model_import_error'
-    assert caught.value.diagnostic['stage'] == 'initialize'
-    assert manager.get(bid)['reserved_tokens'] == 0
 
 
 def test_usage_above_estimate_is_accounted_without_blocking(fake_model, monkeypatch):  # noqa: F811

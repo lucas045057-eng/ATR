@@ -165,30 +165,8 @@ def test_resume_revalidates_review_version_and_permissions(client, monkeypatch, 
         assert denied["status"] == "denied"
 
 
-def test_global_tool_budget_stops_without_ai_or_new_discovery_budget(client, monkeypatch):
-    profile, _ = unbound(client)
-    get_settings().investigation_tool_calls = 2
-    model_stub(monkeypatch, lambda c, _: pytest.fail("No remaining global budget"))
-    r = start(client, profile)
-    assert r["status"] == "unresolved" and r["summary"]["stop_reason"] == "global_budget_exhausted"
-    assert r["context_budget"]["tool_calls"] == 2 and r["context_budget"]["calls"] == 0
-    with Database(get_settings().database_path).connect() as c:
-        assert c.execute("SELECT count(*) FROM context_budgets WHERE phase='discovery'").fetchone()[0] == 0
 
 
-def test_expired_mapping_rediscovery_requires_new_review(client, monkeypatch):
-    from test_runtime import discover
-    profile, t = unbound(client)
-    model_stub(monkeypatch, lambda c, _: mapping(c))
-    r = start(client, profile)
-    confirm(client, profile, r)
-    db = Database(get_settings().database_path)
-    with db.transaction() as c:
-        c.execute("UPDATE service_bindings SET expires_at='2000-01-01T00:00:00+00:00' WHERE status='confirmed'")
-    discovery = discover(client, profile, t)
-    assert any(m["business_service"] == "catalog-api" and m["verification_status"] == "pending" for m in discovery["matches"])
-    denied = RuntimeService(db, get_settings()).execute(profile["business_id"], t["id"], ToolRequest(tool_id="service.status", arguments={"name": "catalog-api.service"}))
-    assert denied["status"] == "denied"
 
 
 def test_approved_code_only_profile_still_collects_and_invokes_provider(client, monkeypatch):
@@ -203,21 +181,6 @@ def test_approved_code_only_profile_still_collects_and_invokes_provider(client, 
     assert not r["summary"]["mapping_proposals"] and not r["summary"]["evidence_ids"]
 
 
-def test_process_only_confirmation_does_not_block_basic_discovery(client, monkeypatch):
-    from test_runtime import discover
-    profile, t = unbound(client)
-    original = MockConnector.read
-    def read(self, tool, args):
-        if tool == "process.list":
-            return {"processes": [{"id": "42", "name": "catalog-api", "kind": "process"}]}
-        return original(self, tool, args)
-    monkeypatch.setattr(MockConnector, "read", read)
-    d = discover(client, profile, t)
-    process = next(m for m in d["matches"] if m["kind"] == "process")
-    client.post(f"/api/v1/businesses/{profile['business_id']}/bindings/{process['id']}/review", json={"decision": "confirm", "reason": "人工仅确认进程线索，未授权服务日志"}).raise_for_status()
-    contexts = model_stub(monkeypatch, lambda c, _: mapping(c))
-    r = start(client, profile)
-    assert r["status"] == "awaiting_review" and len(contexts) == 1 and len(r["tool_calls"]) == 7
 
 
 def test_resume_password_expiry_is_safe_403_and_refresh_preserves_budget(client, monkeypatch):

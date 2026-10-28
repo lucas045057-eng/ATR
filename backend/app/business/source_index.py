@@ -102,6 +102,8 @@ class SourceIndex:
         return {
             "file_id": request.file_id,
             "path": row["path"],
+            # Keep the public model input contract aligned with source_index rows.
+            "content_digest": row["content_digest"],
             "source_digest": row["content_digest"],
             "profile_version": profile["profile_version"],
             "start_line": start,

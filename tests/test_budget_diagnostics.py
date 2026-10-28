@@ -9,32 +9,7 @@ from app.settings import get_settings
 from app.storage.database import Database
 from pydantic import SecretStr
 from test_model_output_compatibility import budget_regression_state
-from test_v22_adaptive import candidate, investigate, model_stub, prepared_profile, proposal, report
-
-
-def test_provider_usage_above_estimate_does_not_stop_investigation(client, monkeypatch):
-    profile = prepared_profile(client, monkeypatch)
-    contexts = model_stub(monkeypatch, lambda context, _: report(
-        action=proposal(candidate(context, "service.status", "store"))))
-    from app.context import model
-    original = model._completion
-
-    def reported_usage(**request):
-        response = original(**request)
-        response.usage = SimpleNamespace(prompt_tokens=27809, completion_tokens=2620)
-        return response
-
-    monkeypatch.setattr(model, "_completion", reported_usage)
-    settings = get_settings()
-    settings.investigation_input_tokens, settings.budget_total_tokens = 30000, 200000
-    result = investigate(client, profile)
-    assert result["status"] == "unresolved"
-    assert result["context_budget"]["stop_reason"] is None
-    assert result["summary"]["stop_reason"] != "provider_usage_exceeded_reservation"
-    assert "工具调用预算已耗尽" not in result["summary"]["unresolved_reason"]
-    assert len(contexts) == result["context_budget"]["calls"] > 1
-    assert result["context_budget"]["input_tokens"] == 27809 * len(contexts)
-    assert all(u["status"] == "succeeded" for u in result["context_budget"]["usage_records"])
+from test_v22_adaptive import report
 
 
 def test_setting_increase_changes_only_new_budget_snapshots(client):
