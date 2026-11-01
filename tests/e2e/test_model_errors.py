@@ -1,8 +1,8 @@
 """Real browser, local API and local fake provider: failure then recovery."""
-import os
 
 import httpx
 import pytest
+from browser_support import launch_chromium
 from conftest import wait_job
 from playwright.sync_api import expect, sync_playwright
 from test_browser import (
@@ -28,7 +28,7 @@ def test_browser_model_failure_is_visible_and_next_request_recovers(live_server,
     if status == 400:
         state['error'] = {'type': 'invalid_request_error', 'message': 'Model gpt-6.1-sol has not been priced by the administrator yet. synthetic-secret NEVER-ECHO-REQUEST'}
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, channel=os.environ.get("ATR_BROWSER_CHANNEL") or None)
+        browser = launch_chromium(p)
         context = browser.new_context(viewport={"width": 1440, "height": 1000})
         page = context.new_page()
         errors, statuses = [], []
@@ -82,7 +82,7 @@ def test_browser_usage_is_read_only_despite_small_legacy_budget(low_input_budget
         assert result['context_budget']['stop_reason'] is None
         assert result['context_budget']['calls'] == state['requests'] > 0
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, channel=os.environ.get('ATR_BROWSER_CHANNEL') or None)
+        browser = launch_chromium(p)
         context = browser.new_context()
         page = context.new_page()
         page.goto(base)
@@ -114,7 +114,7 @@ def test_browser_529_investigation_history_and_manual_recovery(live_server, fake
         result = api.get('/api/v1/runs/' + job['result']['id']).json()
         assert result['summary']['model_error']['status_code'] == 529
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, channel=os.environ.get("ATR_BROWSER_CHANNEL") or None)
+        browser = launch_chromium(p)
         context = browser.new_context(viewport={"width": 1440, "height": 1000})
         page = context.new_page()
         legacy_run_requests(page)
@@ -200,7 +200,7 @@ def test_browser_schema_error_shows_safe_field_path(live_server, fake_model, inv
             assert result['summary']['model_error']['validation_kind'] == ('decision' if invalid_reference else 'format')
         assert len(result['tool_calls']) == 2
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, channel=os.environ.get('ATR_BROWSER_CHANNEL') or None)
+        browser = launch_chromium(p)
         context = browser.new_context(viewport={'width': 1440, 'height': 1000})
         page = context.new_page()
         errors = []
@@ -262,7 +262,7 @@ def test_browser_discovery_next_tools_error_is_safe_and_specific(live_server, fa
         assert result['summary']['mapping_proposals'] == []
         assert result['summary']['model_error']['validation_errors'][0]['type'] == 'action_not_allowed'
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, channel=os.environ.get('ATR_BROWSER_CHANNEL') or None)
+        browser = launch_chromium(p)
         context = browser.new_context()
         page = context.new_page()
         page.goto(base)

@@ -122,7 +122,7 @@ python -m uv run python -m pytest -q --basetemp=test-results/local-new-run --jun
 python -m uv run ruff check .
 ```
 
-浏览器流程需要 Playwright Chromium。完整测试会访问隔离夹具；跳过的测试不能视为通过。当前完整回归基线为 1097 passed、0 failed。
+浏览器流程需要先运行 `python -m uv run playwright install chromium`；有 Chrome 的机器也可在 PowerShell 设置 `$env:ATR_BROWSER_CHANNEL='chrome'`。未安装浏览器时 e2e 会 skip，其他浏览器错误仍会失败。完整测试会访问隔离夹具；跳过的测试不能视为通过。此修复前的完整回归基线为 1097 passed、0 failed。
 
 ## 文档索引
 

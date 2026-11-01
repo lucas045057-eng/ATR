@@ -2,6 +2,7 @@
 import os
 
 import httpx
+from browser_support import launch_chromium
 from playwright.sync_api import expect, sync_playwright
 from test_browser import live_server  # noqa: F401
 from test_business import onboard
@@ -19,7 +20,7 @@ def test_revoke_authorization_without_written_reason(live_server):  # noqa: F811
         api.post(endpoint + '/bindings/' + binding['id'] + '/review', json={'decision': 'confirm'}).raise_for_status()
         binding = next(row for row in api.get(endpoint + '/bindings').json() if row['id'] == binding['id'])
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True, channel=os.environ.get('ATR_BROWSER_CHANNEL') or None)
+        browser = launch_chromium(playwright)
         context = browser.new_context()
         page = context.new_page()
         dialogs = []
@@ -57,7 +58,7 @@ def test_authorized_fault_submit_starts_native_run(live_server, fake_model):  # 
         before = model['requests']
     symptom = 'Catalog isolated daily outage'
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True, channel=os.environ.get('ATR_BROWSER_CHANNEL') or None)
+        browser = launch_chromium(playwright)
         context = browser.new_context(viewport={'width': 1440, 'height': 1000})
         page = context.new_page()
         errors, starts = [], []
@@ -137,7 +138,7 @@ def test_ambiguous_business_names_do_not_create_or_start(live_server):  # noqa: 
         assert first['system_id'] != second['system_id']
         before = len(api.get('/api/v1/incidents').json())
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True, channel=os.environ.get('ATR_BROWSER_CHANNEL') or None)
+        browser = launch_chromium(playwright)
         context = browser.new_context(viewport={'width': 1440, 'height': 1000})
         page = context.new_page()
         page.goto(base)

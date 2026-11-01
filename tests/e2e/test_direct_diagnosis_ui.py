@@ -1,7 +1,6 @@
 """Real built UI with controlled API contracts; no real SSH/model acceptance claims."""
 
 import json
-import os
 import threading
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -9,6 +8,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
+from browser_support import launch_chromium
 from playwright.sync_api import expect, sync_playwright
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -29,9 +29,7 @@ def ui_origin():
 @pytest.fixture
 def ui(ui_origin):
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(
-            headless=True, channel=os.environ.get("ATR_BROWSER_CHANNEL") or None,
-        )
+        browser = launch_chromium(playwright)
         context = browser.new_context(viewport={"width": 1440, "height": 1000})
         page = context.new_page()
         errors = []

@@ -1,7 +1,7 @@
 """Real browser/API, isolated data; the model endpoint is local fake HTTP only."""
-import os
 
 import httpx
+from browser_support import launch_chromium
 from playwright.sync_api import expect, sync_playwright
 from test_autonomous_discovery import mapping, unbound
 from test_browser import (
@@ -15,7 +15,7 @@ from test_v22_adaptive import report
 
 
 def browser_page(p, base):
-    browser = p.chromium.launch(headless=True, channel=os.environ.get("ATR_BROWSER_CHANNEL") or None)
+    browser = launch_chromium(p)
     context = browser.new_context(viewport={"width": 1440, "height": 1000})
     page = context.new_page()
     page.goto(base)

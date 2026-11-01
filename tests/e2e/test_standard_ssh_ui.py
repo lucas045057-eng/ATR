@@ -1,9 +1,9 @@
 import json
-import os
 
 import httpx
 import paramiko
 import pytest
+from browser_support import launch_chromium
 from playwright.sync_api import expect, sync_playwright
 from test_browser import live_server  # noqa: F401
 
@@ -20,7 +20,7 @@ def test_execution_and_auth_choices_and_docker_default(live_server, ssh_server_e
     key = paramiko.RSAKey.generate(1024)
     password = "synthetic-standard-browser-memory-only"
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, channel=os.environ.get("ATR_BROWSER_CHANNEL") or None)
+        browser = launch_chromium(p)
         context = browser.new_context(viewport={"width": 1440, "height": 1000})
         page = context.new_page()
         submitted = []

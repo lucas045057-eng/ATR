@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 
 import httpx
 import pytest
+from browser_support import launch_chromium
 from playwright.sync_api import expect, sync_playwright
 from test_business import SAMPLE, archive
 
@@ -106,7 +107,7 @@ def test_browser_complete_onboarding(live_server):
     source = directory / "catalog.zip"
     source.write_bytes(archive(SAMPLE))
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, channel=os.environ.get("ATR_BROWSER_CHANNEL") or None)
+        browser = launch_chromium(p)
         context = browser.new_context(viewport={"width": 1440, "height": 1000})
         page = context.new_page()
         errors = []
