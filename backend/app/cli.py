@@ -120,6 +120,15 @@ def _data_path(root: Path) -> Path:
     return _resolve(root, database_path)
 
 
+def _dist_manifest(root: Path) -> dict | None:
+    path = root / "frontend" / "dist" / "build.json"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
 def _ensure_data_dirs(root: Path) -> None:
     _data_path(root).parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -272,6 +281,40 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "frontend/dist", "PASS" if dist.is_file() else "WARN",
         "工作台可用" if dist.is_file() else "缺少 dist；API 仍可用，但没有工作台",
     ))
+    manifest = _dist_manifest(root)
+    if not dist.is_file():
+        checks.append(_result("前端指纹", "WARN", "dist 缺失，无法读取 build.json"))
+    elif manifest is None:
+        checks.append(_result(
+            "前端指纹", "WARN",
+            "build.json 缺失或无效；无法确认前端版本，建议重建前端或使用发布包",
+        ))
+    else:
+        front_version = str(manifest.get("version") or "")
+        front_commit = str(manifest.get("commit") or "")
+        built_at = str(manifest.get("built_at") or "")
+        head, kind = _application_sha(root)
+        problems = []
+        if front_version != __version__:
+            problems.append(
+                f"前端与后端版本不一致（前端 {front_version or '未知'}，后端 {__version__}），"
+                "建议重建前端或使用发布包"
+            )
+        if kind == "git":
+            if not front_commit:
+                problems.append("build.json 未记录 commit，无法与当前 HEAD 比对")
+            elif front_commit != head:
+                problems.append(
+                    f"前端 commit {front_commit[:12]} 与当前 HEAD {head[:12]} 不一致，"
+                    "建议重建前端或使用发布包"
+                )
+        if problems:
+            checks.append(_result("前端指纹", "WARN", "；".join(problems)))
+        else:
+            checks.append(_result(
+                "前端指纹", "PASS",
+                f"{front_version} · {front_commit[:12] if front_commit else '无 commit'} · {built_at or '无构建时间'}",
+            ))
 
     port_free = _port_is_free(args.port)
     checks.append(_result(
@@ -393,6 +436,17 @@ def cmd_version(_: argparse.Namespace) -> int:
     except Exception as exc:
         print(f"决策协议：(配置无效：{type(exc).__name__})")
     print(f"工作台：{'可用' if (root / 'frontend' / 'dist' / 'index.html').is_file() else '不可用（frontend/dist 缺失）'}")
+    manifest = _dist_manifest(root)
+    if not (root / "frontend" / "dist" / "index.html").is_file():
+        print("前端：未构建")
+    elif manifest is None:
+        print("前端：已构建（build.json 缺失）")
+    else:
+        print(
+            f"前端：{manifest.get('version') or '未知'} · "
+            f"commit {manifest.get('commit') or '(无)'} · "
+            f"built_at {manifest.get('built_at') or '(无)'}"
+        )
     return 0
 
 

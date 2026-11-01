@@ -31,6 +31,11 @@ jobs:
       - run: uv run --locked ruff check .
       - run: npm ci && npm run build
         working-directory: frontend
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          if-no-files-found: error
       - run: uv run --locked python -m playwright install --with-deps chromium
       - run: |
           mkdir -p test-results

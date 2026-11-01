@@ -255,7 +255,7 @@ def test_browser_discovery_next_tools_error_is_safe_and_specific(live_server, fa
         provider['reply'] = invalid
         symptom = '候选工具契约验收 ' + profile['business_id'][:8]
         incident = api.post('/api/v1/incidents', json={'system_id': profile['system_id'], 'symptom': symptom, 'mode': 'normal'}).json()
-        task = api.post('/api/v1/incidents/' + incident['id'] + '/runs').json()
+        task = api.post('/api/v1/incidents/' + incident['id'] + '/runs', json={'decision_protocol': 'legacy_v22'}).json()
         job = wait_job(api, task['job_id'])
         result = api.get('/api/v1/runs/' + job['result']['run_id']).json()
         assert len(result['tool_calls']) in {3, 6}  # Scope discovery may include host probes by runtime.

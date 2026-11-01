@@ -44,7 +44,17 @@ git checkout main
 
 **方式 B — 源码包 / 发布包（离线机器适用）**
 
-使用开发机导出的 `output/atr-source-*.zip` 或 `output/atr-deploy-*.zip`，内置 `frontend/dist`，不含 `.env` 与密钥。解压即可，无需 git，也无需 Node。
+使用 `python scripts/build_release.py` 生成的 `dist/atr-release-<UTC日期>.zip`；旧的 `output/atr-source-*.zip` / `output/atr-deploy-*.zip` 仍可用。发布包内置 `frontend/dist`，不含 `.env` 与密钥。解压即可，无需 git，也无需 Node。
+
+### 发布包安装（无需 Node）
+
+发布包由 `python scripts/build_release.py` 生成到 `dist/atr-release-<UTC日期>.zip`，内置已构建的 `frontend/dist`，并附带 `install.ps1` / `install.sh`。
+
+1. 把 zip 拷到目标机器，解压到一个空目录。
+2. PowerShell 进入解压目录执行 `.\install.ps1`（sh 环境执行 `sh ./install.sh`）。首次需要联网安装 Python 依赖；已存在的 `.env` 不会被覆盖。
+3. 启动：Windows 执行 `.\scripts\atr.ps1 serve`；sh 环境执行 `sh ./scripts/atr serve`（发布包已保留执行位，也可直接用 `./scripts/atr serve`）。浏览器打开 `http://127.0.0.1:8000`。
+
+发布包已内置 `frontend/dist`，**不要再执行 `npm ci && npm run build`**；构建前端只对 git clone 方式需要。`install.ps1` 只安装依赖并初始化目录，不会自动启动服务。
 
 ## 四、安装与启动（Windows 原生）
 
@@ -197,7 +207,7 @@ V2.2 曾在 WSL Docker Engine 29.1.3 / Compose 1.29.2 实际构建、启动、�
 ## 九、已知注意事项（来自开发机实测）
 
 - 直接 `uv run pytest` 会选错解释器，跑测试用 `python -m uv run python -m pytest`（需要 dev 依赖组：`uv sync --locked --group dev`）。
-- 完整回归当前基线为 1089 passed、0 failed；部署机一般不需要跑全量测试，验收走第四节清单即可。
+- 完整回归当前基线为 1097 passed、0 failed；部署机一般不需要跑全量测试，验收走第四节清单即可。
 - 带中文注释的 PowerShell 脚本须含 UTF-8 BOM（仓库内脚本已满足，勿用记事本改动后另存为无 BOM）。
 - Windows JobObject 分配失败会导致上传任务安全停止，须检查宿主进程限制，不能关闭资源边界继续。
 

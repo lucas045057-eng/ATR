@@ -65,7 +65,7 @@ Set-Location ..
 .\scripts\atr.ps1 serve
 ```
 
-打开 <http://127.0.0.1:8000>。健康检查地址是 `/api/v1/health`，返回版本、构建标识、决策协议、数据目录和前端构建是否存在等诊断字段。可选：`.\scripts\atr.ps1 doctor` 体检（端口、dist、目录、token、Docker），`.\scripts\atr.ps1 backup --out <目录>` 生成停机一致备份。Docker、WSL2、备份恢复与升级步骤统一见 [部署与运维手册](docs/deployment-new-machine-runbook.md)。本地工作台是单操作员模式，不提供互联网发布、多租户或多人权限隔离。
+打开 <http://127.0.0.1:8000>。使用已内置前端产物的发布包时，请按手册的 [发布包安装（无需 Node）](docs/deployment-new-machine-runbook.md#发布包安装无需-node) 一节操作，无需安装 Node。健康检查地址是 `/api/v1/health`，返回版本、构建标识、决策协议、数据目录和前端构建是否存在等诊断字段。可选：`.\scripts\atr.ps1 doctor` 体检（端口、dist、目录、token、Docker），`.\scripts\atr.ps1 backup --out <目录>` 生成停机一致备份。Docker、WSL2、备份恢复与升级步骤统一见 [部署与运维手册](docs/deployment-new-machine-runbook.md)。本地工作台是单操作员模式，不提供互联网发布、多租户或多人权限隔离。
 
 ## 使用流程
 
@@ -122,7 +122,7 @@ python -m uv run python -m pytest -q --basetemp=test-results/local-new-run --jun
 python -m uv run ruff check .
 ```
 
-浏览器流程需要 Playwright Chromium。完整测试会访问隔离夹具；跳过的测试不能视为通过。当前完整回归基线为 1089 passed、0 failed。
+浏览器流程需要 Playwright Chromium。完整测试会访问隔离夹具；跳过的测试不能视为通过。当前完整回归基线为 1097 passed、0 failed。
 
 ## 文档索引
 

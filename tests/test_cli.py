@@ -164,6 +164,58 @@ def test_init_failure_rolls_back_generated_files(project, monkeypatch, capsys):
     assert "已回滚" in capsys.readouterr().out
 
 
+def write_dist(project, manifest=None):
+    dist = project / "frontend" / "dist"
+    dist.mkdir(parents=True)
+    (dist / "index.html").write_text("<div id=\"root\"></div>", encoding="utf-8")
+    if manifest is not None:
+        (dist / "build.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+
+def doctor_checks(project, capsys):
+    result = cli.main(["doctor", "--port", str(free_port()), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    return result, payload, {check["name"]: check for check in payload["checks"]}
+
+
+def test_doctor_warns_when_build_manifest_is_missing(project, capsys):
+    write_dist(project)
+    result, payload, checks = doctor_checks(project, capsys)
+    assert result == 0
+    assert payload["ok"] is True
+    assert checks["前端指纹"]["status"] == "WARN"
+    assert "build.json" in checks["前端指纹"]["detail"]
+
+
+def test_doctor_warns_on_frontend_version_mismatch(project, capsys):
+    write_dist(project, {"version": "0.0.1", "commit": "", "built_at": "2026-01-01T00:00:00Z"})
+    result, payload, checks = doctor_checks(project, capsys)
+    assert result == 0
+    assert payload["ok"] is True
+    assert checks["前端指纹"]["status"] == "WARN"
+    assert "版本不一致" in checks["前端指纹"]["detail"]
+
+
+def test_doctor_warns_on_frontend_commit_mismatch(project, capsys, monkeypatch):
+    write_dist(project, {"version": __version__, "commit": "a" * 40, "built_at": "2026-01-01T00:00:00Z"})
+    monkeypatch.setattr(cli, "_application_sha", lambda root: ("b" * 40, "git"))
+    result, payload, checks = doctor_checks(project, capsys)
+    assert result == 0
+    assert payload["ok"] is True
+    assert checks["前端指纹"]["status"] == "WARN"
+    assert "commit" in checks["前端指纹"]["detail"]
+
+
+def test_version_prints_dist_fingerprint(project, capsys):
+    write_dist(project, {"version": __version__, "commit": "a" * 40, "built_at": "2026-01-01T00:00:00Z"})
+    assert cli.main(["version"]) == 0
+    output = capsys.readouterr().out
+    assert "前端：" in output
+    assert __version__ in output
+    assert "a" * 12 in output
+    assert "2026-01-01T00:00:00Z" in output
+
+
 def test_serve_forces_single_worker_and_passes_host_port(project, monkeypatch, capsys):
     monkeypatch.chdir(project)
     calls = {}
