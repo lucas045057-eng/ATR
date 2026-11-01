@@ -1,4 +1,4 @@
-"""Package committed source and exact running Docker images, without private runtime data."""
+"""Package committed source and the exact running api Docker image, without private runtime data."""
 from __future__ import annotations
 
 import argparse
@@ -19,6 +19,20 @@ packages=sorted([{'name':d.metadata['Name'],'version':d.version} for d in import
 print(json.dumps({'python_version':platform.python_version(),'node_version':subprocess.check_output(['node','--version'],text=True).strip(),'python_packages':packages}))
 '''
 
+OFFLINE_NOTES = '''# ATR 离线镜像包
+
+本包包含已构建的 Docker 镜像、对应源码与许可证清单，不包含运行时数据或密钥。
+
+1. 校验完整性：`sha256sum -c SHA256SUMS`；Windows 可用 `Get-FileHash` 对照 `SHA256SUMS`。
+2. 加载镜像：Linux/macOS 执行 `./load-images.sh`；Windows 执行 `powershell -File load-images.ps1`。
+3. 把本包内的 `compose.images.yaml` 放到 ATR 项目根目录，用离线镜像覆盖 build 并启动：
+   `docker compose -f compose.yaml -f compose.images.yaml up -d`
+4. 需要 Docker Collector 时追加 `--profile docker-demo`，并在 `.env` 中设置真实的 `COLLECTOR_TOKEN`。
+
+---
+
+'''
+
 LOAD_PS = r'''param([string]$Context = 'default')
 $ErrorActionPreference = 'Stop'
 $bundleRoot = $PSScriptRoot
@@ -31,14 +45,14 @@ foreach ($file in $manifest.files) {
 }
 $engine = docker --context $Context info --format '{{.OSType}}'
 if ($LASTEXITCODE -ne 0 -or $engine -ne 'linux') { throw 'A running Linux Docker engine is required' }
-foreach ($service in @('api','web')) {
+foreach ($service in @('api')) {
     $image = $manifest.images.$service
     $current = docker --context $Context image inspect --format '{{.Id}}' $image.tag 2>$null
     if ($LASTEXITCODE -eq 0 -and $current -notin @($image.id,$image.config_id)) { throw 'Existing image tag belongs to another image' }
 }
 docker --context $Context load --input (Join-Path $bundleRoot 'images.tar')
 if ($LASTEXITCODE -ne 0) { throw 'Image import failed; original containers were not changed' }
-foreach ($service in @('api','web')) {
+foreach ($service in @('api')) {
     $image = $manifest.images.$service
     $actual = docker --context $Context image inspect --format '{{.Id}}' $image.tag
     if ($LASTEXITCODE -ne 0 -or $actual -notin @($image.id,$image.config_id)) { throw 'Imported image identity mismatch' }
@@ -88,7 +102,7 @@ def collect_notices(docker, container, directory, name, destination):
                 target.addfile(member, source.extractfile(member))
 
 
-def package(repo: Path, output: Path, context: str, api_sha: str, web_sha: str):
+def package(repo: Path, output: Path, context: str, api_sha: str):
     repo = repo.resolve(strict=True)
     output = output.resolve()
     if output.exists():
@@ -97,12 +111,10 @@ def package(repo: Path, output: Path, context: str, api_sha: str, web_sha: str):
     head = command([*git, 'rev-parse', 'HEAD'], text=True).strip()
     command([*git, 'diff', '--exit-code', 'HEAD'])
     api_sha = command([*git, 'rev-parse', api_sha+'^{commit}'], text=True).strip()
-    web_sha = command([*git, 'rev-parse', web_sha+'^{commit}'], text=True).strip()
-    command([*git, 'diff', '--exit-code', api_sha, head, '--', 'backend', 'pyproject.toml', 'uv.lock', 'third_party'])
-    command([*git, 'diff', '--exit-code', web_sha, head, '--', 'frontend'])
+    command([*git, 'diff', '--exit-code', api_sha, head, '--', 'backend', 'frontend', 'pyproject.toml', 'uv.lock', 'third_party'])
     docker = ['docker', '--context', context]
     images = {}
-    for service, revision in [('api', api_sha), ('web', web_sha)]:
+    for service, revision in [('api', api_sha)]:
         container = 'atr-runtime-'+service+'-1'
         value = json.loads(command([*docker, 'inspect', container], text=True))[0]
         if value['Config']['Labels'].get('com.docker.compose.project') != 'atr-runtime':
@@ -133,7 +145,8 @@ def package(repo: Path, output: Path, context: str, api_sha: str, web_sha: str):
             for image in images.values():
                 record = next(record for record in metadata if image['tag'] in record['RepoTags'])
                 image['config_id'] = 'sha256:'+hashlib.sha256(saved.extractfile(record['Config']).read()).hexdigest()
-        (root/'README.zh-CN.md').write_bytes((repo/'docs/deployment.md').read_bytes())
+        runbook = (repo/'docs/deployment-new-machine-runbook.md').read_text(encoding='utf-8')
+        (root/'README.zh-CN.md').write_text(OFFLINE_NOTES + runbook, encoding='utf-8')
         (root/'runtime-inventory.json').write_text(json.dumps(inventory,indent=2),encoding='utf-8')
         (root/'load-images.ps1').write_text(LOAD_PS,encoding='utf-8')
         (root/'load-images.sh').write_text(LOAD_SH,encoding='utf-8')
@@ -144,8 +157,6 @@ def package(repo: Path, output: Path, context: str, api_sha: str, web_sha: str):
         collect_notices(docker, 'atr-runtime-api-1', '/usr/share', 'doc', notices/'debian.tar.gz')
         command([*docker, 'cp', 'atr-runtime-api-1:/usr/local/lib/python3.12/LICENSE.txt', str(notices/'python-LICENSE.txt')])
         command([*docker, 'cp', 'atr-runtime-api-1:/app/third_party/licenses/node/LICENSE', str(notices/'node-LICENSE.txt')])
-        collect_notices(docker, 'atr-runtime-web-1', '/usr/share', 'licenses', notices/'alpine.tar.gz')
-        collect_notices(docker, 'atr-runtime-web-1', '/usr/share', 'doc', notices/'nginx-docs.tar.gz')
         # Keep Linux notice files in portable archives, excluding symlinks.
         files = sorted(path for path in root.rglob('*') if not path.is_symlink() and path.is_file())
         (root/'SHA256SUMS').write_text(''.join(sha(path)+'  '+path.relative_to(root).as_posix()+'\n' for path in files),encoding='utf-8')
@@ -173,9 +184,8 @@ def main():
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--context',required=True)
     parser.add_argument('--api-source-sha',required=True)
-    parser.add_argument('--web-source-sha',required=True)
     args = parser.parse_args()
-    print(json.dumps(package(args.repo,args.output,args.context,args.api_source_sha,args.web_source_sha)))
+    print(json.dumps(package(args.repo,args.output,args.context,args.api_source_sha)))
 
 
 if __name__ == '__main__':

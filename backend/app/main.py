@@ -5,11 +5,11 @@ import json
 import uuid
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
-from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
+from app import FRONTEND_DIST, __version__
 from app.api.business import router as business_router
 from app.api.health import router as health_router
 from app.api.v1 import router as v1_router
@@ -23,7 +23,12 @@ from app.storage.database import Database
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     SSH_SESSIONS.clear()
-    settings = get_settings()
+    try:
+        settings = get_settings()
+    except Exception as exc:
+        raise RuntimeError(
+            f"ATR 配置无效，无法启动：{exc}。请检查 .env 与 docs/deployment-new-machine-runbook.md"
+        ) from exc
     database = Database(settings.database_path)
     database.initialize()
     coordinator = get_coordinator(database)
@@ -98,7 +103,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="Adaptive Troubleshooting Runtime",
-    version="2.2.0",
+    version=__version__,
     docs_url=None,
     redoc_url=None,
     lifespan=lifespan,
@@ -106,6 +111,5 @@ app = FastAPI(
 app.include_router(health_router, prefix="/api/v1")
 app.include_router(v1_router)
 app.include_router(business_router)
-frontend_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
-if frontend_dist.is_dir():
-    app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="workbench")
+if FRONTEND_DIST.is_dir():
+    app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="workbench")

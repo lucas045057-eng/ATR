@@ -1,0 +1,10 @@
+#!/usr/bin/env sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+if command -v python3 >/dev/null 2>&1; then
+    python=python3
+else
+    python=python
+fi
+export PYTHONPATH="$root/backend${PYTHONPATH:+:$PYTHONPATH}"
+exec "$python" -m uv run --locked --project "$root" python -m app.cli "$@"

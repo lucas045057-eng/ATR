@@ -31,18 +31,26 @@ ATR 不执行自动修复，也不把模型的自报置信度当作根因证据�
 
 ## Windows 本地启动
 
-需要 Python 3.11+。本地资料接入和 Mock 调查不需要 Docker 或外部模型；只有重建前端时才需要 Node.js/npm。
+需要 Python 3.11+。资料接入和 Mock 调查不需要 Docker 或外部模型。
+
+**1. 安装依赖**
 
 ```powershell
 python -m pip install uv
 python -m uv sync --locked
-if (-not (Test-Path .env)) { Copy-Item .env.example .env }
-New-Item -ItemType Directory -Force targets | Out-Null
 ```
 
-编辑 `.env`，至少设置一个长度不少于 32 个字符的 `COLLECTOR_TOKEN`。默认配置会关闭外部模型和 SSH，适合先使用资料接入与本地 Mock 流程。
+**2. 初始化（推荐；`.env` 不是启动前提）**
 
-需要重建前端时：
+```powershell
+.\scripts\atr.ps1 init
+```
+
+`.env` 不存在时生成它并把 `COLLECTOR_TOKEN` 写成随机值（已存在则跳过、不覆盖），同时创建 `data/`、`data/artifacts/`、`targets/`。默认值已本地可跑；只有接入外部模型、SSH、Docker Collector 或额外目标目录时才需要再改 `.env`。
+
+**3. 构建前端（仅 git clone 需要）**
+
+`frontend/dist` 在 `.gitignore` 中：**源码包/发布包已内置 dist；git clone 用户必须先构建一次前端**，这也是 clone 方式唯一需要 Node.js 的步骤。
 
 ```powershell
 Set-Location frontend
@@ -51,13 +59,13 @@ npm run build
 Set-Location ..
 ```
 
-启动本地 API 和工作台：
+**4. 启动**
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-local.ps1
+.\scripts\atr.ps1 serve
 ```
 
-打开 <http://127.0.0.1:8000>。健康检查地址是 `/api/v1/health`。本地工作台是单操作员模式，不提供互联网发布、多租户或多人权限隔离。
+打开 <http://127.0.0.1:8000>。健康检查地址是 `/api/v1/health`，返回版本、构建标识、决策协议、数据目录和前端构建是否存在等诊断字段。可选：`.\scripts\atr.ps1 doctor` 体检（端口、dist、目录、token、Docker），`.\scripts\atr.ps1 backup --out <目录>` 生成停机一致备份。Docker、WSL2、备份恢复与升级步骤统一见 [部署与运维手册](docs/deployment-new-machine-runbook.md)。本地工作台是单操作员模式，不提供互联网发布、多租户或多人权限隔离。
 
 ## 使用流程
 
@@ -110,11 +118,11 @@ Set-Location frontend
 npm ci
 npm run build
 Set-Location ..
-python -m uv run pytest -q --basetemp=test-results/local-new-run --junitxml=test-results/local.xml
+python -m uv run python -m pytest -q --basetemp=test-results/local-new-run --junitxml=test-results/local.xml
 python -m uv run ruff check .
 ```
 
-浏览器流程需要 Playwright Chromium。完整测试会访问隔离夹具；跳过的测试不能视为通过。当前仓库仍有历史基线问题，运行全套检查时应区分既有失败与本次改动造成的回归。
+浏览器流程需要 Playwright Chromium。完整测试会访问隔离夹具；跳过的测试不能视为通过。当前完整回归基线为 1089 passed、0 failed。
 
 ## 文档索引
 
@@ -122,7 +130,7 @@ python -m uv run ruff check .
 - [任务停止策略](docs/ATR-V2.3-TASK-STOP-POLICY.md)
 - [业务接入手册](docs/business-onboarding.md)
 - [安全边界](docs/security-boundaries.md)
-- [部署说明](docs/deployment.md)
+- [部署与运维手册](docs/deployment-new-machine-runbook.md)
 - [预算与用量](docs/context-budget.md)
 - [Demo 手册](docs/demo-runbook.md)
 - [仓库精简报告](docs/repository-slimming-report.md)

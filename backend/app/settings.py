@@ -14,9 +14,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False)
 
-    database_path: Path = Path("/data/runtime.sqlite3")
-    repository_roots: str = "/demo,/repos"
-    collector_url: str = "http://collector:8090"
+    database_path: Path = Path("./data/runtime.sqlite3")
+    repository_roots: str = "./demo"
+    collector_url: str = "http://127.0.0.1:8090"
     collector_token: SecretStr = SecretStr("")
     operator_id: str = "local-operator"
     model_provider: str = "openai-compatible"
@@ -131,7 +131,6 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     settings = Settings()
-    settings.validate_secrets()
     settings.health_url_allowlist()
     for root in settings.repository_root_paths():
         if not root.exists() or not root.is_dir():

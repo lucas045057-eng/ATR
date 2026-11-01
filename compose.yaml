@@ -4,14 +4,14 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
-    env_file: .env
+    env_file: [{path: .env, required: false}]
     environment:
       DATABASE_PATH: /data/runtime.sqlite3
       REPOSITORY_ROOTS: /demo,/repos
       COLLECTOR_URL: http://collector:8090
       ARTIFACT_ROOT: /data/artifacts
     ports:
-      - "127.0.0.1:28000:8000"
+      - "127.0.0.1:${ATR_HOST_PORT:-8000}:8000"
     volumes:
       - runtime-data:/data
       - ./demo:/demo:ro
@@ -30,7 +30,7 @@ services:
       context: .
       dockerfile: collector/Dockerfile
     environment:
-      COLLECTOR_TOKEN: ${COLLECTOR_TOKEN:?Set COLLECTOR_TOKEN in .env}
+      COLLECTOR_TOKEN: ${COLLECTOR_TOKEN:-}
       DOCKER_HOST: unix:///var/run/docker.sock
     volumes:
       - ${DOCKER_SOCKET_PATH:-/var/run/docker.sock}:/var/run/docker.sock:ro
@@ -44,14 +44,6 @@ services:
       interval: 15s
       timeout: 3s
       retries: 3
-  web:
-    build:
-      context: .
-      dockerfile: frontend/Dockerfile
-    ports:
-      - "127.0.0.1:28080:80"
-    depends_on: [api]
-    networks: [runtime]
 volumes:
   runtime-data:
 networks:

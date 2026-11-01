@@ -4,7 +4,7 @@ This runbook uses two isolated example stacks. System A is Python + MySQL + Ngin
 
 ## 1. Start the workbench and clean baselines
 
-From the project directory, copy `.env.example` to `.env` and replace both sample tokens with distinct private random values of at least 32 characters. Do not commit `.env`. Start the workbench first so it creates the private Docker network:
+From the project directory, copy `.env.example` to `.env` and replace `COLLECTOR_TOKEN` with a private random value of at least 32 characters (this is the only token; it is required for the `docker-demo` profile). Do not commit `.env`. Start the workbench first so it creates the private Docker network:
 
 ```sh
 docker compose --profile docker-demo up --build -d
@@ -26,7 +26,7 @@ curl http://127.0.0.1:18081/health
 curl http://127.0.0.1:18081/record
 ```
 
-In the workbench at `http://127.0.0.1:8080`, open **系统图谱** and onboard `system-a` and `system-b`, each with `compose.yaml`. The Compose project names match the explicit `-p` names above so the private collector can map runtime containers.
+In the workbench at `http://127.0.0.1:8000`, open **系统图谱** and onboard `system-a` and `system-b`, each with `compose.yaml`. The Compose project names match the explicit `-p` names above so the private collector can map runtime containers.
 
 ## 2. Create and verify a Candidate from System A
 

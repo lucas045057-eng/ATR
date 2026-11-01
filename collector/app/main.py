@@ -4,6 +4,7 @@ import hashlib
 import os
 import re
 import secrets
+from contextlib import asynccontextmanager
 from functools import lru_cache
 from typing import Any
 
@@ -14,8 +15,21 @@ from requests.exceptions import RequestException
 
 from .redaction import redact_text, safe_text
 
-app = FastAPI(title="ATR Read-only Collector", docs_url=None, redoc_url=None)
 TOKEN = os.environ.get("COLLECTOR_TOKEN", "")
+
+
+def _token_is_private(value: str) -> bool:
+    return len(value) >= 32 and "replace-this" not in value
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    if not _token_is_private(TOKEN):
+        raise RuntimeError("COLLECTOR_TOKEN must be set to a private value of at least 32 characters")
+    yield
+
+
+app = FastAPI(title="ATR Read-only Collector", docs_url=None, redoc_url=None, lifespan=lifespan)
 PROJECT_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$")
 CONTAINER_RE = re.compile(r"^[a-f0-9]{12,64}$")
 MAX_LOG_BYTES = 48_000
@@ -27,7 +41,7 @@ def client() -> docker.DockerClient:
 
 
 def authorize(authorization: str | None) -> None:
-    if len(TOKEN) < 32 or not authorization or not secrets.compare_digest(authorization, f"Bearer {TOKEN}"):
+    if not _token_is_private(TOKEN) or not authorization or not secrets.compare_digest(authorization, f"Bearer {TOKEN}"):
         raise HTTPException(status_code=401, detail="Collector authentication required")
 
 

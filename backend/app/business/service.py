@@ -28,6 +28,7 @@ class BusinessService:
     def __init__(self, database, settings):
         self.db, self.settings = database, settings
         self.root = settings.artifact_root.resolve()
+        self.root.mkdir(parents=True, exist_ok=True)
 
     def create(self, request: BusinessCreate):
         business_id = uid()

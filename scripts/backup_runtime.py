@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import tarfile
@@ -13,6 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 PRIVATE_FILES = ('model-configuration.enc', 'model-text-proof.json', 'model-vision-proof.json')
+GIT_SHA = re.compile(r'^[0-9a-f]{7,40}$')
+APPLICATION_VERSION = re.compile(r'^v?\d+\.\d+\.\d+(?:[.\-+][0-9A-Za-z.\-+]+)?$')
 
 
 def encode_blob(value):
@@ -43,64 +46,87 @@ def sha(path):
     return checksum.hexdigest()
 
 
-def backup(data: Path, destination: Path, application_sha: str, compare: Path | None=None):
-    if len(application_sha) not in {7,40} or any(c not in '0123456789abcdef' for c in application_sha):
+def backup(data: Path, destination: Path, application_sha: str, compare: Path | None=None,
+           database: Path | None=None, artifacts: Path | None=None,
+           application_sha_kind: str | None=None):
+    if application_sha_kind not in {None, 'git', 'version'}:
+        raise ValueError('Unknown application SHA kind')
+    if application_sha_kind is None:
+        if GIT_SHA.fullmatch(application_sha):
+            application_sha_kind='git'
+        elif APPLICATION_VERSION.fullmatch(application_sha):
+            application_sha_kind='version'
+        else:
+            raise ValueError('Exact application SHA or version required')
+    elif application_sha_kind=='git' and not GIT_SHA.fullmatch(application_sha):
         raise ValueError('Exact application SHA required')
+    elif application_sha_kind=='version' and not APPLICATION_VERSION.fullmatch(application_sha):
+        raise ValueError('Valid application version required')
     data=data.resolve(strict=True)
-    database=data/'runtime.sqlite3'
-    artifacts=data/'artifacts'
+    database_path=database if database is not None else data/'runtime.sqlite3'
+    artifacts_path=artifacts if artifacts is not None else data/'artifacts'
+    database_symlink=database_path.is_symlink()
+    artifacts_symlink=artifacts_path.is_symlink()
+    database_path=database_path.resolve()
+    artifacts_path=artifacts_path.resolve()
+    private_root=database_path.parent
     destination=destination.resolve()
-    if destination==data or destination.is_relative_to(artifacts.resolve()):
+    if destination in {data, private_root} or destination.is_relative_to(artifacts_path):
         raise ValueError('Backup destination cannot overwrite runtime or artifact files')
-    if destination.exists() or database.is_symlink() or artifacts.is_symlink():
+    if destination.exists() or database_symlink or artifacts_symlink:
         raise ValueError('Fresh destination and regular original paths required')
+    if not database_path.is_file():
+        raise ValueError('Runtime database not found')
+    if not artifacts_path.is_dir():
+        raise ValueError('Artifacts root not found')
     compare = compare.resolve(strict=True) if compare else None
     compared_sha = sha(compare) if compare else None
-    with sqlite3.connect(database.as_uri()+'?mode=rw',uri=True,timeout=10) as lock:
+    with sqlite3.connect(database_path.as_uri()+'?mode=rw',uri=True,timeout=10) as lock:
         lock.execute('BEGIN IMMEDIATE')
         if lock.execute("SELECT COUNT(*) FROM jobs WHERE status IN ('queued','running','waiting_input')").fetchone()[0]:
             raise ValueError('Wait for active work or end waiting investigations before backup')
         if lock.execute("SELECT COUNT(*) FROM diagnosis_runs WHERE status IN ('queued','running','waiting_input')").fetchone()[0]:
             raise ValueError('Active investigation prevents consistent backup')
-        configuration_before = private_signature(data)
+        configuration_before = private_signature(private_root)
         destination.mkdir(parents=True,mode=0o700,exist_ok=False)
         os.chmod(destination,0o700)
         snapshot=destination/'runtime.sqlite3'
-        with sqlite3.connect(database.as_uri()+'?mode=ro',uri=True) as source, sqlite3.connect(snapshot) as target:
+        with sqlite3.connect(database_path.as_uri()+'?mode=ro',uri=True) as source, sqlite3.connect(snapshot) as target:
             source.backup(target)
         os.chmod(snapshot,0o600)
         entries=[]
-        artifact_paths = sorted(artifacts.rglob('*'))
+        artifact_paths = sorted(artifacts_path.rglob('*'))
         archive_path = destination/'artifacts.tar'
         with tarfile.open(archive_path,'w') as archive:
             os.chmod(archive_path, 0o600)
             for path in artifact_paths:
-                if path.is_symlink() or not path.resolve().is_relative_to(artifacts.resolve()):
+                if path.is_symlink() or not path.resolve().is_relative_to(artifacts_path):
                     raise ValueError('Artifact symlink or escaped path prevents backup')
                 if not path.is_file():
                     if not path.is_dir():
                         raise ValueError('Artifact path is not a regular file or directory')
                     continue
-                relative=path.relative_to(data).as_posix()
+                relative='artifacts/'+path.relative_to(artifacts_path).as_posix()
                 entries.append({'path':relative,'bytes':path.stat().st_size,'sha256':sha(path)})
                 archive.add(path,arcname=relative,recursive=False)
                 if sha(path) != entries[-1]['sha256']:
                     raise ValueError('Artifact changed during backup; retry when idle')
         private_files={}
         for name in PRIVATE_FILES:
-            source=data/name
+            source=private_root/name
             if source.is_symlink():
                 raise ValueError('Private configuration path is not a regular file')
             if source.is_file():
                 shutil.copyfile(source,destination/name)
                 os.chmod(destination/name,0o600)
                 private_files[name]=sha(destination/name)
-        if private_signature(data) != configuration_before or any(
+        if private_signature(private_root) != configuration_before or any(
             digest != configuration_before[name] for name, digest in private_files.items()
         ):
             raise ValueError('Model configuration changed during backup; retry when idle')
-        if sorted(artifacts.rglob('*')) != artifact_paths or any(
-            not (data / entry['path']).is_file() or sha(data / entry['path']) != entry['sha256']
+        if sorted(artifacts_path.rglob('*')) != artifact_paths or any(
+            not (artifacts_path / entry['path'].removeprefix('artifacts/')).is_file()
+            or sha(artifacts_path / entry['path'].removeprefix('artifacts/')) != entry['sha256']
             for entry in entries
         ):
             raise ValueError('Artifacts changed during backup; retry when idle')
@@ -135,27 +161,30 @@ def backup(data: Path, destination: Path, application_sha: str, compare: Path | 
             (destination/'new-records.json').write_text(encode_rows(exported),encoding='utf-8')
             os.chmod(destination/'new-records.json',0o600)
         manifest={'schema_version':'atr-private-backup-1','application_sha':application_sha,
+                  'application_sha_kind':application_sha_kind,
                   'created_at':datetime.now(timezone.utc).isoformat(),'schema_migrations':schema,
                   'database_sha256':sha(snapshot),'artifacts':entries,'artifacts_tar_sha256':sha(destination/'artifacts.tar'),
                   'private_configuration_files':private_files,'counts':counts,
                   'comparison_database_sha256':compared_sha, 'blob_json_encoding':'$sqlite_blob_base64',
                   'new_records_sha256':sha(destination/'new-records.json') if compare else None,
                   'new_or_changed_record_counts':{table:len(rows) for table,rows in exported.items()}}
-        if private_signature(data) != configuration_before:
+        if private_signature(private_root) != configuration_before:
             raise ValueError('Model configuration changed before backup completed')
         manifest_path = destination/'manifest.json.tmp'
         manifest_path.write_text(json.dumps(manifest,ensure_ascii=False,indent=2),encoding='utf-8')
         os.chmod(manifest_path,0o600)
         for path in destination.iterdir():
             if path.is_file():
-                with path.open('rb') as stream:
+                # Windows rejects fsync on a read-only handle; backup files are writable.
+                with path.open('rb+') as stream:
                     os.fsync(stream.fileno())
         manifest_path.replace(destination/'manifest.json')
-        directory = os.open(destination, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        if os.name != 'nt':
+            directory = os.open(destination, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
         lock.rollback()
     return {'destination':str(destination),'database_sha256':manifest['database_sha256'],
             'artifact_file_count':len(entries),'new_or_changed_record_counts':manifest['new_or_changed_record_counts']}

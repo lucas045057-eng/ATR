@@ -38,7 +38,12 @@ class CollectorClient:
         self.base = settings.collector_url.rstrip("/")
         self.token = settings.collector_token.get_secret_value()
 
+    def _authorize_config(self) -> None:
+        if len(self.token) < 32 or "replace-this" in self.token:
+            raise ValueError("Set COLLECTOR_TOKEN in .env to a private value of at least 32 characters")
+
     def get(self, path: str, timeout: float = 12) -> Any:
+        self._authorize_config()
         response = httpx.get(self.base + path, headers={"Authorization": f"Bearer {self.token}"}, timeout=timeout)
         response.raise_for_status()
         return response.json()
@@ -52,6 +57,12 @@ class ToolRegistry:
     def __init__(self, db: Database, settings: Settings):
         self.db, self.settings = db, settings
         self.collector = CollectorClient(settings)
+
+    def _collector_get(self, path: str, timeout: float = 12) -> Any:
+        try:
+            return self.collector.get(path, timeout=timeout)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail="COLLECTOR_TOKEN 未配置或无效，Docker 只读工具不可用") from exc
 
     def execute(self, run_id: str, snapshot_id: str, project: str, tool_id: str,
                 arguments: dict[str, Any], target_node_id: str | None = None,
@@ -84,7 +95,7 @@ class ToolRegistry:
             if set(arguments) - arg_keys[tool_id]:
                 raise ValueError("Unsupported tool parameters")
             if tool_id == "compose.status":
-                data = self.collector.get(f"/internal/v1/projects/{project}/containers")[:64]
+                data = self._collector_get(f"/internal/v1/projects/{project}/containers")[:64]
                 payload = {"containers": data}
             elif tool_id == "health.get":
                 url = str(arguments.get("url", ""))
@@ -110,10 +121,10 @@ class ToolRegistry:
                     tail = int(arguments.get("tail", 100))
                     if not 1 <= tail <= 400:
                         raise ValueError("Log tail must be from 1 to 400 lines")
-                    payload = self.collector.get(f"/internal/v1/projects/{project}/containers/{container_id}/logs?tail={tail}")
+                    payload = self._collector_get(f"/internal/v1/projects/{project}/containers/{container_id}/logs?tail={tail}")
                     payload["text"] = sanitize(str(payload.get("text", "")))[:48_000]
                 else:
-                    payload = self.collector.get(f"/internal/v1/projects/{project}/containers/{container_id}/processes")
+                    payload = self._collector_get(f"/internal/v1/projects/{project}/containers/{container_id}/processes")
             payload = sanitize_payload(payload)
             serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
             if purpose == "diagnosis" and budget:

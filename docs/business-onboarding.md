@@ -2,7 +2,7 @@
 
 ## 创建与导入
 
-按 [部署说明](deployment.md) 启动，输入操作员令牌，在“新业务接入”创建名称和描述。无资料也可继续，画像会标记认知不足，自动关联空 System Graph。每个版本持久保存，关闭浏览器不删除档案。
+按 [部署与运维手册](deployment-new-machine-runbook.md) 启动，输入操作员令牌，在“新业务接入”创建名称和描述。无资料也可继续，画像会标记认知不足，自动关联空 System Graph。每个版本持久保存，关闭浏览器不删除档案。
 
 上传 ZIP、TAR/TAR.GZ/TGZ，或 Python/JS/TS、YAML/JSON/TOML、Dockerfile/Compose、Markdown/TXT、配置、PNG/JPG/PDF。原始资料保留于本地，不自动改写脱敏，避免上传私钥与不必要的真实秘密。
 

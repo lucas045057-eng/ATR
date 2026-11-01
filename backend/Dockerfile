@@ -1,4 +1,10 @@
 FROM node:22.23.3-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS archify_node
+FROM node:22.23.3-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS frontend_build
+WORKDIR /src
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY frontend/ ./
+RUN npm run build
 FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=/app
 WORKDIR /app
@@ -18,6 +24,7 @@ RUN python -c "import ctypes; ctypes.CDLL('libseccomp.so.2')" \
         && apt-get -o Acquire::Retries=2 -o Acquire::https::Timeout=20 install --no-install-recommends -y libseccomp2 \
         && rm -rf /var/lib/apt/lists/*)
 COPY backend/app /app/app
+COPY --from=frontend_build /src/dist /frontend/dist
 COPY third_party/licenses /app/third_party/licenses
 COPY third_party/archify /app/third_party/archify
 COPY --from=archify_node /usr/local/bin/node /usr/local/bin/node
