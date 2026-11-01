@@ -20,7 +20,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 INSTALLERS = ("install.ps1", "install.sh")
-EXECUTABLE_FILES = {"install.sh", "scripts/atr"}
+EXECUTABLE_FILES = {"install.sh", "install.ps1", "scripts/atr", "scripts/atr.ps1", "scripts/run-local.sh"}
 TOP_EXCLUDED = {
     ".git", ".venv", "venv", "data", "orbital", "output", "node_modules", "dist",
     "test-results", ".pytest_cache", ".ruff_cache", ".mypy_cache", ".uv-cache",
