@@ -90,11 +90,12 @@ docker compose --profile docker-demo up -d   # 需要真实 COLLECTOR_TOKEN
 
 ## 四、已知限制（未验证的部分，不算通过）
 
-1. **GitHub Actions 未实际执行**：CI 的 dist artifact 上传只做了 YAML 结构验证。
-2. **原生 Linux 完整安装未跑通全流程**：`install.sh` 只在 Git Bash 下验证；Linux 解压后的 0755 权限位已实测。
-3. **P3 未开工**：Docker 单镜像已实际等价达成（单容器出工作台），但未发布镜像；免环境 exe 未做。
-4. **Windows 备份跳过目录 fsync**：成功返回保证逐文件校验，但不承诺目录项抗突然断电。
-5. **e2e 依赖浏览器**：缺 Chromium 时现在会 skip 并提示 `playwright install chromium` 或 `ATR_BROWSER_CHANNEL=chrome`（此前是 34 条误报 error）。
+1. **原生 Linux 完整安装未跑通全流程**：`install.sh` 只在 Git Bash 下验证；Linux 解压后的 0755 权限位已实测。
+2. **P3 未开工**：Docker 单镜像已实际等价达成（单容器出工作台），但未发布镜像；免环境 exe 未做。
+3. **Windows 备份跳过目录 fsync**：成功返回保证逐文件校验，但不承诺目录项抗突然断电。
+4. **e2e 依赖浏览器**：缺 Chromium 时现在会 skip 并提示 `playwright install chromium` 或 `ATR_BROWSER_CHANNEL=chrome`（此前是 34 条误报 error）。
+
+GitHub Actions 已实测通过：提交 `ee9afe2` 触发的 run #29（2026-11-02，11 分 09 秒）在 ubuntu-latest 上完成 `uv sync --locked --group dev`、`uv lock --check`、`ruff check`、`npm ci && npm run build`、dist artifact 上传、`playwright install --with-deps chromium` 与全量 pytest，结论 success。
 
 ## 五、回滚
 
