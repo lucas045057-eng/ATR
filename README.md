@@ -33,6 +33,19 @@ ATR 不执行自动修复，也不把模型的自报置信度当作根因证据�
 
 需要 Python 3.11+。资料接入和 Mock 调查不需要 Docker 或外部模型。
 
+新机器首次运行仓库内的 PowerShell 脚本前，如果提示“在此系统上禁止运行脚本”，先在项目根目录执行：
+
+```powershell
+Get-ChildItem -Recurse -Filter *.ps1 | Unblock-File
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+```
+
+也可以不改执行策略，仅本次绕过：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+```
+
 **1. 安装依赖**
 
 ```powershell

@@ -51,8 +51,21 @@ git checkout main
 发布包由 `python scripts/build_release.py` 生成到 `dist/atr-release-<UTC日期>.zip`，内置已构建的 `frontend/dist`，并附带 `install.ps1` / `install.sh`。
 
 1. 把 zip 拷到目标机器，解压到一个空目录。
-2. PowerShell 进入解压目录执行 `.\install.ps1`（sh 环境执行 `sh ./install.sh`）。首次需要联网安装 Python 依赖；已存在的 `.env` 不会被覆盖。
-3. 启动：Windows 执行 `.\scripts\atr.ps1 serve`；sh 环境执行 `sh ./scripts/atr serve`（发布包已保留执行位，也可直接用 `./scripts/atr serve`）。浏览器打开 `http://127.0.0.1:8000`。
+2. 新机器首次运行脚本前，如提示“在此系统上禁止运行脚本”，在解压目录执行：
+
+   ```powershell
+   Get-ChildItem -Recurse -Filter *.ps1 | Unblock-File
+   Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+   ```
+
+   也可以不改执行策略，仅本次绕过：
+
+   ```powershell
+   powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+   ```
+
+3. PowerShell 进入解压目录执行 `.\install.ps1`（sh 环境执行 `sh ./install.sh`）。首次需要联网安装 Python 依赖；已存在的 `.env` 不会被覆盖。
+4. 启动：Windows 执行 `.\scripts\atr.ps1 serve`；sh 环境执行 `sh ./scripts/atr serve`（发布包已保留执行位，也可直接用 `./scripts/atr serve`）。浏览器打开 `http://127.0.0.1:8000`。
 
 发布包已内置 `frontend/dist`，**不要再执行 `npm ci && npm run build`**；构建前端只对 git clone 方式需要。`install.ps1` 只安装依赖并初始化目录，不会自动启动服务。
 
