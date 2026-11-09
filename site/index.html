@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ATR — 自适应故障调查运行时</title>
+<style>body{font:18px/1.7 system-ui;max-width:800px;margin:10vh auto;padding:24px;background:#f6f8fb;color:#152235}a{color:#195cac}code{overflow-wrap:anywhere}</style>
+</head>
+<body>
+<h1>ATR</h1>
+<p>Adaptive Troubleshooting Runtime：面向单操作员的本地 SRE 故障调查工作台。</p>
+<p>先理解业务资料，再在明确授权范围内只读取证，由 Evidence Gate 判断结论等级。Agent 永不自动修复。</p>
+<p>本页只提供项目说明与部署版本。工作台请在本机运行，不提供互联网访问。</p>
+<p><a href="https://github.com/lucas045057-eng/ATR">项目与使用文档</a> · <a href="https://github.com/lucas045057-eng/ATR/blob/main/docs/ATR-V2.3-DECISION-RUNTIME-ARCHITECTURE.md">架构文档</a></p>
+<p>当前部署：<a id="commit-link"><code id="commit">读取中</code></a></p>
+<p><code id="commit-full"></code></p><p id="status">正在核对版本</p>
+<script>
+window.__ready = (async () => {
+  try {
+    const response = await fetch('./version.json');
+    if (!response.ok) throw new Error('版本读取失败');
+    const version = await response.json();
+    if (!version.ok || !/^[0-9a-f]{40}$/.test(version.commit)) throw new Error('版本无效');
+    document.getElementById('commit').textContent = version.commit.slice(0, 7);
+    document.getElementById('commit-full').textContent = version.commit;
+    document.getElementById('commit-link').href = 'https://github.com/' + version.repo + '/commit/' + version.commit;
+    document.getElementById('status').textContent = '版本已核对';
+  } catch (error) { document.getElementById('status').textContent = '版本读取失败'; }
+})();
+</script>
+</body>
+</html>

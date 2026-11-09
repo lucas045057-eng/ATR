@@ -1,0 +1,64 @@
+name: ship
+
+# main 推送后：先问交付插件"这次要不要发布"（对比线上 version.json 的提交与本次提交）→ 构建 → 生成 version.json
+# （完整 commit SHA）→ 用官方 Pages Action 发布。线上地址的 /version.json 就是交付流水线核对版本的依据。
+#
+# 前置（只需做一次，由有管理权限的人/脚本完成）：仓库 Settings → Pages → Source 选 "GitHub Actions"，
+# 或：gh api -X POST repos/<owner>/<repo>/pages -f build_type=workflow
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# 同一时刻只发布一个；后到的排队而不是取消正在进行的发布
+concurrency:
+  group: ship
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      release: ${{ steps.scope.outputs.release }}
+      superseded: ${{ steps.scope.outputs.superseded }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0 # 交付插件要比较提交先后，需要完整历史
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      # 钉在 agent-autoloop 发布后核实过的完整提交上，不跟分支走
+      - id: scope
+        uses: KKKKhazix/agent-autoloop/plugins/delivery@fade2cee76bd91ed38e889b9a91276fd78e90625
+      - name: 构建（dist/ + version.json）
+        if: steps.scope.outputs.release == 'true' && steps.scope.outputs.superseded != 'true'
+        run: node scripts/site-build.mjs
+      - name: 构建产物自检（version.json 的 commit 必须等于本次提交）
+        if: steps.scope.outputs.release == 'true' && steps.scope.outputs.superseded != 'true'
+        run: |
+          built="$(node -p "require('./dist-site/version.json').commit")"
+          test "$built" = "$GITHUB_SHA" || { echo "version.json 的 commit($built) 不等于 $GITHUB_SHA"; exit 1; }
+      # 不用 configure-pages：它只给需要 base_path 的框架用，纯静态站点用不上，还要额外的 pages: read 权限
+      - if: steps.scope.outputs.release == 'true' && steps.scope.outputs.superseded != 'true'
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+        with:
+          path: dist-site
+
+  deploy:
+    needs: build
+    if: needs.build.outputs.release == 'true' && needs.build.outputs.superseded != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4

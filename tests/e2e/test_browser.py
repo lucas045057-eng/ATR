@@ -40,6 +40,8 @@ def live_server(tmp_path, request):
         yield external.rstrip("/"), tmp_path
         return
     if not (ROOT / "frontend/dist/index.html").exists():
+        if os.environ.get("ATR_REQUIRE_BROWSER") == "1":
+            pytest.fail("浏览器验收必须运行：请先构建前端")
         pytest.skip("先运行前端 npm run build，再执行浏览器验收")
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))

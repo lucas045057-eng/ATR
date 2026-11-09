@@ -1,0 +1,40 @@
+{
+  "repo": "lucas045057-eng/ATR",
+  "internal": [
+    "PROJECT.md",
+    "PROGRESS.md",
+    "QUALITY.md",
+    "docs/**/*.md"
+  ],
+  "check": {
+    "workflow": "check.yml",
+    "job": "check"
+  },
+  "ship": {
+    "workflow": "ship.yml"
+  },
+  "review": {
+    "points": "AGENTS.md",
+    "status": "agent-review",
+    "xhigh": [
+      ".github/**/*.yml",
+      "ops/*.json",
+      "scripts/features.mjs",
+      "scripts/verify-feature.sh",
+      "AGENTS.md"
+    ],
+    "command": [
+      "node",
+      "/home/agent/.agent-autoloop/secretary-tools/codex-review.mjs",
+      "{input}"
+    ]
+  },
+  "health": {
+    "url": "https://lucas045057-eng.github.io/ATR/version.json",
+    "field": "commit",
+    "pattern": "(?P<sha>[0-9a-f]{40})",
+    "require": {
+      "ok": true
+    }
+  }
+}

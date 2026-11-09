@@ -89,3 +89,24 @@ depends on.
 3. `orbital/DECISIONS.md` — what is already settled.
 4. `orbital/LESSONS.md` — recent entries especially.
 5. `orbital/INDEX.md` — where everything lives.
+
+
+## 多 Agent 长期开发约定
+
+交付与功能清单以本新增约定为准；原 Orbital 记忆说明保留。
+目标是维护本地单操作员只读故障调查运行时，不自动修复，不公开部署工作台。
+技术栈：Python ≥3.11 / uv / FastAPI 与 React / TypeScript / npm，Node ≥22。
+首次运行：`bash scripts/init.sh --no-serve`；工作台运行参照 README 的 scripts/atr。
+目录：backend 后端、frontend 工作台、collector 采集、tests 全量测试、site 说明页、docs 文档、ops 交付配置。
+开工前读 PROJECT.md、PROGRESS.md、features.json 与完整权威工单；一轮一个功能项，独立分支，不在 main 提交，不自行合并。
+硬约束：不新增依赖，不扩大权限，不跳过既有测试；不改业务安全边界。质量基线变更必须经 baseline-approved 审批。
+功能状态只由 scripts/verify-feature.sh 写为 passing，不手改 verified.digest。
+验证命令：make check（锁检查、lint、全量测试、前端及说明页构建、端到端与功能复核）；make verify F=Fn。
+
+## 审查要点
+
+核对完整工单验收与不做范围；保留全部测试与断言。确认外部模型默认关闭，授权范围、SSH 固定密钥与只读边界未放宽；不泄露凭据。Pages 仅说明页，version.json 必须包含完整提交号。状态 passing 必须有真实验证与有效 digest，交付配置和工作流变更需基线审批。
+
+## 会话退出清单
+
+运行 make check 与对应功能 verification；如实记录失败和未验收项；更新 PROGRESS.md；核对 git diff 范围、提交推送并核实 PR。导入 PR 只打 baseline-approved，无 deliver；独立验证通过前不宣称接入完成。

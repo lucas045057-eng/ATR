@@ -55,3 +55,39 @@ def test_ambiguous_legacy_owner_stays_historical_until_explicit_run_proof(tmp_pa
         assert compatible_patterns(tx,other,snapshot)==[]
         proof=json.loads(tx.execute('SELECT proof_json FROM experience_ownership').fetchone()[0])
         assert proof['basis']=='run_and_target_business'
+
+
+def test_import_profile_reviews_confirm_reject_roles_and_stale_version(client):
+    from test_business import onboard
+
+    profile = onboard(client)
+    base = f"/api/v1/businesses/{profile['business_id']}"
+    relation = next(d for d in profile['dependencies'] if d['relation'] == 'depends_on')
+    fact_id = relation['fact_id']
+    assert next(f for f in profile['facts'] if f['id'] == fact_id)['verification_status'] == 'pending'
+    assert profile['review_status'] == 'pending'
+
+    def review(current, **payload):
+        response = client.post(base + '/review', json={
+            'expected_version': current['profile_version'], **payload,
+        })
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    confirmed = review(profile, subject_id=fact_id, decision='approve')
+    assert next(f for f in confirmed['facts'] if f['id'] == fact_id)['verification_status'] == 'confirmed'
+    assert confirmed['review_status'] == 'pending'
+    rejected = review(confirmed, subject_id=fact_id, decision='reject')
+    assert next(f for f in rejected['facts'] if f['id'] == fact_id)['verification_status'] == 'rejected'
+    assert all(d['fact_id'] != fact_id for d in rejected['dependencies'])
+    service = rejected['services'][0]
+    corrected = review(rejected, subject_id='service:' + service['name'], decision='set_role', role='worker')
+    assert next(s for s in corrected['services'] if s['name'] == service['name'])['role'] == 'worker'
+    assert any(f['source_type'] == 'Human Verified' and f['predicate'] == 'role'
+               and f['object'] == 'worker' and f['verification_status'] == 'confirmed'
+               for f in corrected['facts'])
+    approved = review(corrected, decision='approve')
+    assert approved['review_status'] == 'approved'
+    assert client.post(base + '/review', json={
+        'expected_version': profile['profile_version'], 'decision': 'approve',
+    }).status_code == 422
