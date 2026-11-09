@@ -53,3 +53,9 @@
 本轮实际相关检查：`node --test tests/lint.test.mjs tests/features.test.mjs` 为 15 passed；浏览器辅助/新夹具单测在强制和可选模式各14 passed；40分钟/600000毫秒/无全局浏览器开关/F12 verification保留的断言通过；make lint（480文件及ruff）和git diff --check通过。缺浏览器强制失败无skip的反例已在本次返工前一续接验证。features.json、可信脚本、业务代码和依赖锁均未修改。
 
 本轮未重跑完整 make check 或全部功能 verification；历史提交的命令通过不作为本轮新提交验收。新一轮完整独立验证及CI结果仍待核实，不合并、发布或登记。
+
+## 收集兼容性追加修复
+
+提交 028b25a 的线上检查发现新增同名 conftest 模块遮蔽根目录辅助模块，导致24项收集错误；此前的定向检查没有覆盖这个问题。本次新增 tests/e2e/__init__.py，将 F12 夹具置于包命名空间，并保留原有平铺测试辅助模块的导入路径。根 conftest、原测试和业务代码不改写。
+
+修复后实际检查：全库 --collect-only 成功收集1120项（只收集，不代表全量执行通过）；相关组合41 passed；包含真实资料接入的跨目录组合15 passed；make build通过，真实浏览器完整接入用例1 passed；make lint通过481文件和ruff。完整make check与全部verification仍交新提交的Pi独立复验。
