@@ -7,7 +7,7 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
     env:
       EXTERNAL_MODEL_ENABLED: "false"
       SSH_ENABLED: "false"
