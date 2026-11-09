@@ -6,11 +6,11 @@
 
 已补齐约定文档、13 项已有功能清单、可信施工入口、质量守卫、完整检查入口、静态说明页与独立 Pages 发布配置。原 AGENTS.md 保留并追加约定；既有业务代码、依赖锁文件、ci.yml 与已有测试断言未删改。只追加审核和资料解包反例测试，并调整浏览器测试夹具使强制验收时缺浏览器/前端构建直接失败。
 
-## 本地验证（2026-11-09）
+## 首次施工本地历史（2026-11-09）
 
 - `make check` 退出 0，保留 uv 锁检查、ruff、全部既有 pytest、前端构建、说明页端到端和功能逐项复核。
 - Node 单元测试：21 passed，0 failed / skipped。
-- 全量 pytest：1110 passed，0 failed / skipped。此轮全量收集后追加的 8 个资料解包反例，由 F1 验证及 make check 的功能复核再次覆盖，F1 最终 48 passed。
+- 早期全量收集记录为 1110 passed；补齐 8 个解包反例后，原提交 edc2c6eda2737111c15e9247647bd53d7691032c 的独立全量结果已核实为 1118 passed（见下方第二次独立报告）。两者对应不同时间的收集结果，不代表本轮新改动已全量验收。
 - F1～F13 均由 scripts/verify-feature.sh 写入 passing，并全部通过最终 recheck。
 - F1 48、F2 44、F3 32、F4 64、F5 100、F6 141、F7 145、F8 7、F9 4、F10 140、F11 30、F12 46 项测试通过；F13 说明页 HTTP/脚本/版本校验通过。
 - 初始环境缺 uv 与 Chromium 运行库，已补齐并核实真实浏览器启动；初次环境失败未记作通过。密钥扫描两处命中均为已核实伪凭据，仅对具体测试文件的具体样本放行。
@@ -31,3 +31,16 @@
 本地曾启动完整检查，约 70% 时因本轮环境切换中断，没有完成结果，不能记为通过。按更新后的 import-build，返工只运行相关配置与浏览器环境检查；完整 make check、全部功能 verification 和最终 Pi 判定留给新提交的独立验证。
 
 本轮相关检查结果：`node scripts/lint.mjs` 通过；`node --test tests/lint.test.mjs` 为 6 passed / 0 failed / 0 skipped；检查 job 名、40 分钟上限、完整 make check 入口和强制浏览器开关的断言通过；当前验证入口的真实沙箱 Chromium 渲染探测退出 0。完整独立验收仍未通过，未运行或未完成的全量检查不计为通过。
+
+
+## 第二次独立报告与本次范围修正（2026-11-09）
+
+提交 edc2c6eda2737111c15e9247647bd53d7691032c 的独立命令全部通过：make check 退出 0、完整 pytest 1118 passed、Node 21 passed、F1～F13 全部通过；但 Pi 最终为 FAIL，指出 40 分钟补充决定缺少其可核实的确认记录、浏览器开关超出 F12 夹具范围和记录层次混淆。不能把命令通过写成接入已验收。
+
+本次移除 Makefile 和 check.yml 的全局 ATR_REQUIRE_BROWSER 设置，只保留方案给定 F12 verification 中的显式开关。原 browser_support.py 及 test_browser_support.py 恢复为 main 原文，不改写既有测试断言；强制浏览器前置检查位于 tests/e2e 的新会话夹具，新增测试保留缺浏览器必须失败的断言。既有 test_browser.py 的前端构建检查仍属于 F12 夹具。
+
+本次相关检查：强制模式和可选模式各 14 passed；用不存在的浏览器路径启动强制模式会在夹具处明确失败，无 skip；make lint 通过，git diff --check 通过。本次没有重跑完整 make check 或全部功能 verification，全量验收留给 Pi。
+
+时限须分层说明：外部验证入口的完整检查/单项命令等待上限是维护侧配置；仓库可信 features.mjs 自己的 FEATURE_TIMEOUT_MS 默认仍为 300000（5 分钟），不能把入口的 30 分钟误写为仓库默认值。GitHub job 129198687974 在 F10 recheck 启动后恰好 300 秒结束该项，最后报告 F10 复核失败；完整 pytest 1118 项已先通过，质量基线守卫也已通过。
+
+40 分钟 job 已获本人批准，不重复询问。待决定的新事项为：是否允许在公开方案追加这项既定决定的确认记录，以及将 CI 的 FEATURE_TIMEOUT_MS 设置为 600000（单项10分钟）。这两项尚未执行；不删检查、不改 verification、不改可信脚本。原 PR 的新一轮独立验证暂不触发，避免在上述缺口仍存在时消耗返工次数。尚未合并、发布或登记。

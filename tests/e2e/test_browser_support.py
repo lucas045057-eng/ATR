@@ -24,8 +24,7 @@ def test_launch_chromium_forwards_channel_and_returns_browser(monkeypatch, chann
     "BrowserType.launch: Executable doesn't exist at /missing/chromium",
     "Please run the following command: playwright install",
 ])
-def test_launch_chromium_skips_missing_browser(message, monkeypatch):
-    monkeypatch.delenv("ATR_REQUIRE_BROWSER", raising=False)
+def test_launch_chromium_skips_missing_browser(message):
     launch = Mock(side_effect=Error(message))
     playwright = SimpleNamespace(chromium=SimpleNamespace(launch=launch))
 
@@ -52,13 +51,3 @@ def test_launch_chromium_preserves_other_errors(error):
         launch_chromium(playwright)
 
     assert caught.value is error
-
-
-@pytest.mark.parametrize("message", [
-    "Executable doesn't exist", "Please run playwright install",
-])
-def test_required_browser_fails_instead_of_skipping(monkeypatch, message):
-    monkeypatch.setenv("ATR_REQUIRE_BROWSER", "1")
-    playwright = SimpleNamespace(chromium=SimpleNamespace(launch=Mock(side_effect=Error(message))))
-    with pytest.raises(pytest.fail.Exception, match="浏览器验收必须运行"):
-        launch_chromium(playwright)

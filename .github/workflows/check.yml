@@ -12,7 +12,6 @@ jobs:
       EXTERNAL_MODEL_ENABLED: "false"
       SSH_ENABLED: "false"
       LITELLM_LOCAL_MODEL_COST_MAP: "True"
-      ATR_REQUIRE_BROWSER: "1"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

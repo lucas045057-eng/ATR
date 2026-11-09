@@ -1,7 +1,6 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := check
 .NOTPARALLEL:
-export ATR_REQUIRE_BROWSER := 1
 export EXTERNAL_MODEL_ENABLED := false
 export SSH_ENABLED := false
 export LITELLM_LOCAL_MODEL_COST_MAP := True
