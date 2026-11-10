@@ -1,0 +1,61 @@
+# 接入进度
+
+方案：[#1](https://github.com/lucas045057-eng/ATR/issues/1)。分析与施工基线：`9fc1dbd1eeb9ba7cf64a44b862e893742b37d267`。
+
+## 已完成的施工
+
+已补齐约定文档、13 项已有功能清单、可信施工入口、质量守卫、完整检查入口、静态说明页与独立 Pages 发布配置。原 AGENTS.md 保留并追加约定；既有业务代码、依赖锁文件、ci.yml 与已有测试断言未删改。只追加审核和资料解包反例测试，并调整浏览器测试夹具使强制验收时缺浏览器/前端构建直接失败。
+
+## 首次施工本地历史（2026-11-09）
+
+- `make check` 退出 0，保留 uv 锁检查、ruff、全部既有 pytest、前端构建、说明页端到端和功能逐项复核。
+- Node 单元测试：21 passed，0 failed / skipped。
+- 早期全量收集记录为 1110 passed；补齐 8 个解包反例后，原提交 edc2c6eda2737111c15e9247647bd53d7691032c 的独立全量结果已核实为 1118 passed（见下方第二次独立报告）。两者对应不同时间的收集结果，不代表本轮新改动已全量验收。
+- F1～F13 均由 scripts/verify-feature.sh 写入 passing，并全部通过最终 recheck。
+- F1 48、F2 44、F3 32、F4 64、F5 100、F6 141、F7 145、F8 7、F9 4、F10 140、F11 30、F12 46 项测试通过；F13 说明页 HTTP/脚本/版本校验通过。
+- 初始环境缺 uv 与 Chromium 运行库，已补齐并核实真实浏览器启动；初次环境失败未记作通过。密钥扫描两处命中均为已核实伪凭据，仅对具体测试文件的具体样本放行。
+
+## 待验收
+
+尚未通过 Pi 独立验证，尚未合并、部署或登记。新增 CI 的 20 分钟上限已实际触发超时；本人已选择「调整后继续」，批准延长至 40 分钟。Pages 来源需由管理员在后续发布前设置为 GitHub Actions，本轮未修改仓库设置。
+
+
+## 第一次返工（2026-11-09）
+
+原提交 da4589ebe1bc3a9380f04c547df08c16c6490e0d 的 Pi 结论为 FAIL：F1～F11 与 F13 通过；沙箱未提供 Chromium，F12 明确失败而非跳过；make check 还触及入口默认单命令 9 分钟时限。GitHub 的完整 pytest 已通过 1118 项，后续功能复核至 F10 时被 20 分钟上限取消。
+
+本次仅将 check.yml 的检查 job 上限改为获准的 40 分钟，并记录本人决定；业务代码、依赖、测试、功能 verification 与 passing/digest 均未改动。
+
+续接期间验证入口已由维护侧更新：沙箱显式使用 /opt/ms-playwright 的预装浏览器，根目录仍只读、用户目录仍遮蔽；完整检查默认时限现为 60 分钟，超时作为环境问题处理，不消耗返工次数。本轮核实其实际可用性，不覆盖维护侧更新。
+
+本地曾启动完整检查，约 70% 时因本轮环境切换中断，没有完成结果，不能记为通过。按更新后的 import-build，返工只运行相关配置与浏览器环境检查；完整 make check、全部功能 verification 和最终 Pi 判定留给新提交的独立验证。
+
+本轮相关检查结果：`node scripts/lint.mjs` 通过；`node --test tests/lint.test.mjs` 为 6 passed / 0 failed / 0 skipped；检查 job 名、40 分钟上限、完整 make check 入口和强制浏览器开关的断言通过；当前验证入口的真实沙箱 Chromium 渲染探测退出 0。完整独立验收仍未通过，未运行或未完成的全量检查不计为通过。
+
+
+## 第二次独立报告与本次范围修正（2026-11-09）
+
+提交 edc2c6eda2737111c15e9247647bd53d7691032c 的独立命令全部通过：make check 退出 0、完整 pytest 1118 passed、Node 21 passed、F1～F13 全部通过；但 Pi 最终为 FAIL，指出 40 分钟补充决定缺少其可核实的确认记录、浏览器开关超出 F12 夹具范围和记录层次混淆。不能把命令通过写成接入已验收。
+
+本次移除 Makefile 和 check.yml 的全局 ATR_REQUIRE_BROWSER 设置，只保留方案给定 F12 verification 中的显式开关。原 browser_support.py 及 test_browser_support.py 恢复为 main 原文，不改写既有测试断言；强制浏览器前置检查位于 tests/e2e 的新会话夹具，新增测试保留缺浏览器必须失败的断言。既有 test_browser.py 的前端构建检查仍属于 F12 夹具。
+
+本次相关检查：强制模式和可选模式各 14 passed；用不存在的浏览器路径启动强制模式会在夹具处明确失败，无 skip；make lint 通过，git diff --check 通过。本次没有重跑完整 make check 或全部功能 verification，全量验收留给 Pi。
+
+时限须分层说明：外部验证入口的完整检查/单项命令等待上限是维护侧配置；仓库可信 features.mjs 自己的 FEATURE_TIMEOUT_MS 默认仍为 300000（5 分钟），不能把入口的 30 分钟误写为仓库默认值。GitHub job 129198687974 在 F10 recheck 启动后恰好 300 秒结束该项，最后报告 F10 复核失败；完整 pytest 1118 项已先通过，质量基线守卫也已通过。
+
+40 分钟 job 已获本人批准，不重复询问。后续补充事项为：在公开方案追加既定决定的确认记录，并将 CI 的 FEATURE_TIMEOUT_MS 设置为 600000（单项10分钟）。本人于 2026-11-09 22:50:47（UTC+08:00）选择「按建议补记并继续」，已明确批准公开补充确认记录及 CI 单项10分钟设置。本次只新增 check.yml 的 FEATURE_TIMEOUT_MS=600000，完整 job 仍为40分钟；不删检查、不改 verification、不改可信脚本。公开确认记录已发布并核实原方案正文哈希不变，相关检查完成后推送原PR新提交并交Pi独立全量复验。尚未合并、发布或登记。
+
+
+## 补充决定执行（2026-11-09）
+
+公开补充确认：[秘书转录的已确认决定](https://github.com/lucas045057-eng/ATR/issues/1#issuecomment-6743070134)。已核实评论为项目所有者账户发布、原方案正文 SHA256 不变；包含完整 job 40 分钟及 CI 单项10分钟的明确批准。
+
+本轮实际相关检查：`node --test tests/lint.test.mjs tests/features.test.mjs` 为 15 passed；浏览器辅助/新夹具单测在强制和可选模式各14 passed；40分钟/600000毫秒/无全局浏览器开关/F12 verification保留的断言通过；make lint（480文件及ruff）和git diff --check通过。缺浏览器强制失败无skip的反例已在本次返工前一续接验证。features.json、可信脚本、业务代码和依赖锁均未修改。
+
+本轮未重跑完整 make check 或全部功能 verification；历史提交的命令通过不作为本轮新提交验收。新一轮完整独立验证及CI结果仍待核实，不合并、发布或登记。
+
+## 收集兼容性追加修复
+
+提交 028b25a 的线上检查发现新增同名 conftest 模块遮蔽根目录辅助模块，导致24项收集错误；此前的定向检查没有覆盖这个问题。本次新增 tests/e2e/__init__.py，将 F12 夹具置于包命名空间，并保留原有平铺测试辅助模块的导入路径。根 conftest、原测试和业务代码不改写。
+
+修复后实际检查：全库 --collect-only 成功收集1120项（只收集，不代表全量执行通过）；相关组合41 passed；包含真实资料接入的跨目录组合15 passed；make build通过，真实浏览器完整接入用例1 passed；make lint通过481文件和ruff。完整make check与全部verification仍交新提交的Pi独立复验。

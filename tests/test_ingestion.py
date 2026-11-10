@@ -103,3 +103,54 @@ def test_limits_and_masquerade(tmp_path):
     text = tmp_path / "bad.yaml"
     text.write_text("x: &x [a]\ny: *x")
     assert inspect_file(text, "bad.yaml", 10000)["parse_state"] == "partial_parser_error"
+
+
+def test_import_rejects_zip_encryption_flag_before_reading(tmp_path):
+    source = make_zip(tmp_path, {'plain.txt': 'fixture'})
+    data = bytearray(source.read_bytes())
+    central = data.index(b'PK\x01\x02')
+    data[6] |= 1
+    data[central + 8] |= 1
+    source.write_bytes(data)
+    with pytest.raises(UnsafeArtifact, match='加密'):
+        unpack(source, tmp_path / 'encrypted', 'source.zip', LIMITS)
+
+
+@pytest.mark.parametrize('kind', ['zip', 'tar', 'tar.gz'])
+def test_import_rejects_casefold_duplicate_archive_paths(tmp_path, kind):
+    import io
+
+    source = tmp_path / ('source.' + kind)
+    if kind == 'zip':
+        with zipfile.ZipFile(source, 'w') as archive:
+            for name in ['source.txt', 'SOURCE.txt']:
+                archive.writestr(name, 'fixture')
+    else:
+        with tarfile.open(source, 'w:gz' if kind == 'tar.gz' else 'w') as archive:
+            for name in ['source.txt', 'SOURCE.txt']:
+                member = tarfile.TarInfo(name)
+                member.size = 7
+                archive.addfile(member, io.BytesIO(b'fixture'))
+    with pytest.raises(UnsafeArtifact, match='重复路径'):
+        unpack(source, tmp_path / 'duplicate', source.name, LIMITS)
+
+
+@pytest.mark.parametrize('files,limits', [
+    ({'a/b/c.txt': 'x'}, {'depth': 2}),
+    ({'a.txt': 'xxx'}, {'file_bytes': 2}),
+    ({'a.txt': 'xx', 'b.txt': 'xx'}, {'total_bytes': 3}),
+])
+def test_import_archive_depth_and_byte_limits(tmp_path, files, limits):
+    source = make_zip(tmp_path, files)
+    with pytest.raises(UnsafeArtifact, match='超限'):
+        unpack(source, tmp_path / 'limited', 'source.zip', {**LIMITS, **limits})
+
+
+def test_import_archive_timeout_is_enforced_before_reading(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    source = make_zip(tmp_path, {'a.txt': 'fixture'})
+    ticks = iter([0, 10])
+    monkeypatch.setattr('app.business.ingestion.time', SimpleNamespace(monotonic=lambda: next(ticks)))
+    with pytest.raises(UnsafeArtifact, match='耗时超限'):
+        unpack(source, tmp_path / 'timeout', 'source.zip', LIMITS)

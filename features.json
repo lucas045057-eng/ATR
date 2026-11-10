@@ -1,0 +1,147 @@
+{
+  "features": [
+    {
+      "id": "F1",
+      "behavior": "业务资料接入：支持 ZIP、TAR/TAR.GZ、源码、配置、文档和常见图片/PDF；解包和读取有大小、深度、文件数和超时限制，拒绝路径穿越、链接、设备、重复路径、加密成员和超限内容",
+      "verification": "uv run --locked pytest -q tests/test_ingestion.py tests/test_profile_security.py tests/test_media_optional.py tests/ab_v1/test_media_pipeline.py",
+      "state": "passing",
+      "issue": 1,
+      "verified": {
+        "at": "2026-11-09T08:09:43.098Z",
+        "digest": "b8e66a61264afec0b002ff737b9586847c232486c5014d0d2a7f54181ae690d0"
+      }
+    },
+    {
+      "id": "F2",
+      "behavior": "静态理解与业务图谱：解析服务、角色、模块、接口、依赖、配置和来源，保存文件摘要与版本，生成带来源、未知项和冲突的业务图，可用 Archify 可视化；源码可按路径、符号和关键词检索有限上下文",
+      "verification": "uv run --locked pytest -q tests/test_business.py tests/ab_v1/test_languages.py tests/ab_v1/test_archify_bridge.py tests/ab_v1/test_endpoint_mapping.py",
+      "state": "passing",
+      "issue": 1,
+      "verified": {
+        "at": "2026-11-09T08:00:19.717Z",
+        "digest": "aae4af27e5bedee30b3b346c4db8bea4369a49eca276987833a7b88a7e1b6192"
+      }
+    },
+    {
+      "id": "F3",
+      "behavior": "业务档案人工审核：逐条确认/否决关系、修正角色、确认档案版本；关键事实未经人工确认不生效",
+      "verification": "uv run --locked pytest -q tests/ab_v1/test_business_experience.py tests/test_optional_review_notes.py",
+      "state": "passing",
+      "issue": 1,
+      "verified": {
+        "at": "2026-11-09T08:00:23.119Z",
+        "digest": "d90dd466cebff4cbff56438459b39b7160bb206c03c02ab1ded74f19c60ddf34"
+      }
+    },
+    {
+      "id": "F4",
+      "behavior": "运行范围与授权：Mock、Docker 只读、SSH 只读目标；候选匹配只排序，操作员确认绑定后才算授权，未确认对象不能深读",
+      "verification": "uv run --locked pytest -q tests/test_v22_scope.py tests/test_v22_scope_edges.py tests/ab_v1/test_persistent_scope.py tests/test_run_target_binding.py tests/test_target_reference_contract.py",
+      "state": "passing",
+      "issue": 1,
+      "verified": {
+        "at": "2026-11-09T08:01:26.251Z",
+        "digest": "7e909251471f26bf49c9b69d5b80b4493ad73058c213aa6396b7d47d49018d3f"
+      }
+    },
+    {
+      "id": "F5",
+      "behavior": "SSH 只读安全：固定主机公钥校验，禁用自动接收未知密钥、agent、自由命令、PTY、SCP/SFTP 和 sudo；forced_gateway 与 standard_ssh_readonly 两种模式",
+      "verification": "uv run --locked pytest -q tests/test_ssh_password.py tests/test_ssh_protocol.py tests/test_standard_ssh.py tests/test_v22_gateway.py tests/ab_v1/test_credential_channel.py",
+      "state": "passing",
+      "issue": 1,
+      "verified": {
+        "at": "2026-11-09T08:01:39.915Z",
+        "digest": "82142f96b0ec45f70fe2dd2d56e0c002a8e54362d444fd2d44e70d9d1c8ba1e3"
+      }
+    },
+    {
+      "id": "F6",
+      "behavior": "故障调查：ab_v1 自适应调查（normal / graph_adaptive）及 graph_only / graph_pattern 对照模式；模型只能从 Runtime 提供的已授权 action_id 中选动作，受任务停止策略约束",
+      "verification": "uv run --locked pytest -q tests/test_investigation.py tests/ab_v1/test_direct_investigation.py tests/ab_v1/test_offline_investigation.py tests/test_v22_adaptive.py tests/test_v22_adaptive_edges.py tests/test_v23_decision_runtime.py tests/test_task_stop_policy.py",
+      "state": "passing",
+      "issue": 1,
+      "verified": {
+        "at": "2026-11-09T08:02:29.284Z",
+        "digest": "7f16b1261b7625f0f646881b758e53911116b2294918201126b5bc8d4eaa8b4b"
+      }
+    },
+    {
+      "id": "F7",
+      "behavior": "Evidence Gate：区分直接故障、根因、未解决、范围内未观察到故障和证据缺口；模型自报置信度不作为根因证据",
+      "verification": "uv run --locked pytest -q tests/test_v22_verification.py tests/ab_v1/test_result_evaluator.py tests/test_final_reference_contract.py tests/test_decision_contract_consistency.py",
+      "state": "passing",
+      "issue": 1,
+      "verified": {
+        "at": "2026-11-09T08:02:48.514Z",
+        "digest": "6f894c4709f6927bc0672219afc7b4fec612f1d7d7ae8f6689b76a9a942edcd7"
+      }
+    },
+    {
+      "id": "F8",
+      "behavior": "经验复用：记录修复事实、执行允许的健康 GET 验证、经人工审核后才形成 Candidate / Trusted Pattern；Agent 不实施修复",
+      "verification": "uv run --locked pytest -q tests/test_v22_knowledge.py tests/test_trusted_pattern.py",
+      "state": "passing",
+      "issue": 1,
+      "verified": {
+        "at": "2026-11-09T08:02:58.966Z",
+        "digest": "62af916e727cd27a759e401eab61993f8d6d507225565b8cb266b33579042d8f"
+      }
+    },
+    {
+      "id": "F9",
+      "behavior": "评估：成对的 Graph / Graph + Pattern 记录，指标来自持久化 Run，不预置结果",
+      "verification": "uv run --locked pytest -q tests/test_v22_evaluation.py",
+      "state": "passing",
+      "issue": 1,
+      "verified": {
+        "at": "2026-11-09T08:03:03.292Z",
+        "digest": "a9d292406d9d4254807a15b5088302cd42270cc6438a5423c0d039f54087af19"
+      }
+    },
+    {
+      "id": "F10",
+      "behavior": "外部模型：默认关闭，显式启用后才调用；发送前脱敏；记录模型调用、Token、读取量和费用估算的预算账本",
+      "verification": "uv run --locked pytest -q tests/test_model_isolation.py tests/test_model_responses.py tests/test_model_output_compatibility.py tests/test_v22_model_http.py tests/test_v22_model_redaction.py tests/test_budget.py tests/test_budget_diagnostics.py tests/test_provider_governance.py tests/ab_v1/test_model_configuration.py",
+      "state": "passing",
+      "issue": 1,
+      "verified": {
+        "at": "2026-11-09T08:07:25.514Z",
+        "digest": "9cb3234a0b82b197883bf2dcecbf17ab2f4f1256c5d98dc35bc4fe1f5f8028f9"
+      }
+    },
+    {
+      "id": "F11",
+      "behavior": "命令行与部署：init / serve / doctor / backup，健康检查接口返回版本与诊断字段，发布包构建",
+      "verification": "uv run --locked pytest -q tests/test_cli.py tests/test_deployment_defaults.py tests/test_release.py tests/test_baseline.py",
+      "state": "passing",
+      "issue": 1,
+      "verified": {
+        "at": "2026-11-09T08:07:27.820Z",
+        "digest": "ffb5d124f42e48ac197d88089c594b346e2ae100abf9b4e11b6015ac00bcd82b"
+      }
+    },
+    {
+      "id": "F12",
+      "behavior": "本地工作台网页：前端能构建，浏览器流程（接入、范围、调查、模型错误、SSH 表单）可走通",
+      "verification": "cd frontend && npm ci && npm run build && cd .. && ATR_REQUIRE_BROWSER=1 uv run --locked pytest -q tests/e2e",
+      "state": "passing",
+      "issue": 1,
+      "verified": {
+        "at": "2026-11-09T08:09:14.156Z",
+        "digest": "a9e3936e4b331bbd3ea40925423449c04d18f9cdea25c277814bd5c834600657"
+      }
+    },
+    {
+      "id": "F13",
+      "behavior": "Pages 说明页：首页显示项目简介和当前部署的短提交号；`/version.json` 的 commit 是本次构建的完整 40 位 SHA",
+      "verification": "node scripts/site-build.mjs && node scripts/site-e2e.mjs all",
+      "state": "passing",
+      "issue": 1,
+      "verified": {
+        "at": "2026-11-09T08:09:19.292Z",
+        "digest": "5f98321bf680bbedb826d51456e66567a0ea480bf03568ad852ce37e0d807d17"
+      }
+    }
+  ]
+}

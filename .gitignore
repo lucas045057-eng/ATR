@@ -22,3 +22,6 @@ test-results/
 orbital/
 output/
 uploads/
+
+# 接入说明页构建产物
+/dist-site/
