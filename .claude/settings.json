@@ -1,6 +1,7 @@
 {
   "permissions": {
     "allow": [
+      "Read(~/.agent-autoloop/worker/runs/**)",
       "Bash(git:*)",
       "Bash(make:*)",
       "Bash(node:*)",
@@ -36,7 +37,15 @@
       "Read(~/.config/gh/**)",
       "Read(~/.proxy.env)",
       "Read(~/.claude/**)",
-      "Read(~/.agent-autoloop/**)"
+      "Read(~/.agent-autoloop/config.json*)",
+      "Read(~/.agent-autoloop/secrets.env)",
+      "Read(~/.agent-autoloop/master.key)",
+      "Read(~/.agent-autoloop/hub.db*)",
+      "Read(~/.agent-autoloop/rules.json)",
+      "Read(~/.agent-autoloop/source-*.key)",
+      "Read(~/.agent-autoloop/secretary-tools/**)",
+      "Read(~/.agent-autoloop/secretary-sender/**)",
+      "Read(~/.agent-autoloop/worker/usage/**)"
     ]
   }
 }
